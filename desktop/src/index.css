@@ -1,0 +1,33 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --bg: 249 250 251;
+    --surface: 255 255 255;
+    --text: 17 24 39;
+    --muted: 107 114 128;
+    --accent: 70 130 169;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: 17 24 39;
+      --surface: 31 41 55;
+      --text: 243 244 246;
+      --muted: 156 163 175;
+      --accent: 154 203 230;
+    }
+  }
+
+  body {
+    @apply bg-[rgb(var(--bg))] text-[rgb(var(--text))] antialiased;
+  }
+}
+
+@layer utilities {
+  .surface {
+    @apply bg-[rgb(var(--surface))];
+  }
+}

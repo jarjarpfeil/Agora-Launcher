@@ -1,0 +1,48 @@
+name: Nightly Compiler
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install compiler dependencies
+        run: pip install -r compiler/requirements.txt
+
+      - name: Compile registry database
+        run: python compiler/compile.py --out registry.db
+        env:
+          ED25519_PRIVATE_KEY: ${{ secrets.ED25519_PRIVATE_KEY }}
+
+      - name: Upload registry artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: registry-artifacts
+          path: |
+            registry.db
+            registry.db.sig
+          if-no-files-found: error
+
+      # Placeholder for release asset deployment. Requires a release token secret
+      # and a deployment script (e.g., via gh CLI) that creates or updates a
+      # tagged release such as registry-YYYY-MM-DD and attaches the two files.
+      # - name: Upload to GitHub Release Asset
+      #   run: python scripts/deploy_release_assets.py
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}

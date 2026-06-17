@@ -1,0 +1,110 @@
+name: "Submit a Mod"
+description: "Propose a new mod or asset for the curated registry."
+title: "[MOD] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### 📋 Mod Submission Form
+        Please fill every required field accurately. All submissions are reviewed by curators before merging.
+  - type: input
+    id: mod_id
+    attributes:
+      label: "Registry ID"
+      description: "Lowercase, hyphenated unique slug."
+      placeholder: "e.g., my-new-mod"
+    validations:
+      required: true
+  - type: input
+    id: name
+    attributes:
+      label: "Display Name"
+      placeholder: "e.g., My New Mod"
+    validations:
+      required: true
+  - type: dropdown
+    id: content_type
+    attributes:
+      label: "Content Type"
+      options:
+        - mod
+        - pack
+        - shader
+        - resourcepack
+        - server
+        - datapack
+        - world
+    validations:
+      required: true
+  - type: input
+    id: author
+    attributes:
+      label: "Author or Organization"
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: "License (SPDX identifier)"
+      placeholder: "e.g., LGPL-3.0, MIT, Apache-2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: download_strategy
+    attributes:
+      label: "Download Strategy"
+      description: "github_release is preferred; modrinth_id is a supplementary fallback."
+      options:
+        - github_release
+        - modrinth_id
+        - direct_hash
+    validations:
+      required: true
+  - type: input
+    id: source_identifier
+    attributes:
+      label: "Source Identifier"
+      description: "GitHub owner/repo, Modrinth project ID, or direct URL."
+    validations:
+      required: true
+  - type: input
+    id: modrinth_id
+    attributes:
+      label: "Modrinth Project ID (if applicable)"
+  - type: input
+    id: sha256
+    attributes:
+      label: "SHA-256 Hash"
+      description: "Required for direct_hash. Leave blank for github_release/modrinth_id to let the compiler populate it."
+  - type: textarea
+    id: package_signatures
+    attributes:
+      label: "Java Package Signatures"
+      description: "One package prefix per line."
+      placeholder: "com.example.mymod\nnet.example.mod"
+    validations:
+      required: true
+  - type: textarea
+    id: categories
+    attributes:
+      label: "Categories"
+      description: "Comma-separated list of base and community categories."
+      placeholder: "optimization, rendering, client-only"
+    validations:
+      required: true
+  - type: textarea
+    id: curator_note
+    attributes:
+      label: "Curator Note"
+      description: "Technical summary, compatibility notes, and why this belongs in the registry."
+    validations:
+      required: true
+  - type: input
+    id: icon_url
+    attributes:
+      label: "Icon URL"
+  - type: textarea
+    id: gallery_urls
+    attributes:
+      label: "Gallery URLs"
+      description: "One URL per line."

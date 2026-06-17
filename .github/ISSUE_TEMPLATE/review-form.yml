@@ -1,0 +1,40 @@
+name: "Submit a Mod Review"
+description: "Leave a professional technical review for a curated asset."
+body:
+  - type: markdown
+    attributes:
+      value: |
+        > **📜 Platform Code of Engagement**
+        >
+        > This platform is a curated asset repository, not a general discussion forum or social media feed. We built this ecosystem to keep modding open, high-quality, and hyper-focused.
+        >
+        > **Rules of Engagement (Zero Tolerance):**
+        > - Comments must strictly address the technical performance, stability, features, or usability of the mod or asset in question.
+        > - No memes, no off-topic banter, no update-begging ("1.21 when?"), no philosophical discussions.
+        > - No cultural, political, or social drama. Leave it at the door.
+        > - No aggression, entitlement, or personal attacks against mod creators or curators.
+        > - Violations result in immediate and permanent removal from the registry's review system.
+        >
+        > If you want to socialize, share memes, or debate off-topic things, visit our community spaces instead:
+        > 🔗 [Project Discord] | 🔗 [Project Matrix/Lemmy]
+  - type: input
+    id: mod_id
+    attributes:
+      label: "Mod Registry ID"
+      placeholder: "e.g., sodium"
+    validations:
+      required: true
+  - type: textarea
+    id: review_text
+    attributes:
+      label: "Your Technical Review (50 character minimum)"
+      placeholder: "Describe your experience with this asset's performance, stability, or features..."
+    validations:
+      required: true
+  - type: checkboxes
+    id: guidelines_check
+    attributes:
+      label: "Community Affirmation"
+      options:
+        - label: "I confirm this review contains no toxic language, version begging, memes, or off-topic commentary."
+          required: true

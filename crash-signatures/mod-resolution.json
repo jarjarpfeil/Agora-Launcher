@@ -1,0 +1,10 @@
+{
+  "id": "mod-resolution",
+  "name": "Mod Resolution Failure",
+  "regex_pattern": "ModResolutionException|incompatible mod set",
+  "solution_markdown": "Fabric could not resolve the installed mod set. A dependency is missing, the wrong Minecraft version is loaded, or two mods declare incompatible dependencies.",
+  "action_button": {
+    "label": "Review Installed Mods",
+    "mod_id": null
+  }
+}

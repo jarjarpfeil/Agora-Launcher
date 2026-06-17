@@ -1,0 +1,21 @@
+{
+  "id": "lithium",
+  "name": "Lithium",
+  "content_type": "mod",
+  "author": "CaffeineMC",
+  "license": "LGPL-3.0",
+  "download_strategy": "github_release",
+  "source_identifier": "CaffeineMC/lithium",
+  "sha256": null,
+  "package_signatures": ["me.jellysquid.mods.lithium"],
+  "base_categories": ["optimization", "server-side"],
+  "community_categories": ["performance-boost", "essentials", "gameplay-logic"],
+  "curator_note": "Server-side optimization suite that improves game logic, mob AI, and block ticking without changing vanilla behavior. Best run alongside Sodium.",
+  "icon_url": "https://raw.githubusercontent.com/CaffeineMC/lithium/main/assets/icon.png",
+  "gallery_urls": [],
+  "governance": {
+    "immune": false,
+    "override_justification": null,
+    "allow_comments": true
+  }
+}

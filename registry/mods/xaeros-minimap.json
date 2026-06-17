@@ -1,0 +1,22 @@
+{
+  "id": "xaeros-minimap",
+  "name": "Xaero's Minimap",
+  "content_type": "mod",
+  "author": "Xaero96",
+  "license": "LicenseRef-ARR",
+  "download_strategy": "modrinth_id",
+  "source_identifier": "1bokaNcj",
+  "modrinth_id": "1bokaNcj",
+  "sha256": null,
+  "package_signatures": ["xaero.minimap"],
+  "base_categories": ["utility", "navigation"],
+  "community_categories": ["client-only", "minimap", "vanilla-plus"],
+  "curator_note": "Lightweight client-side minimap with waypoints. A solid vanilla-plus navigation aid; disable for a purist experience.",
+  "icon_url": "https://cdn.modrinth.com/data/1bokaNcj/icon.png",
+  "gallery_urls": [],
+  "governance": {
+    "immune": false,
+    "override_justification": null,
+    "allow_comments": true
+  }
+}

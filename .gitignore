@@ -1,0 +1,14 @@
+.venv
+node_modules
+target
+dist
+registry.db
+registry.db.sig
+*.log
+.DS_Store
+__pycache__
+.idea
+.vscode
+.env
+.env.*
+!.env.example

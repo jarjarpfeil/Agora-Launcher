@@ -1,0 +1,29 @@
+{
+  "loader_hashes": {
+    "fabric": {
+      "fabric-loader-0.15.11-1.21.json": "sha256:ba55c147092e009ef417560f3fc56a8936b395e0efc1ee8bc19d0e48030c40b9",
+      "fabric-loader-0.15.10-1.21.json": null
+    },
+    "neoforge": {
+      "neoforge-21.0.0-beta.json": null
+    },
+    "quilt": {
+      "quilt-loader-0.26.0-1.21.json": "sha256:2cfcdc85cf11ab8373b0250bafadc4b28c5efd8e1e6fa282dd9e0e1a4a7fcf7b"
+    },
+    "forge": {
+      "forge-1.21-51.0.0.json": null
+    }
+  },
+  "domain_allowlist": [
+    "meta.fabricmc.net",
+    "maven.fabricmc.net",
+    "neoforged.net",
+    "maven.neoforged.net",
+    "meta.quiltmc.org",
+    "maven.quiltmc.org",
+    "minecraftforge.net",
+    "files.minecraftforge.net"
+  ],
+  "verified_loaders": ["fabric", "quilt"],
+  "_readme": "NeoForge and Forge version-JSON hashes must be curated before verification is enabled. Do not trust null hashes upstream without manual review."
+}

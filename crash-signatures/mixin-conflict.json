@@ -1,0 +1,10 @@
+{
+  "id": "mixin-conflict",
+  "name": "Mixin Injection Conflict",
+  "regex_pattern": "Mixin apply failed",
+  "solution_markdown": "Two mods are conflicting over the same game class. The crash log names the offending Mixin class; identify which mods contain it and disable one to verify.",
+  "action_button": {
+    "label": "Open Crash Log",
+    "mod_id": null
+  }
+}

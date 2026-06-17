@@ -1,0 +1,40 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "default_agent": "code",
+  "snapshot": false,
+  "permission": {
+    "bash": "allow",
+    "edit": {
+      "registry/**": "allow",
+      "compiler/**": "allow",
+      "desktop/**": "allow",
+      "web/**": "allow",
+      "scripts/**": "allow",
+      "AGENTS.md": "allow",
+      "README.md": "allow",
+      ".github/**": "allow",
+      ".kilo/**": "allow",
+      "*.lock": "deny",
+      "*": "ask"
+    },
+    "read": "allow",
+    "skill": "allow",
+    "task": "allow",
+    "external_directory": "deny"
+  },
+  "skills": {
+    "paths": ["./.kilo/skills"]
+  },
+  "mcp": {
+    "fine-wine-launcher": {
+      "type": "remote",
+      "url": "http://127.0.0.1:39741/sse",
+      "headers": {
+        "Authorization": "Bearer ${env.LAUNCHER_MCP_TOKEN}"
+      },
+      "enabled": false,
+      "timeout": 10000
+    }
+  },
+  "instructions": ["./AGENTS.md"]
+}

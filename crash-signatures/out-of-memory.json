@@ -1,0 +1,10 @@
+{
+  "id": "out-of-memory",
+  "name": "Out of Memory",
+  "regex_pattern": "java\\.lang\\.OutOfMemoryError",
+  "solution_markdown": "Minecraft ran out of heap memory. Increase the memory allocation in **Instance Settings → JVM Arguments** (e.g., `-Xmx6G` or higher), then try again.",
+  "action_button": {
+    "label": "Open JVM Settings",
+    "mod_id": null
+  }
+}

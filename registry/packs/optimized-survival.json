@@ -1,0 +1,50 @@
+{
+  "pack_id": "optimized-survival",
+  "name": "Community Optimized Survival",
+  "minecraft_version": "1.21",
+  "loader": "fabric",
+  "loader_version": "0.15.11",
+  "mods": [
+    {
+      "id": "sodium",
+      "source": "manifest",
+      "status": "required"
+    },
+    {
+      "id": "lithium",
+      "source": "manifest",
+      "status": "required"
+    },
+    {
+      "id": "starlight",
+      "source": "manifest",
+      "status": "required"
+    },
+    {
+      "id": "fabric-api",
+      "source": "manifest",
+      "status": "required"
+    },
+    {
+      "id": "iris",
+      "source": "manifest",
+      "status": "recommended",
+      "description": "Enable this if you want to use shader packs."
+    },
+    {
+      "id": "xaeros-minimap",
+      "source": "modrinth_id",
+      "modrinth_id": "1bokaNcj",
+      "version": "24.2.0",
+      "status": "optional",
+      "description": "Client-side minimap. Disable for a pure vanilla feel."
+    }
+  ],
+  "override_url": null,
+  "curator_note": "A curated, performance-focused survival pack for 1.21. Vanilla+ aesthetic with dramatically improved framerates.",
+  "governance": {
+    "immune": false,
+    "override_justification": null,
+    "allow_comments": true
+  }
+}
