@@ -46,5 +46,6 @@
     "immune": false,
     "override_justification": null,
     "allow_comments": true
-  }
+  },
+  "sha256": "de1d1fc288c327a2980c11dfbb370976f66f309a7dfcd72a746d82bc9623f51b"
 }

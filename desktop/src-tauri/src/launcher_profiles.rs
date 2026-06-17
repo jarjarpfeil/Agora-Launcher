@@ -130,9 +130,14 @@ fn atomic_write(profiles_path: &std::path::Path, root: &Value) -> LauncherResult
 
     std::fs::write(&tmp, serialized).map_err(|_| LauncherError::ProfileWriteFailed)?;
 
-    // Back up the current on-disk file before replacing it.
+    // Back up the current on-disk file before replacing it — but only if the
+    // live file is valid JSON. If the live file is corrupt, copying it over
+    // `.bak` would poison the known-good backup with corruption.
     if profiles_path.exists() {
-        let _ = std::fs::copy(profiles_path, &bak);
+        let live = std::fs::read_to_string(profiles_path).unwrap_or_default();
+        if serde_json::from_str::<Value>(&live).is_ok() {
+            let _ = std::fs::copy(profiles_path, &bak);
+        }
     }
 
     std::fs::rename(&tmp, profiles_path).map_err(|_| LauncherError::ProfileWriteFailed)?;

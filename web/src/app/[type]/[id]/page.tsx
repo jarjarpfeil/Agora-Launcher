@@ -40,13 +40,21 @@ export default async function DetailPage({ params }: DetailPageProps) {
         </p>
       </div>
 
-      {item.icon_url && (
-        <img
-          src={item.icon_url}
-          alt={`${item.name} icon`}
-          className="h-24 w-24 rounded-xl border object-contain dark:border-gray-700"
-        />
-      )}
+      {item.icon_url && (() => {
+        // Validate image URL scheme (§4.1c #3) — only https/data are safe.
+        let url: URL | null = null;
+        try { url = new URL(item.icon_url); } catch { /* invalid */ }
+        const safe = url && (url.protocol === 'https:' || url.protocol === 'data:');
+        if (!safe) return null;
+        return (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={item.icon_url!}
+            alt={`${item.name} icon`}
+            className="h-24 w-24 rounded-xl border object-contain dark:border-gray-700"
+          />
+        );
+      })()}
 
       <div className="rounded-xl border bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
         <h2 className="mb-2 text-xl font-semibold">Curator note</h2>

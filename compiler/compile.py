@@ -244,16 +244,22 @@ def link_item_category(conn: sqlite3.Connection, item_id: str, category_id: str)
 # ---------------------------------------------------------------------------
 
 
-def validate_sha256(raw: Any) -> None:
-    """Ensure *raw* is either null/empty or exactly 64 hex characters."""
+def validate_sha256(raw: Any) -> str:
+    """Ensure *raw* is a valid 64-char hex string. Reject None/empty.
+
+    Per §2.1, sha256 is required for all download strategies. The compiler
+    must either populate it (from GitHub/Modrinth API) or fail loudly.
+    """
     if raw is None or raw == "":
-        return
+        logger.error("sha256 is required and must not be empty or null")
+        raise SystemExit(1)
     if not isinstance(raw, str):
-        logger.error("sha256 must be a string or null, got %s", type(raw).__name__)
+        logger.error("sha256 must be a string, got %s", type(raw).__name__)
         raise SystemExit(1)
     if not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
         logger.error("sha256 must be exactly 64 hex characters: %s", raw)
         raise SystemExit(1)
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +278,32 @@ def default_compatible_versions(item: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def manifest_mtime(path: Path) -> str:
-    """Return the manifest file's modification time as an ISO-8601 UTC string."""
+def manifest_date_added(path: Path) -> str:
+    """Return the date *path* first appeared in the registry.
+
+    Uses `git log` to find the author date of the first commit touching the
+    file. Falls back to filesystem mtime for untracked local-dev files.
+
+    This is deterministic across CI runs (actions/checkout preserves git history),
+    unlike st_mtime which is overwritten to checkout time on every clone.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--reverse", "--format=%aI", "--", str(path)],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        first_line = result.stdout.strip().splitlines()
+        if first_line:
+            return first_line[0]
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback for untracked files during local development.
     mtime = path.stat().st_mtime
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
 
@@ -288,8 +318,7 @@ def insert_registry_item(conn: sqlite3.Connection, item: dict[str, Any], path: P
     immunity_reason = governance.get("override_justification")
     allow_comments = bool(governance.get("allow_comments", True))
 
-    sha256 = item.get("sha256") or ""
-    validate_sha256(sha256)
+    sha256 = validate_sha256(item.get("sha256"))
     gallery = item.get("gallery_urls", [])
     compatible_versions = item.get("compatible_versions") or default_compatible_versions(item)
 
@@ -320,7 +349,7 @@ def insert_registry_item(conn: sqlite3.Connection, item: dict[str, Any], path: P
             None,
             item.get("icon_url"),
             json.dumps(gallery, separators=(",", ":")),
-            manifest_mtime(path),
+            manifest_date_added(path),
             json.dumps(compatible_versions, separators=(",", ":")),
         ),
     )

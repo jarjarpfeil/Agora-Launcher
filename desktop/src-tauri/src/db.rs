@@ -230,6 +230,44 @@ pub fn count_instances_by_loader_version(
     .map_err(Into::into)
 }
 
+/// Normalize a mod pair so the lexicographically smaller ID always comes first.
+/// This ensures (sodium, iris) and (iris, sodium) map to the same row.
+pub fn normalize_pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// Record a co-crash for a pair of mods (§4.1b).
+pub fn record_co_crash(conn: &Connection, mod_a: &str, mod_b: &str) -> anyhow::Result<()> {
+    let (a, b) = normalize_pair(mod_a, mod_b);
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO local_crash_telemetry (mod_a_id, mod_b_id, crash_count, last_seen_at)
+         VALUES (?1, ?2, 1, ?3)
+         ON CONFLICT(mod_a_id, mod_b_id) DO UPDATE SET
+             crash_count = crash_count + 1,
+             last_seen_at = excluded.last_seen_at",
+        rusqlite::params![a, b, now],
+    )?;
+    Ok(())
+}
+
+/// Purge stale crash telemetry records per §4.1b retention rules:
+/// - Records older than 90 days.
+/// - Pairs with crash_count < 2.
+pub fn purge_stale_crash_telemetry(conn: &Connection) -> anyhow::Result<()> {
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(90);
+    conn.execute(
+        "DELETE FROM local_crash_telemetry
+         WHERE last_seen_at < ?1 OR crash_count < 2",
+        rusqlite::params![cutoff.to_rfc3339()],
+    )?;
+    Ok(())
+}
+
 fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceRow> {
     Ok(InstanceRow {
         instance_id: row.get(0)?,

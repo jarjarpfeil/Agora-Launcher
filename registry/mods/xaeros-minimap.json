@@ -7,10 +7,19 @@
   "download_strategy": "modrinth_id",
   "source_identifier": "1bokaNcj",
   "modrinth_id": "1bokaNcj",
-  "sha256": null,
-  "package_signatures": ["xaero.minimap"],
-  "base_categories": ["utility", "navigation"],
-  "community_categories": ["client-only", "minimap", "vanilla-plus"],
+  "sha256": "acba53bff782903d64ed8d92fc1f21116830f389c003eb37bc49579980f333bf",
+  "package_signatures": [
+    "xaero.minimap"
+  ],
+  "base_categories": [
+    "utility",
+    "navigation"
+  ],
+  "community_categories": [
+    "client-only",
+    "minimap",
+    "vanilla-plus"
+  ],
   "curator_note": "Lightweight client-side minimap with waypoints. A solid vanilla-plus navigation aid; disable for a purist experience.",
   "icon_url": "https://cdn.modrinth.com/data/1bokaNcj/icon.png",
   "gallery_urls": [],

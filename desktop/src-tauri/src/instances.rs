@@ -250,6 +250,12 @@ pub fn launch_instance<R: tauri::Runtime>(
 
     let launcher_path = mojang::resolve_launcher_path(user_override.as_deref())?;
 
+    // Update last_launched_at BEFORE spawning the game (§9.1).
+    // This prevents crash-prompt loops where the interceptor sees a stale
+    // last_launched_at and re-offers "Launch Anyway" indefinitely.
+    let now = chrono::Utc::now().to_rfc3339();
+    let _ = db::touch_last_launched(&conn, &sanitized, &now);
+
     let profile_id = profile_id_for(&sanitized);
     std::process::Command::new(&launcher_path)
         .arg("--profile")
@@ -257,8 +263,6 @@ pub fn launch_instance<R: tauri::Runtime>(
         .spawn()
         .map_err(|_| LauncherError::LaunchFailed)?;
 
-    let now = chrono::Utc::now().to_rfc3339();
-    let _ = db::touch_last_launched(&conn, &sanitized, &now);
     Ok(())
 }
 

@@ -49,6 +49,35 @@ export interface LoaderVersionSummary {
   file_type: string;
 }
 
+export interface RegistryItem {
+  id: string;
+  name: string;
+  content_type: string;
+  download_strategy: string;
+  source_identifier: string;
+  sha256: string;
+  upvotes: number;
+  downvotes: number;
+  net_score: number;
+  velocity: number;
+  status: string;
+  is_immune: boolean;
+  immunity_reason: string | null;
+  allow_comments: boolean;
+  icon_url: string | null;
+  gallery_urls_json: string | null;
+  date_added: string | null;
+  compatible_versions_json: string | null;
+}
+
+export interface CategoryInfo {
+  id: string;
+  display_name: string;
+  is_community: boolean;
+}
+
+export type SortOption = 'net_score' | 'velocity' | 'most_downvoted' | 'newest' | 'most_upvoted';
+
 export interface CreateInstanceRequest {
   name: string;
   instance_id: string;
@@ -74,8 +103,23 @@ export const listLoaderVersions = (loader: string, mcVersion: string) =>
     loader,
     mcVersion,
   });
-export const queryRegistry = (sql: string, params?: unknown[]) =>
-  invoke<Record<string, unknown>[]>('query_registry', { sql, params });
+export const browseItems = (
+  contentType?: string,
+  category?: string,
+  sort?: SortOption,
+  modrinthEnabled?: boolean,
+  limit?: number,
+) =>
+  invoke<RegistryItem[]>('browse_items', {
+    contentType,
+    category,
+    sort,
+    modrinthEnabled,
+    limit,
+  });
+export const getRegistryItem = (itemId: string) =>
+  invoke<RegistryItem | null>('get_registry_item', { itemId });
+export const listCategories = () => invoke<CategoryInfo[]>('list_categories');
 export const getSetting = (key: string) =>
   invoke<unknown | null>('get_setting', { key });
 export const setSetting = (key: string, value: unknown) =>

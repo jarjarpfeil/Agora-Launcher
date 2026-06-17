@@ -6,10 +6,19 @@
   "license": "Apache-2.0",
   "download_strategy": "github_release",
   "source_identifier": "FabricMC/fabric",
-  "sha256": null,
-  "package_signatures": ["net.fabricmc.fabric"],
-  "base_categories": ["library", "fabric"],
-  "community_categories": ["required-by-many", "essentials", "api"],
+  "sha256": "70bb221a2edc77ed7fbd0547d05f09627e7609a39ffb1e2d10cb7aa8f6108e41",
+  "package_signatures": [
+    "net.fabricmc.fabric"
+  ],
+  "base_categories": [
+    "library",
+    "fabric"
+  ],
+  "community_categories": [
+    "required-by-many",
+    "essentials",
+    "api"
+  ],
   "curator_note": "Core hooks and APIs required by the vast majority of Fabric mods on modern versions. Install before adding content mods.",
   "icon_url": "https://raw.githubusercontent.com/FabricMC/fabric/1.21/assets/icon.png",
   "gallery_urls": [],

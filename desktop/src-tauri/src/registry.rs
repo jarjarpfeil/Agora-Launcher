@@ -1,0 +1,243 @@
+use crate::error::{LauncherError, LauncherResult};
+use crate::paths;
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use tauri::Manager;
+
+/// A registry item row for browsing (§6.2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistryItem {
+    pub id: String,
+    pub name: String,
+    pub content_type: String,
+    pub download_strategy: String,
+    pub source_identifier: String,
+    pub sha256: String,
+    pub upvotes: i64,
+    pub downvotes: i64,
+    pub net_score: i64,
+    pub velocity: f64,
+    pub status: String,
+    pub is_immune: bool,
+    pub immunity_reason: Option<String>,
+    pub allow_comments: bool,
+    pub icon_url: Option<String>,
+    pub gallery_urls_json: Option<String>,
+    pub date_added: Option<String>,
+    pub compatible_versions_json: Option<String>,
+}
+
+/// Valid sort options for browsing (§6.2).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOption {
+    NetScore,
+    Velocity,
+    MostDownvoted,
+    Newest,
+    MostUpvoted,
+}
+
+impl Default for SortOption {
+    fn default() -> Self {
+        Self::NetScore
+    }
+}
+
+impl SortOption {
+    fn order_clause(&self) -> &'static str {
+        match self {
+            Self::NetScore => "ORDER BY net_score DESC",
+            Self::Velocity => "ORDER BY velocity DESC",
+            Self::MostDownvoted => "ORDER BY downvotes DESC",
+            Self::Newest => "ORDER BY date_added DESC",
+            Self::MostUpvoted => "ORDER BY upvotes DESC",
+        }
+    }
+}
+
+/// Open the cached registry.db read-only.
+pub fn open_registry<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> LauncherResult<Connection> {
+    let path = paths::registry_db_path(app).map_err(|_| LauncherError::RegistryMissing)?;
+    if !path.exists() {
+        return Err(LauncherError::RegistryMissing);
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| LauncherError::RegistryMissing)?;
+    conn.pragma_update(None, "query_only", "ON")
+        .map_err(|_| LauncherError::RegistryMissing)?;
+    Ok(conn)
+}
+
+/// Browse registry items with optional filters (§6.2).
+///
+/// When `modrinth_enabled` is false, modrinth-sourced items are excluded.
+pub fn browse_items(
+    conn: &Connection,
+    content_type: Option<&str>,
+    category: Option<&str>,
+    sort: &SortOption,
+    modrinth_enabled: bool,
+    limit: i64,
+) -> LauncherResult<Vec<RegistryItem>> {
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut where_parts: Vec<String> = Vec::new();
+
+    if let Some(ct) = content_type {
+        where_parts.push("ri.content_type = ?".to_string());
+        params.push(Box::new(ct.to_string()));
+    }
+    if let Some(cat) = category {
+        where_parts.push("ic.category_id = ?".to_string());
+        params.push(Box::new(cat.to_string()));
+    }
+    if !modrinth_enabled {
+        where_parts.push("ri.download_strategy != 'modrinth_id'".to_string());
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    let join = if category.is_some() {
+        " JOIN item_categories ic ON ri.id = ic.item_id"
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        "SELECT ri.id, ri.name, ri.content_type, ri.download_strategy,
+                ri.source_identifier, ri.sha256, ri.upvotes, ri.downvotes,
+                ri.net_score, ri.velocity, ri.status, ri.is_immune,
+                ri.immunity_reason, ri.allow_comments, ri.icon_url,
+                ri.gallery_urls_json, ri.date_added, ri.compatible_versions_json
+         FROM registry_items ri{join}{where_clause} {order} LIMIT ?",
+        join = join,
+        where_clause = where_clause,
+        order = sort.order_clause(),
+    );
+
+    params.push(Box::new(limit));
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| LauncherError::Generic {
+        code: "ERR_INVALID_QUERY".to_string(),
+        message: e.to_string(),
+    })?;
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), row_to_item)
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?);
+    }
+    Ok(out)
+}
+
+/// Fetch a single registry item by ID.
+pub fn get_item_by_id(conn: &Connection, item_id: &str) -> LauncherResult<Option<RegistryItem>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, content_type, download_strategy,
+                    source_identifier, sha256, upvotes, downvotes,
+                    net_score, velocity, status, is_immune,
+                    immunity_reason, allow_comments, icon_url,
+                    gallery_urls_json, date_added, compatible_versions_json
+             FROM registry_items WHERE id = ?1",
+        )
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let mut rows = stmt
+        .query_map([item_id], row_to_item)
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    if let Some(r) = rows.next() {
+        Ok(Some(r.map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Category info for the browse filter UI.
+#[derive(Debug, Clone, Serialize)]
+pub struct CategoryInfo {
+    pub id: String,
+    pub display_name: String,
+    pub is_community: bool,
+}
+
+/// List all categories from the registry.
+pub fn list_categories(conn: &Connection) -> LauncherResult<Vec<CategoryInfo>> {
+    let mut stmt = conn
+        .prepare("SELECT id, display_name, is_community FROM categories ORDER BY display_name")
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CategoryInfo {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                is_community: row.get(2)?,
+            })
+        })
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?);
+    }
+    Ok(out)
+}
+
+fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegistryItem> {
+    Ok(RegistryItem {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        content_type: row.get(2)?,
+        download_strategy: row.get(3)?,
+        source_identifier: row.get(4)?,
+        sha256: row.get(5)?,
+        upvotes: row.get(6)?,
+        downvotes: row.get(7)?,
+        net_score: row.get(8)?,
+        velocity: row.get(9)?,
+        status: row.get(10)?,
+        is_immune: row.get(11)?,
+        immunity_reason: row.get(12)?,
+        allow_comments: row.get(13)?,
+        icon_url: row.get(14)?,
+        gallery_urls_json: row.get(15)?,
+        date_added: row.get(16)?,
+        compatible_versions_json: row.get(17)?,
+    })
+}

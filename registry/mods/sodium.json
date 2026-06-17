@@ -6,10 +6,20 @@
   "license": "LGPL-3.0",
   "download_strategy": "github_release",
   "source_identifier": "CaffeineMC/sodium",
-  "sha256": null,
-  "package_signatures": ["me.jellysquid.mods.sodium", "net.caffeine.sodium"],
-  "base_categories": ["optimization", "rendering"],
-  "community_categories": ["client-only", "performance-boost", "essentials"],
+  "sha256": "ee9d62778c8b664aa8501af83ec4738e01d20f2cdca133208c7bf66cbcaa37b8",
+  "package_signatures": [
+    "me.jellysquid.mods.sodium",
+    "net.caffeine.sodium"
+  ],
+  "base_categories": [
+    "optimization",
+    "rendering"
+  ],
+  "community_categories": [
+    "client-only",
+    "performance-boost",
+    "essentials"
+  ],
   "curator_note": "Essential rendering engine replacing legacy OpenGL pipelines. Significantly boosts framerates on nearly all hardware. Incompatible with OptiFine; use Iris for shader support instead.",
   "icon_url": "https://raw.githubusercontent.com/CaffeineMC/sodium/main/assets/icon.png",
   "gallery_urls": [

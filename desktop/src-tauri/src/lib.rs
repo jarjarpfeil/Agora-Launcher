@@ -8,6 +8,7 @@ pub mod loader_manifests;
 pub mod models;
 pub mod mojang;
 pub mod paths;
+pub mod registry;
 pub mod state;
 
 use state::LauncherState;
@@ -21,7 +22,9 @@ pub fn run() {
         .plugin(tauri_plugin_sql::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             commands::greet,
-            commands::query_registry,
+            commands::browse_items,
+            commands::get_registry_item,
+            commands::list_categories,
             commands::list_instances,
             commands::get_instance_detail,
             commands::create_instance,
