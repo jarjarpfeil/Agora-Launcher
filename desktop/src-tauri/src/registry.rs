@@ -2,7 +2,6 @@ use crate::error::{LauncherError, LauncherResult};
 use crate::paths;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
 
 /// A registry item row for browsing (§6.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]

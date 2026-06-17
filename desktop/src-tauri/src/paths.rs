@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use tauri::Manager;
 
 /// Resolve the official Minecraft data directory for the current OS.
@@ -68,6 +68,11 @@ pub fn instance_manifest_path<R: tauri::Runtime>(
 /// Path to the cached read-only registry database.
 pub fn registry_db_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> anyhow::Result<PathBuf> {
     Ok(app_data_dir(app)?.join("registry.db"))
+}
+
+/// Path to the cached registry.db Ed25519 signature file.
+pub fn registry_sig_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> anyhow::Result<PathBuf> {
+    Ok(app_data_dir(app)?.join("registry.db.sig"))
 }
 
 /// Path to the mutable local state database.

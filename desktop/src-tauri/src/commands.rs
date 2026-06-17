@@ -174,3 +174,46 @@ pub async fn set_setting(
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
 }
+
+/// Check GitHub Releases for a registry.db update and download + verify it.
+#[tauri::command]
+pub async fn check_registry_update(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    force: Option<bool>,
+) -> LauncherResult<crate::registry_sync::RegistryStatus> {
+    crate::registry_sync::check_and_download_update(&app, force.unwrap_or(false)).await
+}
+
+/// Return current registry status without network check.
+#[tauri::command]
+pub async fn get_registry_status(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<crate::registry_sync::RegistryStatus> {
+    Ok(crate::registry_sync::get_status(&app))
+}
+
+/// Extract a pack override zip into an instance directory with full sanitization.
+///
+/// Implements §7.2: directory whitelist, zip-bomb limits, banned extensions,
+/// and Zip Slip protection.
+#[tauri::command]
+pub async fn extract_overrides(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    zip_path: String,
+    instance_id: String,
+) -> LauncherResult<crate::override_sanitizer::ExtractionResult> {
+    let zip = std::path::PathBuf::from(zip_path);
+    let dest = crate::paths::instance_dir(&app, &instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    tokio::task::spawn_blocking(move || {
+        crate::override_sanitizer::extract_overrides(&zip, &dest)
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_OVERRIDE_FAILED".to_string(),
+        message: "Extraction task failed.".to_string(),
+    })?
+}

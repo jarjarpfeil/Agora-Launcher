@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   issues: write
   discussions: write
 
@@ -39,10 +39,8 @@ jobs:
             registry.db.sig
           if-no-files-found: error
 
-      # Placeholder for release asset deployment. Requires a release token secret
-      # and a deployment script (e.g., via gh CLI) that creates or updates a
-      # tagged release such as registry-YYYY-MM-DD and attaches the two files.
-      # - name: Upload to GitHub Release Asset
-      #   run: python scripts/deploy_release_assets.py
-      #   env:
-      #     GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      # Upload to GitHub Release Assets as a tagged release (registry-YYYY-MM-DD).
+      - name: Deploy to GitHub Release
+        run: python scripts/deploy_release_assets.py
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

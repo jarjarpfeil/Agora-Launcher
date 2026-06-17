@@ -7,8 +7,10 @@ pub mod launcher_profiles;
 pub mod loader_manifests;
 pub mod models;
 pub mod mojang;
+pub mod override_sanitizer;
 pub mod paths;
 pub mod registry;
+pub mod registry_sync;
 pub mod state;
 
 use state::LauncherState;
@@ -25,6 +27,9 @@ pub fn run() {
             commands::browse_items,
             commands::get_registry_item,
             commands::list_categories,
+            commands::check_registry_update,
+            commands::get_registry_status,
+            commands::extract_overrides,
             commands::list_instances,
             commands::get_instance_detail,
             commands::create_instance,
@@ -39,6 +44,9 @@ pub fn run() {
             tauri::async_runtime::block_on(async move {
                 if let Err(e) = db::init_local_state_db(&handle) {
                     eprintln!("Failed to initialize local state: {}", e);
+                }
+                if let Err(e) = crate::registry_sync::seed_from_local_build(&handle) {
+                    eprintln!("Failed to seed registry: {}", e);
                 }
             });
             Ok(())

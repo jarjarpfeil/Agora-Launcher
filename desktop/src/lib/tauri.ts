@@ -78,6 +78,22 @@ export interface CategoryInfo {
 
 export type SortOption = 'net_score' | 'velocity' | 'most_downvoted' | 'newest' | 'most_upvoted';
 
+export interface RegistryStatus {
+  has_cached_db: boolean;
+  cached_tag: string | null;
+  cached_schema_version: number | null;
+  latest_tag: string | null;
+  update_available: boolean;
+  checked: boolean;
+  message: string;
+}
+
+export interface ExtractionResult {
+  extracted: string[];
+  skipped: string[];
+  total_bytes_written: number;
+}
+
 export interface CreateInstanceRequest {
   name: string;
   instance_id: string;
@@ -120,6 +136,11 @@ export const browseItems = (
 export const getRegistryItem = (itemId: string) =>
   invoke<RegistryItem | null>('get_registry_item', { itemId });
 export const listCategories = () => invoke<CategoryInfo[]>('list_categories');
+export const checkRegistryUpdate = (force?: boolean) =>
+  invoke<RegistryStatus>('check_registry_update', { force });
+export const getRegistryStatus = () => invoke<RegistryStatus>('get_registry_status');
+export const extractOverrides = (zipPath: string, instanceId: string) =>
+  invoke<ExtractionResult>('extract_overrides', { zipPath, instanceId });
 export const getSetting = (key: string) =>
   invoke<unknown | null>('get_setting', { key });
 export const setSetting = (key: string, value: unknown) =>
