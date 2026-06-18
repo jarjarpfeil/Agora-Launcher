@@ -40,6 +40,20 @@ struct DeviceFlowPollResponse {
 
 /// Start the GitHub OAuth Device Flow by requesting a device code.
 pub async fn start_device_flow() -> LauncherResult<DeviceFlowResponse> {
+    // Fail fast with a clear, actionable error instead of letting GitHub
+    // reject the empty client_id request downstream.
+    if AGORA_OAUTH_CLIENT_ID.is_empty() {
+        return Err(LauncherError::Generic {
+            code: "ERR_AUTH_NOT_CONFIGURED".to_string(),
+            message: "GitHub OAuth is not configured. Set the AGORA_OAUTH_CLIENT_ID environment \
+                      variable before building/running Tauri (e.g. \
+                      `$env:AGORA_OAUTH_CLIENT_ID='Iv1.xxxxxxxx'; npm run tauri:dev`). Register \
+                      an OAuth app at https://github.com/settings/developers (Authorization type: \
+                      GitHub App, Device Flow enabled)."
+                .to_string(),
+        });
+    }
+
     let client = reqwest::Client::builder()
         .user_agent("agora-launcher")
         .build()
@@ -48,10 +62,13 @@ pub async fn start_device_flow() -> LauncherResult<DeviceFlowResponse> {
             message: "Failed to build HTTP client for device flow.".to_string(),
         })?;
 
-    let params = [
-        ("client_id", AGORA_OAUTH_CLIENT_ID),
-        ("scope", "public_repo read:org"),
-    ];
+    // NOTE: GitHub Apps ignore the `scope` parameter — permissions are
+    // determined by what's granted to the app in its settings UI at
+    // https://github.com/settings/apps/<app-slug>/permissions. Do NOT send
+    // OAuth-App-style scopes (e.g. `public_repo read:org`); they are silently
+    // ignored for GitHub Apps and mislead readers about the trust model.
+    // See README.md > "GitHub OAuth (in-app sign-in)" for the permission list.
+    let params = [("client_id", AGORA_OAUTH_CLIENT_ID)];
 
     let resp = client
         .post("https://github.com/login/device/code")

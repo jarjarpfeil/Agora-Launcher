@@ -113,7 +113,52 @@ Copy the example environment file and fill in any values you need locally:
 cp .env.example .env
 ```
 
-See `.env.example` for the list of supported variables.
+See `.env.example` for the list of supported variables. Note: `.env` is loaded
+at runtime by the Python compiler only; the Tauri desktop app does **not** read
+`.env`.
+
+### GitHub OAuth (in-app sign-in)
+
+The desktop app's "Sign in with GitHub" button uses the OAuth Device Flow.
+Register a GitHub App at <https://github.com/settings/developers> (Authorization
+type: **GitHub App**, enable **Device Flow**), then grant these permissions on
+the app's **Permissions** tab:
+
+**Repository permissions:**
+- **Contents** — Read-only (`GET /repos/{owner}/{repo}/releases` for mod
+  install version resolution + registry release fetch)
+- **Issues** — Read and write (covers issue reactions for voting, issue
+  comments for reviews, and issue creation for crash reports / flag
+  submission — Phase 5 governance)
+  *(Metadata: Read-only is mandatory and always granted.)*
+
+**Organization permissions:**
+- **Members** — Read-only (org membership read for the Sybil/trust check,
+  §3.1)
+
+> **Note on scopes:** GitHub Apps ignore the `scope` parameter in the
+> device-code request — permissions are determined solely by the app's
+> settings in the GitHub UI. The Rust build does **not** send an OAuth-App
+> scope string; configure everything via the app's Permissions tab above.
+
+Then expose the app's client ID as an **environment variable in the shell**
+before starting the dev server — the Rust build reads it at compile time via
+`option_env!`:
+
+```powershell
+# PowerShell (one session)
+$env:AGORA_OAUTH_CLIENT_ID = "Iv1.xxxxxxxxxxxxxxxx"
+npm run tauri:dev
+```
+
+```bash
+# bash/zsh (one session)
+export AGORA_OAUTH_CLIENT_ID="Iv1.xxxxxxxxxxxxxxxx"
+npm run tauri:dev
+```
+
+Without this variable the Sign-in step fails fast with `ERR_AUTH_NOT_CONFIGURED`
+rather than silently contacting GitHub with an empty client ID.
 
 ## Agent Tooling
 

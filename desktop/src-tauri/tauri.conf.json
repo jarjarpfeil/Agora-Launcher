@@ -30,8 +30,6 @@
   "plugins": {
     "shell": {
       "open": true
-    },
-    "store": {},
-    "sql": {}
+    }
   }
 }

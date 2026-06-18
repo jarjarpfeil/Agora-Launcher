@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
   checkRegistryUpdate,
   githubLogin,
@@ -240,6 +241,15 @@ function GithubStep({
       const flow = await githubLogin();
       if (cancelledRef.current) return;
       setDevice(flow);
+      // Auto-launch the user's default browser at the verification URL. The
+      // shell capability `shell:allow-open` for `github.com` is already granted
+      // in src-tauri/capabilities/default.json. If the open call fails (e.g.
+      // no default browser configured), the URL+code remain displayed below.
+      try {
+        await openUrl(flow.verification_uri);
+      } catch {
+        // best-effort: user can still click/type the URL shown in the panel
+      }
       const token = await githubLoginPoll(flow.device_code, flow.interval);
       if (cancelledRef.current) return;
       if (token) {
@@ -268,7 +278,7 @@ function GithubStep({
 
       {device && (
         <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 mb-4">
-          <p className="text-sm">Open this URL and enter the code:</p>
+          <p className="text-sm">Opening your browser… If it didn't open, click the button below:</p>
           <p className="mt-1 text-sm font-semibold break-all text-brand-600 dark:text-brand-400">
             {device.verification_uri}
           </p>
@@ -276,6 +286,18 @@ function GithubStep({
             Code:{' '}
             <span className="font-mono font-bold tracking-widest">{device.user_code}</span>
           </p>
+          <button
+            type="button"
+            onClick={() => {
+              openUrl(device.verification_uri).catch(() => {
+                /* best-effort: URL shown above for manual copy */
+              });
+            }}
+            disabled={polling}
+            className="mt-3 rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+          >
+            Open in browser
+          </button>
           {polling && (
             <p className="mt-2 text-xs text-[rgb(var(--muted))]">Waiting for authorization…</p>
           )}
