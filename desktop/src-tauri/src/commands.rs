@@ -3,7 +3,8 @@ use crate::crash_diagnostics::{self, CrashReportInfo, CrashTriageResult};
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 use crate::instances::{self, CreateInstanceRequest, InstanceDetail, LoaderVersionSummary};
-use crate::models::InstanceRow;
+use crate::mod_install;
+use crate::models::{InstanceRow, InstalledMod, ModVersionCandidate};
 use crate::registry::{self, CategoryInfo, RegistryItem, SortOption};
 use crate::state::LauncherState;
 
@@ -316,4 +317,28 @@ pub async fn read_crash_log_cmd(
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
+}
+
+/// List available mod versions for a registry item, resolving live data from
+/// the upstream source (GitHub Releases or Modrinth).
+#[tauri::command]
+pub async fn list_mod_versions(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    item_id: String,
+) -> LauncherResult<Vec<ModVersionCandidate>> {
+    mod_install::list_mod_versions(&app, &instance_id, &item_id).await
+}
+
+/// Install a specific mod version into an instance's `mods/` directory.
+#[tauri::command]
+pub async fn install_mod_version(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    item_id: String,
+    candidate: ModVersionCandidate,
+) -> LauncherResult<InstalledMod> {
+    mod_install::install_mod_version(&app, &instance_id, &item_id, &candidate).await
 }

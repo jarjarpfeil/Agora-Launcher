@@ -63,6 +63,18 @@ pub struct InstalledMod {
     pub installed_at: String,
 }
 
+/// A candidate version returned by the mod version resolution API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModVersionCandidate {
+    pub version: String,
+    pub filename: String,
+    pub download_url: String,
+    pub mc_version: Option<String>,
+    pub loader: Option<String>,
+    pub release_date: Option<String>,
+    pub is_compatible: bool,
+}
+
 /// The lightweight JSON manifest that lives in each instance directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceManifest {

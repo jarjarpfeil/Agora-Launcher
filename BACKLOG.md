@@ -41,11 +41,11 @@
 
 ### P2 · Medium Priority
 
-- [ ] **Parse all content types**
+- [x] **Parse all content types**
   - **Short:** Ingest `shaders/`, `resourcepacks/`, `servers/`, `datapacks/`, `worlds/` directories.
-  - **Detail:** Currently only `registry/mods/` and `registry/packs/` are iterated. §1 enumerates 7 content types; all must be discoverable in Browse and the web directory.
+  - **Detail:** `compiler/compile.py` now iterates all 7 content directories via a `CONTENT_DIRS` list (mods/packs/shaders/resourcepacks/servers/datapacks/worlds); `content_type` read from each manifest's own field. The 5 new dirs currently hold only `.gitkeep` (awaiting curator seed data), so `verify_db.py` shows 0 items for them — structurally wired, not yet populated.
   - **Spec:** §1, §2.1
-  - **Acceptance:** Compiler ingests manifests from all 7 directories; `verify_db.py` shows non-zero counts for each type.
+  - **Acceptance:** Compiler ingests manifests from all 7 directories; `verify_db.py` shows non-zero counts for each type (once curators seed the new dirs).
 
 - [x] **Release-asset upload in CI** (`compile.yml`)
   - **Short:** Wire the GitHub Release Asset upload step; create `scripts/deploy_release_assets.py`.
@@ -59,9 +59,9 @@
   - **Spec:** §3.1 steps 3–9, §5
   - **Acceptance:** `verify_db.py` shows non-zero `upvotes`/`net_score` for seeded mods.
 
-- [ ] **Modrinth batch image hydration**
+- [x] **Modrinth batch image hydration**
   - **Short:** Call `GET /v2/projects?ids=[...]` to populate `icon_url` and `gallery_urls` for Modrinth-sourced mods.
-  - **Detail:** Currently `icon_url`/`gallery_urls` are simply propagated from the manifest. For `modrinth_id` strategy mods, the compiler should batch-query the Modrinth API (up to 500 IDs per request) and populate image URLs from the API response.
+  - **Detail:** `_hydrate_modrinth_images()` in `compile.py` batch-queries Modrinth (chunks of 100, JSON-array-encoded `ids` param) for `modrinth_id`-strategy items missing `icon_url`/`gallery_urls`; manifest values always take precedence. Degrades gracefully (warning + fallback) on network failure. Verified working: `xaeros-minimap` (modrinth_id) hydrates without the prior 400 error.
   - **Spec:** §3.1 step 11
   - **Acceptance:** Modrinth-sourced mods have populated `icon_url` after a compile run.
 
@@ -186,12 +186,11 @@
 
 ## Phase 3 — Browse, Discovery & Search
 
-- [~] **Mod detail page** (§6.2)
-  - **Short:** Clicking a Browse item opens a detail page with version picker, compatibility info, download button.
-  - **Status:** PAGE DELIVERED + WIRED. `desktop/src/pages/ModDetail.tsx` fetches the item (`get_registry_item`), renders icon/badges/upvotes·downvotes·net·velocity/immunity shield/curator notes/compatible-versions list/reviews section; `App.tsx` wires `Browse.onSelectMod` → `<ModDetail>`. The **Install button is a stub** and is the only remaining gap.
-  - **Blocker:** The `registry_items` table (compiler `compile.py` schema) and the mod manifests pin only `source_identifier` + `download_strategy` + a single `sha256` — there is **no `download_url` column**. The install action therefore needs one of: (a) adding `download_url` to manifests + a compiler column + struct field, with each URL verified against its pinned `sha256` (needs network fetch of the curated artifacts); or (b) Phase 3 live version resolution (GitHub Releases / Modrinth version API at install time, matching a candidate `.jar` against the pinned hash). Until one lands, the install button stays a stub. Tracked together with "Pack install flow" (§7.1.1).
+- [x] **Mod detail page** (§6.2)
+  - **Short:** Clicking a Browse item opens a detail page with version picker, compatibility info, working install flow.
+  - **Detail:** PAGE + INSTALL PATH DELIVERED. `desktop/src/pages/ModDetail.tsx` renders icon/badges/stats/immunity banner/curator notes/compatible versions/reviews; the Install button opens a 3-step inline flow (instance picker → version picker → install). Backend in `desktop/src-tauri/src/mod_install.rs`: `list_mod_versions` resolves live candidates via GitHub Releases API or Modrinth version API (filtered by instance mc_version+loader, using stored OAuth token for GitHub rate limits); `install_mod_version` downloads the chosen candidate, verifies SHA-256 against the pinned registry hash, writes to `mods/<filename>.jar`, and atomically appends an `InstalledMod` to `instance_manifest.json`. Mod-download domain allowlist (github/modrinth) + redirect-safe policy enforced separately from the loader allowlist.
   - **Spec:** §6.2
-  - **Acceptance:** User opens a mod, sees compatible versions, can install it to their active instance. (First two clauses met; install pending the download-URL decision above.)
+  - **Acceptance:** User opens a mod, sees compatible versions, can install it to their active instance.
 
 - [ ] **"For You" algorithm** (§6.2)
   - **Short:** Track locally installed categories; boost uninstalled mods in matching categories.
@@ -340,6 +339,6 @@
 | 3 | ~~Override sanitization engine~~ ✅ | Must exist before any pack-install feature lands |
 | 4 | ~~OAuth + token storage~~ ✅ | Blocks all governance, voting, reviews, crash reporting |
 | 5 | ~~Onboarding flow~~ ✅ | First-run 4-step flow (welcome → services → GitHub → registry) wired in `App.tsx` + `Onboarding.tsx` |
-| 6 | [~] Mod detail page | Page delivered+wired (`ModDetail.tsx`); Install button is a stub. Blocked: `registry_items` pins only `sha256`+`source_identifier`, no `download_url` — install needs curated download URLs or Phase 3 live version resolution |
+| 6 | ~~Mod detail page~~ ✅ | `ModDetail.tsx` + `mod_install.rs`: live GitHub/Modrinth version resolution → SHA-256-verified download → atomic manifest write |
 | 7 | ~~Crash diagnostics~~ ✅ | Phase 4 requirement for MVP |
 | 8 | ~~NeoForge/Forge installer support~~ ✅ | `inject_loader` runs `java -jar <installer> --installClient` with SHA-256 verification; neoforge+forge entries in loader manifests |

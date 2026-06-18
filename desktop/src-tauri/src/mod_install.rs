@@ -1,0 +1,370 @@
+use crate::auth;
+use crate::db;
+use crate::download;
+use crate::error::{LauncherError, LauncherResult};
+use crate::models::{InstanceManifest, InstanceRow, InstalledMod, ModVersionCandidate};
+use crate::paths;
+use crate::registry;
+use serde::Deserialize;
+
+/// Hosts allowed for mod downloads (GitHub + Modrinth).
+/// Separate from the loader-manifest allowlist to enforce the whitelist principle.
+const MOD_DOWNLOAD_ALLOWLIST: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "api.github.com",
+    "cdn.modrinth.com",
+    "api.modrinth.com",
+];
+
+/// Check whether a URL host is on the mod-download allowlist.
+fn is_mod_download_host(host: &str) -> bool {
+    MOD_DOWNLOAD_ALLOWLIST.contains(&host)
+}
+
+/// Download bytes from a mod-download URL with redirect-safe policy.
+///
+/// Redirects are only followed when the target host is on the mod-download
+/// allowlist, preventing SSRF via compromised/malicious URLs.
+async fn download_mod_bytes(url: &str) -> LauncherResult<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if let Some(host) = attempt.url().host_str() {
+                if is_mod_download_host(host) {
+                    return attempt.follow();
+                }
+            }
+            attempt.stop()
+        }))
+        .user_agent("AgoraLauncher/1.0")
+        .build()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: format!("Failed to build HTTP client: {e}"),
+        })?;
+
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| LauncherError::NetworkOffline)?;
+
+    if !resp.status().is_success() {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: format!("HTTP {} for {}", resp.status(), url),
+        });
+    }
+
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|_| LauncherError::NetworkOffline)
+}
+
+/// Internal: fetch a GitHub token (if stored) and return an optional Bearer header value.
+fn github_auth_header(app: &tauri::AppHandle) -> Option<String> {
+    auth::get_token(app).map(|t| format!("Bearer {t}"))
+}
+
+/// Resolve the instance's Minecraft version and loader from `local_state.db`.
+fn load_instance_info(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+) -> LauncherResult<InstanceRow> {
+    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
+    db::get_instance(&conn, instance_id)
+        .map_err(|_| LauncherError::LocalStateFailed)?
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_INSTANCE_NOT_FOUND".to_string(),
+            message: format!("Instance '{instance_id}' not found."),
+        })
+}
+
+/// Resolve a single registry item by ID.
+fn load_registry_item(app: &tauri::AppHandle, item_id: &str) -> LauncherResult<registry::RegistryItem> {
+    let conn = registry::open_registry(app)?;
+    registry::get_item_by_id(&conn, item_id)
+        .map_err(|_| LauncherError::RegistryMissing)?
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_ITEM_NOT_FOUND".to_string(),
+            message: format!("Registry item '{item_id}' not found."),
+        })
+}
+
+/// Heuristic: check whether a filename contains both the Minecraft version
+/// and loader strings. Returns (mc_version, loader) if both are found.
+fn parse_version_from_filename(filename: &str, mc_version: &str, loader: &str) -> Option<(String, String)> {
+    let lower = filename.to_lowercase();
+    if lower.contains(&mc_version.to_lowercase()) && lower.contains(&loader.to_lowercase()) {
+        Some((mc_version.to_string(), loader.to_string()))
+    } else {
+        None
+    }
+}
+
+/// --- GitHub Releases API types ---
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    published_at: Option<String>,
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+/// --- Modrinth API types ---
+
+#[derive(Debug, Deserialize)]
+struct ModrinthVersion {
+    version_number: String,
+    files: Vec<ModrinthVersionFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModrinthVersionFile {
+    url: String,
+    filename: String,
+    primary: bool,
+}
+
+/// List available mod versions for a registry item, resolving live data from
+/// the upstream source (GitHub Releases or Modrinth).
+pub async fn list_mod_versions(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+    item_id: &str,
+) -> LauncherResult<Vec<ModVersionCandidate>> {
+    let instance = load_instance_info(app, instance_id)?;
+    let item = load_registry_item(app, item_id)?;
+
+    let mc_version = &instance.minecraft_version;
+    let loader = &instance.loader;
+    let strategy = item.download_strategy.as_str();
+
+    match strategy {
+        "github_release" => resolve_github_releases(app, &item, mc_version, loader).await,
+        "modrinth_id" => resolve_modrinth_versions(&item, mc_version, loader).await,
+        _ => Err(LauncherError::Generic {
+            code: "ERR_UNSUPPORTED_STRATEGY".to_string(),
+            message: format!(
+                "Download strategy '{}' is not supported for version resolution.",
+                item.download_strategy
+            ),
+        }),
+    }
+}
+
+async fn resolve_github_releases(
+    app: &tauri::AppHandle,
+    item: &registry::RegistryItem,
+    mc_version: &str,
+    loader: &str,
+) -> LauncherResult<Vec<ModVersionCandidate>> {
+    let source = &item.source_identifier;
+    let url = format!("https://api.github.com/repos/{source}/releases");
+
+    // Build the request with optional Bearer auth.
+    let mut request = reqwest::Client::builder()
+        .user_agent("AgoraLauncher/1.0")
+        .build()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: format!("Failed to build HTTP client: {e}"),
+        })?
+        .get(&url);
+
+    // Attach Bearer token if available to avoid 60 req/hr rate limit.
+    if let Some(token) = github_auth_header(app) {
+        request = request.header("Authorization", token);
+    }
+
+    let releases: Vec<GitHubRelease> = request
+        .send()
+        .await
+        .map_err(|_| LauncherError::NetworkOffline)?
+        .error_for_status()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: format!("GitHub API request failed: {e}"),
+        })?
+        .json()
+        .await
+        .map_err(|_| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: "Failed to parse GitHub releases response.".to_string(),
+        })?;
+
+    let mut candidates: Vec<ModVersionCandidate> = Vec::new();
+
+    for release in &releases {
+        for asset in &release.assets {
+            if !asset.name.ends_with(".jar") {
+                continue;
+            }
+            let (mc, loader_str) = parse_version_from_filename(&asset.name, mc_version, loader)
+                .unwrap_or_else(|| (String::new(), String::new()));
+
+            let mc_empty = mc.is_empty();
+            let loader_empty = loader_str.is_empty();
+
+            candidates.push(ModVersionCandidate {
+                version: release.tag_name.clone(),
+                filename: asset.name.clone(),
+                download_url: asset.browser_download_url.clone(),
+                mc_version: if mc_empty { None } else { Some(mc) },
+                loader: if loader_empty { None } else { Some(loader_str) },
+                release_date: release.published_at.clone(),
+                is_compatible: !mc_empty && !loader_empty,
+            });
+        }
+    }
+
+    Ok(candidates)
+}
+
+async fn resolve_modrinth_versions(
+    item: &registry::RegistryItem,
+    mc_version: &str,
+    loader: &str,
+) -> LauncherResult<Vec<ModVersionCandidate>> {
+    let source = &item.source_identifier;
+    let url = format!(
+        "https://api.modrinth.com/v2/project/{source}/version?game_versions=[\"{mc_version}\"]&loaders=[\"{loader}\"]"
+    );
+
+    let client = reqwest::Client::builder()
+        .user_agent("AgoraLauncher/1.0")
+        .build()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: format!("Failed to build HTTP client: {e}"),
+        })?;
+
+    let versions: Vec<ModrinthVersion> = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|_| LauncherError::NetworkOffline)?
+        .error_for_status()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: format!("Modrinth API request failed: {e}"),
+        })?
+        .json()
+        .await
+        .map_err(|_| LauncherError::Generic {
+            code: "ERR_NETWORK".to_string(),
+            message: "Failed to parse Modrinth versions response.".to_string(),
+        })?;
+
+    let mut candidates: Vec<ModVersionCandidate> = Vec::new();
+
+    for version in &versions {
+        // Use the primary file if present; otherwise fall back to the first file.
+        let primary_file = version
+            .files
+            .iter()
+            .find(|f| f.primary)
+            .or_else(|| version.files.first());
+
+        let file = match primary_file {
+            Some(f) => f,
+            None => continue,
+        };
+
+        let (mc, loader_str) = parse_version_from_filename(&file.filename, mc_version, loader)
+            .unwrap_or_else(|| (String::new(), String::new()));
+
+        let mc_empty = mc.is_empty();
+        let loader_empty = loader_str.is_empty();
+
+        candidates.push(ModVersionCandidate {
+            version: version.version_number.clone(),
+            filename: file.filename.clone(),
+            download_url: file.url.clone(),
+            mc_version: if mc_empty { None } else { Some(mc) },
+            loader: if loader_empty { None } else { Some(loader_str) },
+            release_date: None,
+            is_compatible: !mc_empty && !loader_empty,
+        });
+    }
+
+    Ok(candidates)
+}
+
+/// Install a specific mod version into an instance's `mods/` directory.
+pub async fn install_mod_version(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+    item_id: &str,
+    candidate: &ModVersionCandidate,
+) -> LauncherResult<InstalledMod> {
+    // 1. Load the registry item to get the pinned SHA-256.
+    let item = load_registry_item(app, item_id)?;
+    let pinned_sha = item.sha256.trim().to_string();
+
+    // 2. Download bytes from the candidate URL.
+    let bytes = download_mod_bytes(&candidate.download_url).await?;
+
+    // 3. Verify SHA-256 against the pinned hash.
+    let actual_sha = download::sha256_hex(&bytes);
+    if actual_sha != pinned_sha {
+        return Err(LauncherError::HashMismatch);
+    }
+
+    // 4. Ensure mods/ directory exists and write the file.
+    let instance_dir = paths::instance_dir(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    let mods_dir = instance_dir.join("mods");
+    std::fs::create_dir_all(&mods_dir).map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    let mod_path = mods_dir.join(&candidate.filename);
+    std::fs::write(&mod_path, &bytes).map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    // 5. Update the instance manifest atomically.
+    let manifest_path = paths::instance_manifest_path(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    let mut manifest: InstanceManifest = if manifest_path.exists() {
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+        serde_json::from_str(&text)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?
+    } else {
+        return Err(LauncherError::Generic {
+            code: "ERR_MANIFEST_MISSING".to_string(),
+            message: format!(
+                "Instance manifest not found at '{}'. Create the instance first.",
+                manifest_path.display()
+            ),
+        });
+    };
+
+    let installed_mod = InstalledMod {
+        filename: candidate.filename.clone(),
+        registry_id: Some(item_id.to_string()),
+        modrinth_id: None,
+        source: "registry".to_string(),
+        version: Some(candidate.version.clone()),
+        sha256: pinned_sha,
+        installed_at: chrono::Utc::now().to_rfc3339(),
+    };
+
+    manifest.mods.push(installed_mod.clone());
+
+    // Atomic write: .tmp then rename.
+    let tmp_path = manifest_path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(&manifest)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    std::fs::write(&tmp_path, text).map_err(|_| LauncherError::InstanceCreateFailed)?;
+    std::fs::rename(&tmp_path, &manifest_path)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    Ok(installed_mod)
+}

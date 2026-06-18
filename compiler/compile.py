@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import requests
+
 # Optional signing dependency. The compiler will refuse to produce a real
 # signature unless PyNaCl is installed and ED25519_PRIVATE_KEY is configured.
 try:
@@ -372,6 +374,86 @@ def insert_registry_item(conn: sqlite3.Connection, item: dict[str, Any], path: P
         link_item_category(conn, item_id, category_id)
 
 
+# ---------------------------------------------------------------------------
+# Modrinth batch image hydration
+# ---------------------------------------------------------------------------
+
+_MODRINTH_API_URL = "https://api.modrinth.com/v2/projects"
+_MODRINTH_USER_AGENT = "AgoraCompiler/1.0"
+_MODRINTH_BATCH_SIZE = 100
+
+
+def _hydrate_modrinth_images(items: list[dict[str, Any]]) -> None:
+    """Batch-query the Modrinth API to fill icon_url / gallery_urls for modrinth_id items.
+
+    Only items whose ``download_strategy`` is ``modrinth_id`` are queried.
+    Manifest-provided values are preserved (not overwritten) — the API fills
+    in only missing fields.  Network failures degrade gracefully with a warning.
+    """
+    # Collect modrinth_id items that need hydration.
+    to_hydrate: list[tuple[int, dict[str, Any]]] = []
+    for idx, item in enumerate(items):
+        if item.get("download_strategy") != "modrinth_id":
+            continue
+        # Only fetch if the manifest doesn't already set icon_url or gallery_urls.
+        needs_icon = not item.get("icon_url")
+        needs_gallery = not item.get("gallery_urls")
+        if not needs_icon and not needs_gallery:
+            continue
+        mid = item.get("modrinth_id", item.get("source_identifier", ""))
+        if not mid:
+            continue
+        to_hydrate.append((idx, item, mid))
+
+    if not to_hydrate:
+        return
+
+    # Group by modrinth_id for batch query.
+    id_to_indices: dict[str, list[int]] = {}
+    id_list: list[str] = []
+    for idx, _item, mid in to_hydrate:
+        if mid not in id_to_indices:
+            id_list.append(mid)
+            id_to_indices[mid] = []
+        id_to_indices[mid].append(idx)
+
+    # Batch-query in chunks via GET with query params.
+    # Modrinth's /v2/projects endpoint expects `ids` as a JSON-array-encoded string
+    # (e.g. ids=["abc","def"]). Pass the JSON string and let requests URL-encode it.
+    hydrated: dict[str, dict[str, Any]] = {}
+    for i in range(0, len(id_list), _MODRINTH_BATCH_SIZE):
+        chunk = id_list[i : i + _MODRINTH_BATCH_SIZE]
+        ids_param = json.dumps(chunk)
+        try:
+            resp = requests.get(
+                _MODRINTH_API_URL,
+                params={"ids": ids_param},
+                headers={"User-Agent": _MODRINTH_USER_AGENT},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            projects = resp.json()
+            for proj in projects:
+                proj_id = proj.get("id", "")
+                hydrated[proj_id] = proj
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Modrinth batch hydration failed for chunk %d-%d: %s", i, i + len(chunk), exc)
+
+    # Apply hydrated data back.
+    for idx, _item, mid in to_hydrate:
+        proj = hydrated.get(mid)
+        if proj is None:
+            continue
+        if not items[idx].get("icon_url"):
+            icon = proj.get("icon_url")
+            if icon:
+                items[idx]["icon_url"] = icon
+        if not items[idx].get("gallery_urls"):
+            gallery = proj.get("gallery", [])
+            if gallery:
+                items[idx]["gallery_urls"] = gallery
+
+
 def insert_pack_mods(conn: sqlite3.Connection, pack_id: str, mods: list[dict[str, Any]]) -> None:
     """Insert pack membership rows into pack_mods."""
     cursor = conn.cursor()
@@ -513,31 +595,56 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
     cursor = conn.cursor()
     cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
 
-    # Mods.
-    mod_count = 0
-    for path, data in load_json_files(REGISTRY_DIR / "mods"):
-        insert_registry_item(conn, data, path)
-        mod_count += 1
-    logger.info("Inserted %d mod(s)", mod_count)
+    # Content-type directories: each subdirectory contains JSON manifests with
+    # the same shape as mod manifests (id, name, content_type, download_strategy,
+    # source_identifier, sha256, etc.).  The manifest's own content_type field
+    # determines the row type — we do NOT derive it from the directory name.
+    CONTENT_DIRS = [
+        "mods",
+        "packs",
+        "shaders",
+        "resourcepacks",
+        "servers",
+        "datapacks",
+        "worlds",
+    ]
 
-    # Packs.
+    # Collect all items first (for Modrinth hydration), then insert.
+    all_items: list[tuple[Path, dict[str, Any]]] = []
+    for dir_name in CONTENT_DIRS:
+        all_items.extend(load_json_files(REGISTRY_DIR / dir_name))
+
+    # Hydrate Modrinth image URLs for modrinth_id items (in-place).
+    _hydrate_modrinth_images([item for _, item in all_items])
+
+    # Insert items, handling pack-specific fields.
+    mod_count = 0
     pack_count = 0
-    for path, data in load_json_files(REGISTRY_DIR / "packs"):
-        # Pack manifests use pack_id, but the registry_items table expects id.
-        pack = dict(data)
-        if "pack_id" in pack and "id" not in pack:
-            pack["id"] = pack["pack_id"]
-        pack.setdefault("content_type", "pack")
-        pack.setdefault("download_strategy", "curated_pack")
-        pack.setdefault("source_identifier", pack["id"])
-        pack.setdefault("base_categories", [])
-        pack.setdefault("community_categories", [])
-        pack.setdefault("icon_url", None)
-        pack.setdefault("gallery_urls", [])
-        insert_registry_item(conn, pack, path)
-        insert_pack_mods(conn, pack["id"], pack.get("mods", []))
-        pack_count += 1
-    logger.info("Inserted %d pack(s)", pack_count)
+    other_count = 0
+    for path, data in all_items:
+        content_type = data.get("content_type", "mod")
+        is_pack = content_type == "pack" or "pack_id" in data
+        if is_pack:
+            pack = dict(data)
+            if "pack_id" in pack and "id" not in pack:
+                pack["id"] = pack["pack_id"]
+            pack.setdefault("content_type", "pack")
+            pack.setdefault("download_strategy", "curated_pack")
+            pack.setdefault("source_identifier", pack["id"])
+            pack.setdefault("base_categories", [])
+            pack.setdefault("community_categories", [])
+            pack.setdefault("icon_url", None)
+            pack.setdefault("gallery_urls", [])
+            insert_registry_item(conn, pack, path)
+            insert_pack_mods(conn, pack["id"], pack.get("mods", []))
+            pack_count += 1
+        else:
+            insert_registry_item(conn, data, path)
+            if content_type == "mod":
+                mod_count += 1
+            else:
+                other_count += 1
+    logger.info("Inserted %d mod(s), %d pack(s), %d other item(s)", mod_count, pack_count, other_count)
 
     # Crash signatures.
     sig_count = 0

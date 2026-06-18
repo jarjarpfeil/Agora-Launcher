@@ -188,3 +188,22 @@ export const listCrashReports = (instanceId: string) =>
   invoke<CrashReportInfo[]>('list_crash_reports_cmd', { instanceId });
 export const readCrashLog = (instanceId: string, filename: string) =>
   invoke<string>('read_crash_log_cmd', { instanceId, filename });
+
+export interface ModVersionCandidate {
+  version: string;
+  filename: string;
+  download_url: string;
+  mc_version: string | null;
+  loader: string | null;
+  release_date: string | null;
+  is_compatible: boolean;
+}
+
+export const listModVersions = (instanceId: string, itemId: string) =>
+  invoke<ModVersionCandidate[]>('list_mod_versions', { instanceId, itemId });
+
+export const installModVersion = (
+  instanceId: string,
+  itemId: string,
+  candidate: ModVersionCandidate,
+) => invoke<InstalledMod>('install_mod_version', { instanceId, itemId, candidate });

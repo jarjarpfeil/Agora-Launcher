@@ -8,6 +8,7 @@ pub mod instances;
 pub mod launcher_profiles;
 pub mod loader_manifests;
 pub mod models;
+pub mod mod_install;
 pub mod mojang;
 pub mod override_sanitizer;
 pub mod paths;
@@ -48,7 +49,9 @@ pub fn run() {
             commands::check_instance_crash,
             commands::triage_crash_report,
             commands::list_crash_reports_cmd,
-            commands::read_crash_log_cmd
+            commands::read_crash_log_cmd,
+            commands::list_mod_versions,
+            commands::install_mod_version
         ])
         .setup(|app| {
             let handle = app.handle().clone();
