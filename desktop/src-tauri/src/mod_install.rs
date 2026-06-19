@@ -7,6 +7,36 @@ use crate::paths;
 use crate::registry;
 use serde::Deserialize;
 
+/// Minimum free disk space required before a mod download (500 MB).
+const MIN_DISK_SPACE_BYTES: u64 = 500_000_000;
+
+/// Return the available free disk space (in bytes) on the drive containing
+/// the given path.  Returns `None` when the information cannot be determined.
+///
+/// Implementation: shells out to `fsutil volume diskfree` on Windows.
+#[cfg(target_os = "windows")]
+fn available_disk_space_bytes(path: &std::path::Path) -> Option<u64> {
+    let root = path.ancestors().last()?;
+    let output = std::process::Command::new("fsutil")
+        .args(["volume", "diskfree"])
+        .arg(root)
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("Available free bytes:") {
+            return rest.trim().parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+/// Stub for non-Windows platforms (not currently targeted by this crate).
+#[cfg(not(target_os = "windows"))]
+fn available_disk_space_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
 /// Hosts allowed for mod downloads (GitHub + Modrinth).
 /// Separate from the loader-manifest allowlist to enforce the whitelist principle.
 const MOD_DOWNLOAD_ALLOWLIST: &[&str] = &[
@@ -309,7 +339,17 @@ pub async fn install_mod_version(
     let item = load_registry_item(app, item_id)?;
     let pinned_sha = item.sha256.trim().to_string();
 
-    // 2. Download bytes from the candidate URL.
+    // 2. Pre-check: verify sufficient disk space before any network request (§7.1.2).
+    let instance_dir = paths::instance_dir(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    if let Some(free) = available_disk_space_bytes(&instance_dir) {
+        if free < MIN_DISK_SPACE_BYTES {
+            return Err(LauncherError::DiskFull);
+        }
+    }
+    // If we cannot determine free space (None), proceed — do not block on unavailable info.
+
+    // 3. Download bytes from the candidate URL.
     let bytes = download_mod_bytes(&candidate.download_url).await?;
 
     // 3. Verify SHA-256 against the pinned hash.
@@ -367,4 +407,86 @@ pub async fn install_mod_version(
         .map_err(|_| LauncherError::InstanceCreateFailed)?;
 
     Ok(installed_mod)
+}
+
+/// Remove a mod from an instance's `mods/` directory and update the manifest.
+///
+/// Best-effort: if the mod isn't in the manifest but the file exists on disk,
+/// it is still deleted. If the mod is in the manifest but the file is missing,
+/// the manifest is still updated.
+pub async fn remove_mod_from_instance(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+    filename: &str,
+) -> LauncherResult<()> {
+    // Zip Slip protection: reject filenames containing path traversal or separators.
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(LauncherError::Generic {
+            code: "ERR_INVALID_FILENAME".to_string(),
+            message: "Filename contains invalid characters.".to_string(),
+        });
+    }
+
+    // 1. Resolve and optionally delete the jar file.
+    let instance_dir = paths::instance_dir(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    let mods_dir = instance_dir.join("mods");
+    let mod_path = mods_dir.join(filename);
+
+    tokio::task::spawn_blocking(move || {
+        if mod_path.exists() {
+            std::fs::remove_file(&mod_path).map_err(|_| LauncherError::InstanceCreateFailed)?;
+        }
+        Ok::<_, LauncherError>(())
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_REMOVE_FAILED".to_string(),
+        message: "Remove file task failed.".to_string(),
+    })??;
+
+    // 2. Load, filter, and rewrite the manifest.
+    let manifest_path = paths::instance_manifest_path(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    if manifest_path.exists() {
+        let text = tokio::task::spawn_blocking({
+            let manifest_path = manifest_path.clone();
+            move || {
+                let text = std::fs::read_to_string(&manifest_path)
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+                Ok::<_, LauncherError>(text)
+            }
+        })
+        .await
+        .map_err(|_| LauncherError::Generic {
+            code: "ERR_MANIFEST_READ".to_string(),
+            message: "Manifest read task failed.".to_string(),
+        })??;
+
+        let mut manifest: InstanceManifest = serde_json::from_str(&text)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+        let before = manifest.mods.len();
+        manifest.mods.retain(|m| m.filename != filename);
+        if manifest.mods.len() < before {
+            // Atomic write: .tmp then rename.
+            let tmp_path = manifest_path.with_extension("json.tmp");
+            let write_text = serde_json::to_string_pretty(&manifest)
+                .map_err(|_| LauncherError::InstanceCreateFailed)?;
+            tokio::task::spawn_blocking(move || {
+                std::fs::write(&tmp_path, write_text).map_err(|_| LauncherError::InstanceCreateFailed)?;
+                std::fs::rename(&tmp_path, &manifest_path)
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+                Ok::<_, LauncherError>(())
+            })
+            .await
+            .map_err(|_| LauncherError::Generic {
+                code: "ERR_MANIFEST_WRITE".to_string(),
+                message: "Manifest write task failed.".to_string(),
+            })??;
+        }
+    }
+
+    Ok(())
 }

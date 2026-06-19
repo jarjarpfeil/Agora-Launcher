@@ -23,6 +23,12 @@ export interface RegistryItem {
   categories: string[];
 }
 
+export interface CuratorReview {
+  item_id: string;
+  curator_note: string;
+  top_reviews_json: string;
+}
+
 type SqlJsStatic = Awaited<ReturnType<typeof initSqlJs>>;
 
 let dbPromise: Promise<SqlJsStatic> | null = null;
@@ -192,4 +198,96 @@ export function contentTypeLabel(type: ContentType): string {
 
 export function contentTypePath(type: ContentType): string {
   return `/${type}s`;
+}
+
+// ── Browse with filters and sort ──────────────────────────────────
+
+export async function browseItems(params: {
+  contentType?: string;
+  category?: string;
+  mcVersion?: string;
+  loader?: string;
+  sort?: 'net_score' | 'velocity' | 'newest';
+}): Promise<RegistryItem[]> {
+  const db = await openRegistry();
+  try {
+    const sortCol = params.sort === 'velocity' ? 'velocity'
+      : params.sort === 'newest' ? 'date_added'
+      : 'net_score';
+    const sortDir = params.sort === 'newest' ? 'DESC' : 'DESC';
+
+    let sql = `SELECT * FROM registry_items WHERE status = 'active'`;
+    const whereParams: (string | number | null)[] = [];
+
+    if (params.contentType) {
+      sql += ` AND content_type = ?`;
+      whereParams.push(params.contentType);
+    }
+    if (params.category) {
+      sql += ` AND id IN (SELECT ic.item_id FROM item_categories ic JOIN categories c ON c.id = ic.category_id WHERE c.id = ?)`;
+      whereParams.push(params.category);
+    }
+    if (params.mcVersion) {
+      sql += ` AND id IN (SELECT DISTINCT json_extract(cv.value, '$.mc_version') FROM registry_items r, json_each(r.compatible_versions_json) cv WHERE json_extract(cv.value, '$.mc_version') = ?)`;
+      whereParams.push(params.mcVersion);
+    }
+    if (params.loader && params.loader !== 'all') {
+      sql += ` AND id IN (SELECT DISTINCT json_extract(cv.value, '$.loader') FROM registry_items r, json_each(r.compatible_versions_json) cv WHERE json_extract(cv.value, '$.loader') = ?)`;
+      whereParams.push(params.loader);
+    }
+
+    sql += ` ORDER BY ${sortCol} ${sortDir}, name ASC`;
+
+    const rows = queryAll(db, sql, whereParams.length ? whereParams : undefined);
+    const items = rows.map(rowToItem);
+
+    for (const item of items) {
+      const cats = queryAll(
+        db,
+        `SELECT c.id FROM categories c JOIN item_categories ic ON c.id = ic.category_id WHERE ic.item_id = ?`,
+        [item.id]
+      );
+      item.categories = cats.map((c) => c.id as string);
+    }
+    return items;
+  } finally {
+    db.close();
+  }
+}
+
+// ── Categories ────────────────────────────────────────────────────
+
+export async function listCategories(): Promise<string[]> {
+  const db = await openRegistry();
+  try {
+    const rows = queryAll(db, `SELECT id FROM categories ORDER BY id`);
+    return rows.map((r) => r.id as string);
+  } finally {
+    db.close();
+  }
+}
+
+// ── Reviews ───────────────────────────────────────────────────────
+
+export async function getReviews(itemId: string): Promise<{ author: string; rating: number; body: string; created_at: string }[]> {
+  const db = await openRegistry();
+  try {
+    const row = queryOne(db, `SELECT top_reviews_json FROM curator_reviews WHERE item_id = ?`, [itemId]);
+    if (!row || !row.top_reviews_json) return [];
+    try {
+      const reviews: unknown[] = JSON.parse(row.top_reviews_json);
+      return reviews
+        .filter((r: unknown): r is Record<string, unknown> => typeof r === 'object' && r !== null && typeof (r as Record<string, unknown>).author === 'string')
+        .map((r: Record<string, unknown>) => ({
+          author: String(r.author ?? 'Anonymous'),
+          rating: typeof r.rating === 'number' ? r.rating : 0,
+          body: String(r.body ?? ''),
+          created_at: String(r.created_at ?? ''),
+        }));
+    } catch {
+      return [];
+    }
+  } finally {
+    db.close();
+  }
 }

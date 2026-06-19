@@ -14,6 +14,7 @@ pub struct InstanceRow {
     pub jvm_memory_mb: i64,
     pub jvm_gc: String,
     pub jvm_custom_args: String,
+    pub jvm_always_pre_touch: bool,
     pub created_at: String,
 }
 

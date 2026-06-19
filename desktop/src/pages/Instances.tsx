@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import {
   createInstance,
   deleteInstance,
   launchInstance,
   listInstances,
   listLoaderVersions,
+  formatError,
   type CreateInstanceRequest,
   type InstanceRow,
   type LoaderVersionSummary,
@@ -13,7 +15,7 @@ import {
 const LOADERS = ['fabric', 'quilt', 'neoforge', 'forge'];
 const DEFAULT_MC_VERSIONS = ['1.21.11', '1.21.10', '1.21.9'];
 
-export function Instances() {
+export function Instances({ onEditInstance }: { onEditInstance: (id: string) => void }) {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -25,7 +27,7 @@ export function Instances() {
     try {
       setInstances(await listInstances());
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setLoading(false);
     }
@@ -76,6 +78,7 @@ export function Instances() {
               key={instance.instance_id}
               instance={instance}
               onChanged={refresh}
+              onEdit={() => onEditInstance(instance.instance_id)}
             />
           ))}
         </ul>
@@ -97,9 +100,11 @@ export function Instances() {
 function InstanceCard({
   instance,
   onChanged,
+  onEdit,
 }: {
   instance: InstanceRow;
   onChanged: () => void;
+  onEdit: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,7 +115,7 @@ function InstanceCard({
     try {
       await launchInstance(instance.instance_id);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setBusy(false);
     }
@@ -124,7 +129,7 @@ function InstanceCard({
       await deleteInstance(instance.instance_id);
       onChanged();
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
       setBusy(false);
     }
   };
@@ -161,6 +166,13 @@ function InstanceCard({
           ▶ Launch
         </button>
         <button
+          onClick={onEdit}
+          disabled={busy}
+          className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+        >
+          Edit
+        </button>
+        <button
           onClick={remove}
           disabled={busy}
           className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
@@ -187,6 +199,7 @@ function CreateInstanceDialog({
   const [memoryMb, setMemoryMb] = useState(4096);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -197,7 +210,7 @@ function CreateInstanceDialog({
         setLoaderVersions(versions);
         setLoaderVersion(versions[0]?.loader_version ?? '');
       } catch (e) {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) setError(formatError(e));
       }
     })();
     return () => {
@@ -205,9 +218,20 @@ function CreateInstanceDialog({
     };
   }, [loader, mcVersion]);
 
+  // Progress event listener during creation
+  useEffect(() => {
+    if (!busy) return;
+    setProgressMessage('Starting…');
+    const unlisten = listen<{ instance_id: string; stage: string; message: string }>('instance:create-progress', (e) => {
+      setProgressMessage(e.payload.message);
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, [busy]);
+
   const submit = async () => {
     setBusy(true);
     setError(null);
+    setProgressMessage(null);
     try {
       const instanceId = name
         .toLowerCase()
@@ -227,7 +251,7 @@ function CreateInstanceDialog({
       await createInstance(request);
       onCreated();
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
       setBusy(false);
     }
   };
@@ -309,6 +333,10 @@ function CreateInstanceDialog({
             />
           </label>
         </div>
+
+        {progressMessage && (
+          <p className="mt-4 text-sm text-[rgb(var(--muted))]">{progressMessage}</p>
+        )}
 
         {error && (
           <p className="mt-4 text-sm text-red-600 dark:text-red-300">{error}</p>

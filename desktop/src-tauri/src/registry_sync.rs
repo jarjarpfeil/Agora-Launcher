@@ -430,22 +430,35 @@ pub fn seed_from_local_build<R: tauri::Runtime>(
         return Ok(false);
     }
 
-    let local_db = std::env::current_dir()
-        .ok()
-        .map(|d| d.join("registry.db"))
-        .filter(|p| p.exists());
-
-    if let Some(src) = local_db {
-        std::fs::copy(&src, &dest).map_err(|_| LauncherError::RegistryDownloadFailed)?;
-        let local_sig = src.with_extension("db.sig");
-        if local_sig.exists() {
-            let dest_sig =
-                paths::registry_sig_path(app).map_err(|_| LauncherError::RegistryMissing)?;
-            std::fs::copy(&local_sig, &dest_sig)
-                .map_err(|_| LauncherError::RegistryDownloadFailed)?;
+    // When `npm run tauri:dev` launches the exe, current_dir() is typically
+    // `desktop/src-tauri/`. The compiler writes `registry.db` at the repo
+    // root, so we walk up to four parent directories looking for it. This
+    // covers dev workflows where the user runs `python compiler/compile.py`
+    // from the repo root before launching the app.
+    let mut search_dir = std::env::current_dir().ok();
+    for _ in 0..5 {
+        if let Some(dir) = search_dir {
+            let candidate = dir.join("registry.db");
+            if candidate.exists() {
+                std::fs::copy(&candidate, &dest)
+                    .map_err(|_| LauncherError::RegistryDownloadFailed)?;
+                let local_sig = candidate.with_extension("db.sig");
+                if local_sig.exists() {
+                    let dest_sig = paths::registry_sig_path(app)
+                        .map_err(|_| LauncherError::RegistryMissing)?;
+                    std::fs::copy(&local_sig, &dest_sig)
+                        .map_err(|_| LauncherError::RegistryDownloadFailed)?;
+                }
+                eprintln!(
+                    "Seeded registry.db from local build at {}",
+                    candidate.display()
+                );
+                return Ok(true);
+            }
+            search_dir = dir.parent().map(std::path::Path::to_path_buf);
+        } else {
+            break;
         }
-        eprintln!("Seeded registry.db from local build at {}", src.display());
-        return Ok(true);
     }
 
     Ok(false)

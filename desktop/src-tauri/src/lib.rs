@@ -41,6 +41,7 @@ pub fn run() {
             commands::browse_items,
             commands::get_registry_item,
             commands::list_categories,
+            commands::list_pack_mods,
             commands::check_registry_update,
             commands::get_registry_status,
             commands::extract_overrides,
@@ -62,7 +63,8 @@ pub fn run() {
             commands::list_crash_reports_cmd,
             commands::read_crash_log_cmd,
             commands::list_mod_versions,
-            commands::install_mod_version
+            commands::install_mod_version,
+            commands::remove_mod_from_instance
         ])
         .setup(|app| {
             let handle = app.handle().clone();

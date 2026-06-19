@@ -5,7 +5,7 @@ use crate::error::{LauncherError, LauncherResult};
 use crate::instances::{self, CreateInstanceRequest, InstanceDetail, LoaderVersionSummary};
 use crate::mod_install;
 use crate::models::{InstanceRow, InstalledMod, ModVersionCandidate};
-use crate::registry::{self, CategoryInfo, RegistryItem, SortOption};
+use crate::registry::{self, CategoryInfo, PackModRow, RegistryItem, SortOption};
 use crate::state::LauncherState;
 
 #[tauri::command]
@@ -77,6 +77,24 @@ pub async fn list_categories(
     .map_err(|_| LauncherError::Generic {
         code: "ERR_REGISTRY_QUERY".to_string(),
         message: "Registry query task failed.".to_string(),
+    })?
+}
+
+/// List all mods in a pack.
+#[tauri::command]
+pub async fn list_pack_mods(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    pack_id: String,
+) -> LauncherResult<Vec<PackModRow>> {
+    tokio::task::spawn_blocking(move || {
+        let conn = registry::open_registry(&app)?;
+        registry::pack_mods_for_pack(&conn, &pack_id)
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_REGISTRY_QUERY".to_string(),
+        message: "Pack mods query task failed.".to_string(),
     })?
 }
 
@@ -346,4 +364,15 @@ pub async fn install_mod_version(
     candidate: ModVersionCandidate,
 ) -> LauncherResult<InstalledMod> {
     mod_install::install_mod_version(&app, &instance_id, &item_id, &candidate).await
+}
+
+/// Remove a mod from an instance's `mods/` directory and update the manifest.
+#[tauri::command]
+pub async fn remove_mod_from_instance(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    filename: String,
+) -> LauncherResult<()> {
+    mod_install::remove_mod_from_instance(&app, &instance_id, &filename).await
 }

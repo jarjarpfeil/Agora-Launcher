@@ -1,5 +1,52 @@
 import { invoke } from '@tauri-apps/api/core';
 
+/**
+ * Format any thrown error (including Tauri's serialized LauncherError shape)
+ * into a readable string for UI display.
+ *
+ * Tauri invokes reject with error values that depend on the Rust enum's serde
+ * serialization:
+ *   - Unit variants like `HashMismatch` come across as the string `"HashMismatch"`.
+ *   - Struct variants like `Generic { code, message }` come across as
+ *     `{ Generic: { code: "...", message: "..." } }` (serde's default
+ *     externally-tagged representation).
+ *
+ * Plain JS `Error` objects also flow through here (`e.message` works).
+ *
+ * Using this helper instead of `String(e)` avoids the dreaded `[object Object]`.
+ */
+export function formatError(e: unknown): string {
+  if (e == null) return 'Unknown error';
+  if (typeof e === 'string') return e;
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'object') {
+    const obj = e as Record<string, unknown>;
+    // New structured error envelope: { code, message, details, suggested_action }
+    if (typeof obj.code === 'string' && typeof obj.message === 'string') {
+      return obj.message;
+    }
+    // Tauri serialized struct variant: { VariantName: { code, message } }
+    for (const key of Object.keys(obj)) {
+      const inner = obj[key];
+      if (inner && typeof inner === 'object') {
+        const innerObj = inner as Record<string, unknown>;
+        if (typeof innerObj.message === 'string') return innerObj.message;
+        if (typeof innerObj.code === 'string') return innerObj.code;
+      }
+      if (typeof inner === 'string') return inner;
+    }
+    // Direct shape: { message: "..." } or { code: "..." }
+    if (typeof obj.message === 'string') return obj.message;
+    if (typeof obj.code === 'string') return obj.code;
+    try {
+      return JSON.stringify(e);
+    } catch {
+      return '[object]';
+    }
+  }
+  return String(e);
+}
+
 export interface InstanceRow {
   instance_id: string;
   name: string;
@@ -105,6 +152,18 @@ export interface CreateInstanceRequest {
   jvm_custom_args?: string;
 }
 
+export interface PackModRow {
+  pack_id: string;
+  mod_id: string;
+  source: string;
+  version: string | null;
+  status: string;
+  description: string | null;
+}
+
+export const listPackMods = (packId: string) =>
+  invoke<PackModRow[]>('list_pack_mods', { packId });
+
 export const listInstances = () => invoke<InstanceRow[]>('list_instances');
 export const getInstanceDetail = (instanceId: string) =>
   invoke<InstanceDetail | null>('get_instance_detail', { instanceId });
@@ -207,3 +266,6 @@ export const installModVersion = (
   itemId: string,
   candidate: ModVersionCandidate,
 ) => invoke<InstalledMod>('install_mod_version', { instanceId, itemId, candidate });
+
+export const removeModFromInstance = (instanceId: string, filename: string) =>
+  invoke<void>('remove_mod_from_instance', { instanceId, filename });

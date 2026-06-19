@@ -1,7 +1,5 @@
-use serde::Serialize;
-
 /// Standardized launcher error codes matching the human-centric taxonomy.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub enum LauncherError {
     /// ERR_NETWORK_OFFLINE — You're offline. Using cached data.
     NetworkOffline,
@@ -174,6 +172,38 @@ impl std::fmt::Display for LauncherError {
             }
             LauncherError::Generic { message, .. } => write!(f, "{}", message),
         }
+    }
+}
+
+impl serde::Serialize for LauncherError {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let suggested_action = match self {
+            LauncherError::MojangNotFound => {
+                Some("Install the Minecraft Launcher or set its path in Settings.")
+            }
+            LauncherError::HashMismatch => {
+                Some("The downloaded file may be corrupted or from an untrusted source. Try again.")
+            }
+            LauncherError::NetworkOffline => {
+                Some("Check your internet connection and try again.")
+            }
+            LauncherError::AuthRequired => {
+                Some("Sign in via Settings to use this feature.")
+            }
+            _ => None,
+        };
+
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("code", &self.code())?;
+        map.serialize_entry("message", &self.to_string())?;
+        map.serialize_entry("details", &None::<String>)?;
+        map.serialize_entry("suggested_action", &suggested_action)?;
+        map.end()
     }
 }
 

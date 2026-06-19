@@ -147,8 +147,8 @@
   - **Spec:** §7.5, §5
   - **Acceptance:** User signs in via Device Flow; can vote on a mod; token survives restart via keyring.
 
-- [ ] **Instance detail panel** (§6.5)
-  - **Short:** Wire `get_instance_detail` to an instance detail view showing installed mods from `instance_manifest.json`.
+- [x] **Instance detail panel** (§6.5)
+  - **Short:** Implemented in `desktop/src/pages/InstanceEditor.tsx`: full-page editor (routed via `App.tsx` `editingInstanceId` state) showing instance header, mods list with per-mod Remove buttons, embedded Browse-like Add-Mod view with search/category/sort/filter, and inline version picker → install.
   - **Detail:** The command exists but has no UI consumer. Build a detail view when clicking an instance card: shows installed mods list (filename, version, source, hash), JVM settings, lock state, and supports "Check for Pack Update", "Export Pack", "Unlock/Revert" actions.
   - **Spec:** §6.5
   - **Acceptance:** Clicking an instance shows its mod list and settings.
@@ -161,8 +161,8 @@
 
 ### P3 · Low Priority
 
-- [ ] **Windows Mojang discovery completion** (§8.4)
-  - **Short:** Add registry-key query (`HKLM\SOFTWARE\Mojang\Launcher\InstallPath`) and `Get-AppxPackage` Microsoft Store check. Linux: $PATH priority search.
+- [x] **Windows Mojang discovery completion** (§8.4)
+  - **Short:** Implemented in `desktop/src-tauri/src/mojang.rs`: legacy Program Files paths, `%LOCALAPPDATA%\Programs\` per-user path, `C:\XboxGames\Minecraft Launcher\Content\` Xbox app path, `reg query HKLM\SOFTWARE\Mojang\Launcher` registry discovery, `Get-AppxPackage` MSIX discovery, probes both `MinecraftLauncher.exe` and `Minecraft.exe` in every location.
   - **Spec:** §8.4
   - **Acceptance:** App finds launcher installed via MSIX/registry on Windows.
 

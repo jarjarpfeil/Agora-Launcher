@@ -63,6 +63,7 @@ fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                  jvm_memory_mb INTEGER NOT NULL DEFAULT 4096,
                  jvm_gc TEXT NOT NULL DEFAULT 'g1gc',
                  jvm_custom_args TEXT NOT NULL DEFAULT '',
+                 jvm_always_pre_touch INTEGER NOT NULL DEFAULT 1,
                  created_at TEXT NOT NULL DEFAULT (datetime('now'))
              );
 
@@ -84,6 +85,14 @@ fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
              );",
         )?;
         conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (1)", [])?;
+    }
+
+    // Migration: add jvm_always_pre_touch column to existing databases.
+    if current >= 1 {
+        let _ = conn.execute(
+            "ALTER TABLE user_instances ADD COLUMN jvm_always_pre_touch INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
     }
 
     if current > target {
@@ -126,8 +135,8 @@ pub fn upsert_instance(conn: &Connection, row: &InstanceRow) -> anyhow::Result<(
         "INSERT INTO user_instances (
              instance_id, name, minecraft_version, loader, loader_version,
              is_modpack, is_locked, last_launched_at,
-             jvm_memory_mb, jvm_gc, jvm_custom_args, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             jvm_memory_mb, jvm_gc, jvm_custom_args, jvm_always_pre_touch, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          ON CONFLICT(instance_id) DO UPDATE SET
              name = excluded.name,
              minecraft_version = excluded.minecraft_version,
@@ -138,7 +147,8 @@ pub fn upsert_instance(conn: &Connection, row: &InstanceRow) -> anyhow::Result<(
              last_launched_at = excluded.last_launched_at,
              jvm_memory_mb = excluded.jvm_memory_mb,
              jvm_gc = excluded.jvm_gc,
-             jvm_custom_args = excluded.jvm_custom_args",
+             jvm_custom_args = excluded.jvm_custom_args,
+             jvm_always_pre_touch = excluded.jvm_always_pre_touch",
         rusqlite::params![
             row.instance_id,
             row.name,
@@ -151,6 +161,7 @@ pub fn upsert_instance(conn: &Connection, row: &InstanceRow) -> anyhow::Result<(
             row.jvm_memory_mb,
             row.jvm_gc,
             row.jvm_custom_args,
+            row.jvm_always_pre_touch as i64,
             row.created_at,
         ],
     )?;
@@ -171,7 +182,7 @@ pub fn list_instances(conn: &Connection) -> anyhow::Result<Vec<InstanceRow>> {
     let mut stmt = conn.prepare(
         "SELECT instance_id, name, minecraft_version, loader, loader_version,
                 is_modpack, is_locked, last_launched_at,
-                jvm_memory_mb, jvm_gc, jvm_custom_args, created_at
+                jvm_memory_mb, jvm_gc, jvm_custom_args, jvm_always_pre_touch, created_at
          FROM user_instances
          ORDER BY last_launched_at DESC NULLS LAST, created_at DESC",
     )?;
@@ -188,7 +199,7 @@ pub fn get_instance(conn: &Connection, instance_id: &str) -> anyhow::Result<Opti
     let mut stmt = conn.prepare(
         "SELECT instance_id, name, minecraft_version, loader, loader_version,
                 is_modpack, is_locked, last_launched_at,
-                jvm_memory_mb, jvm_gc, jvm_custom_args, created_at
+                jvm_memory_mb, jvm_gc, jvm_custom_args, jvm_always_pre_touch, created_at
          FROM user_instances
          WHERE instance_id = ?1",
     )?;
@@ -281,6 +292,7 @@ fn row_to_instance(row: &rusqlite::Row<'_>) -> rusqlite::Result<InstanceRow> {
         jvm_memory_mb: row.get(8)?,
         jvm_gc: row.get(9)?,
         jvm_custom_args: row.get(10)?,
-        created_at: row.get(11)?,
+        jvm_always_pre_touch: row.get::<_, i64>(11)? != 0,
+        created_at: row.get(12)?,
     })
 }

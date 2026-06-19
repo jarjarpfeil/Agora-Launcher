@@ -5,21 +5,24 @@ export function Settings() {
   const [modrinth, setModrinth] = useState(false);
   const [aiMcp, setAiMcp] = useState(false);
   const [launcherPath, setLauncherPath] = useState('');
+  const [alwaysPreTouch, setAlwaysPreTouch] = useState(true);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [m, a, p] = await Promise.all([
+        const [m, a, p, apt] = await Promise.all([
           getSetting('modrinth_enabled'),
           getSetting('ai_mcp_enabled'),
           getSetting('mojang_launcher_path'),
+          getSetting('jvm_always_pre_touch'),
         ]);
         if (cancelled) return;
         setModrinth(Boolean(m));
         setAiMcp(Boolean(a));
         if (typeof p === 'string') setLauncherPath(p);
+        if (typeof apt === 'boolean') setAlwaysPreTouch(apt);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -53,6 +56,16 @@ export function Settings() {
     try {
       await setSetting('mojang_launcher_path', launcherPath);
     } catch (e) {
+      alert(String(e));
+    }
+  };
+
+  const toggleAlwaysPreTouch = async (value: boolean) => {
+    setAlwaysPreTouch(value);
+    try {
+      await setSetting('jvm_always_pre_touch', value);
+    } catch (e) {
+      setAlwaysPreTouch(!value);
       alert(String(e));
     }
   };
@@ -116,6 +129,22 @@ export function Settings() {
             </button>
             <p className="text-xs text-[rgb(var(--muted))]">
               Override the official Mojang launcher executable location.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-3">
+            <h3 className="font-semibold">JVM Defaults</h3>
+            <label className="flex items-center justify-between">
+              <span className="text-sm">AlwaysPreTouch</span>
+              <input
+                type="checkbox"
+                checked={alwaysPreTouch}
+                onChange={(e) => toggleAlwaysPreTouch(e.target.checked)}
+                className="h-5 w-5 accent-brand-600"
+              />
+            </label>
+            <p className="text-xs text-[rgb(var(--muted))]">
+              Recommended for G1GC, may cause issues with ZGC/Shenandoah.
             </p>
           </div>
         </>

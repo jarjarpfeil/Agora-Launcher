@@ -4,9 +4,13 @@ import {
   listInstances,
   listModVersions,
   installModVersion,
+  listLoaderVersions,
+  createInstance,
+  formatError,
   type RegistryItem,
   type InstanceRow,
   type ModVersionCandidate,
+  type CreateInstanceRequest,
 } from '../lib/tauri';
 
 type CompatibleVersionEntry = Record<string, unknown> | string;
@@ -43,14 +47,18 @@ function renderVersionEntry(entry: CompatibleVersionEntry): string {
 
 type CuratorNotesRegistryItem = RegistryItem & { curator_notes?: string | null };
 
-export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => void }) {
+export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: string; onBack: () => void; onOpenInstanceEditor?: (instanceId: string) => void }) {
   const [item, setItem] = useState<RegistryItem | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Pack-as-instance state
+  const [showPackCreate, setShowPackCreate] = useState(false);
+
   // Install flow state
   const [showInstallFlow, setShowInstallFlow] = useState(false);
   const [instances, setInstances] = useState<InstanceRow[]>([]);
+  const [instancesLoading, setInstancesLoading] = useState(false);
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<ModVersionCandidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<ModVersionCandidate | null>(null);
@@ -113,12 +121,16 @@ export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => vo
     setSelectedInstanceId(null);
     setCandidates([]);
     setSelectedCandidate(null);
+    setInstances([]);
+    setInstancesLoading(true);
     try {
       const all = await listInstances();
       setInstances(all);
     } catch (e) {
       setPhase('error');
-      setInstallMsg(String(e));
+      setInstallMsg(formatError(e));
+    } finally {
+      setInstancesLoading(false);
     }
   };
 
@@ -131,10 +143,10 @@ export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => vo
     try {
       const vers = await listModVersions(selectedInstanceId, itemId);
       setCandidates(vers);
-      setPhase(vers.length === 0 ? 'pickingVersion' : 'pickingVersion');
+      setPhase('pickingVersion');
     } catch (e) {
       setPhase('error');
-      setInstallMsg(String(e));
+      setInstallMsg(formatError(e));
     }
   };
 
@@ -148,7 +160,7 @@ export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => vo
       setInstallMsg(`Installed ${selectedCandidate.filename} to ${instances.find((i) => i.instance_id === selectedInstanceId)?.name ?? selectedInstanceId}.`);
     } catch (e) {
       setPhase('error');
-      setInstallMsg(String(e));
+      setInstallMsg(formatError(e));
     }
   };
 
@@ -223,12 +235,21 @@ export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => vo
         </div>
 
         <div className="mt-5 flex flex-wrap gap-2">
-          <button
-            onClick={handleInstall}
-            className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Install to Instance
-          </button>
+          {item.content_type === 'pack' ? (
+            <button
+              onClick={() => setShowPackCreate(true)}
+              className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+            >
+              Create Instance from Pack
+            </button>
+          ) : (
+            <button
+              onClick={handleInstall}
+              className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+            >
+              Install to Instance
+            </button>
+          )}
         </div>
         {showInstallFlow && (
           <section className="mt-4 rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-4">
@@ -248,22 +269,22 @@ export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => vo
 
             {/* Step 1: Instance picker */}
             {!selectedInstanceId ? (
-              instances.length === 0 && phase !== 'idle' ? (
-                <div>
-                  <p className="text-sm text-[rgb(var(--muted))]">
-                    You need an instance first. Create one in the Instances tab.
-                  </p>
-                </div>
-              ) : instances.length === 0 ? (
+              instancesLoading ? (
                 <div className="text-center py-2">
                   <p className="text-sm text-[rgb(var(--muted))]">Loading instances…</p>
+                </div>
+              ) : instances.length === 0 ? (
+                <div>
+                  <p className="text-sm text-[rgb(var(--muted))]">
+                    You need an instance first. Create one in the Instances tab, then come back here.
+                  </p>
                 </div>
               ) : (
                 <div>
                   <label className="block text-xs font-medium mb-1">Select instance</label>
                   <select
                     value={selectedInstanceId ?? ''}
-                    onChange={(e) => setSelectedInstanceId(e.target.value)}
+                    onChange={(e) => setSelectedInstanceId(e.target.value || null)}
                     className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
                   >
                     <option value="">Choose an instance…</option>
@@ -358,6 +379,18 @@ export function ModDetail({ itemId, onBack }: { itemId: string; onBack: () => vo
             )}
           </section>
         )}
+
+        {/* Pack-create dialog */}
+        {showPackCreate && (
+          <PackCreateDialog
+            packName={item.name}
+            onCancel={() => setShowPackCreate(false)}
+            onCreated={(newInstanceId) => {
+              setShowPackCreate(false);
+              onOpenInstanceEditor?.(newInstanceId);
+            }}
+          />
+        )}
       </section>
 
       {curatorNotes && (
@@ -409,5 +442,156 @@ function BackButton({ onBack }: { onBack: () => void }) {
     >
       ← Back
     </button>
+  );
+}
+
+const LOADERS = ['fabric', 'quilt', 'neoforge', 'forge'];
+const DEFAULT_MC_VERSIONS = ['1.21.11', '1.21.10', '1.21.9'];
+
+function PackCreateDialog({
+  packName,
+  onCancel,
+  onCreated,
+}: {
+  packName: string;
+  onCancel: () => void;
+  onCreated: (instanceId: string) => void;
+}) {
+  const [name, setName] = useState(packName);
+  const [mcVersion, setMcVersion] = useState(DEFAULT_MC_VERSIONS[0]);
+  const [loader, setLoader] = useState('fabric');
+  const [loaderVersions, setLoaderVersions] = useState<import('../lib/tauri').LoaderVersionSummary[]>([]);
+  const [loaderVersion, setLoaderVersion] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const versions = await listLoaderVersions(loader, mcVersion);
+        if (cancelled) return;
+        setLoaderVersions(versions);
+        setLoaderVersion(versions[0]?.loader_version ?? '');
+      } catch (e) {
+        if (!cancelled) setError(formatError(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loader, mcVersion]);
+
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const instanceId = name
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+      if (!instanceId) throw new Error('Enter a valid instance name.');
+      if (!loaderVersion) throw new Error('No pinned loader version selected.');
+
+      const request: CreateInstanceRequest = {
+        name,
+        instance_id: instanceId,
+        minecraft_version: mcVersion,
+        loader,
+        loader_version: loaderVersion,
+        jvm_memory_mb: 4096,
+      };
+      const result = await createInstance(request);
+      onCreated(result.instance_id);
+    } catch (e) {
+      setError(formatError(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 surface p-6 shadow-xl">
+        <h3 className="text-lg font-bold mb-4">Create Instance from Pack: {packName}</h3>
+
+        <div className="space-y-4">
+          <label className="block">
+            <span className="text-sm font-medium">Instance name</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+            />
+          </label>
+
+          <div className="grid grid-cols-2 gap-4">
+            <label className="block">
+              <span className="text-sm font-medium">Minecraft version</span>
+              <select
+                value={mcVersion}
+                onChange={(e) => setMcVersion(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              >
+                {DEFAULT_MC_VERSIONS.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            </label>
+
+            <label className="block">
+              <span className="text-sm font-medium">Loader</span>
+              <select
+                value={loader}
+                onChange={(e) => setLoader(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              >
+                {LOADERS.map((l) => (
+                  <option key={l} value={l}>{l}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <label className="block">
+            <span className="text-sm font-medium">Loader version</span>
+            <select
+              value={loaderVersion}
+              onChange={(e) => setLoaderVersion(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+            >
+              {loaderVersions.length === 0 && <option value="">No pinned versions</option>}
+              {loaderVersions.map((v) => (
+                <option key={v.loader_version} value={v.loader_version}>
+                  {v.loader_version} ({v.file_type})
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <p className="text-xs text-[rgb(var(--muted))]">
+            The pack's mods will not auto-install. Open the instance editor to install them individually.
+          </p>
+        </div>
+
+        {error && (
+          <p className="mt-4 text-sm text-red-600 dark:text-red-300">{error}</p>
+        )}
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={busy}
+            className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          >
+            {busy ? 'Creating…' : 'Create'}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

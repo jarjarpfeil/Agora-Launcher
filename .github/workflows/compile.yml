@@ -39,6 +39,12 @@ jobs:
             registry.db.sig
           if-no-files-found: error
 
+      - name: Verify Code of Engagement in all required locations
+        run: |
+          grep -q "Code of Engagement" README.md || (echo "Missing in README.md" && exit 1)
+          grep -q "Code of Engagement" .github/ISSUE_TEMPLATE/review-form.yml || (echo "Missing in review-form.yml" && exit 1)
+          grep -q "Code of Engagement" CODE_OF_ENGAGEMENT.md || (echo "Missing in CODE_OF_ENGAGEMENT.md" && exit 1)
+
       # Upload to GitHub Release Assets as a tagged release (registry-YYYY-MM-DD).
       - name: Deploy to GitHub Release
         run: python scripts/deploy_release_assets.py

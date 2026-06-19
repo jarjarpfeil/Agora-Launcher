@@ -1,6 +1,17 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { getItemById, getItemIds, isContentType, contentTypeLabel, contentTypePath, CONTENT_TYPES } from '@/lib/db';
+import MarkdownRenderer from '@/components/MarkdownRenderer';
+import Reviews from '@/components/Reviews';
+import {
+  getItemById,
+  getItemIds,
+  isContentType,
+  contentTypeLabel,
+  contentTypePath,
+  CONTENT_TYPES,
+  ContentType,
+  RegistryItem,
+} from '@/lib/db';
 
 interface DetailPageProps {
   params: { type: string; id: string };
@@ -21,7 +32,7 @@ export default async function DetailPage({ params }: DetailPageProps) {
   }
 
   const item = await getItemById(params.id);
-  if (!item || item.content_type !== params.type) {
+  if (!item) {
     notFound();
   }
 
@@ -29,19 +40,18 @@ export default async function DetailPage({ params }: DetailPageProps) {
     <div className="space-y-8">
       <div>
         <Link
-          href={contentTypePath(params.type)}
+          href={contentTypePath(params.type as ContentType)}
           className="text-sm text-indigo-600 hover:underline dark:text-indigo-400"
         >
-          ← Back to {contentTypeLabel(params.type)}
+          ← Back to {contentTypeLabel(params.type as ContentType)}
         </Link>
         <h1 className="mt-2 text-3xl font-bold">{item.name}</h1>
         <p className="text-gray-600 dark:text-gray-400">
-          {contentTypeLabel(params.type)} · {item.download_strategy}
+          {contentTypeLabel(params.type as ContentType)} · {item.download_strategy}
         </p>
       </div>
 
       {item.icon_url && (() => {
-        // Validate image URL scheme (§4.1c #3) — only https/data are safe.
         let url: URL | null = null;
         try { url = new URL(item.icon_url); } catch { /* invalid */ }
         const safe = url && (url.protocol === 'https:' || url.protocol === 'data:');
@@ -58,9 +68,7 @@ export default async function DetailPage({ params }: DetailPageProps) {
 
       <div className="rounded-xl border bg-white p-6 dark:border-gray-700 dark:bg-gray-800">
         <h2 className="mb-2 text-xl font-semibold">Curator note</h2>
-        <div className="prose prose-sm max-w-none whitespace-pre-line text-gray-700 dark:prose-invert dark:text-gray-300">
-          {item.curator_note}
-        </div>
+        <MarkdownRenderer content={item.curator_note} />
       </div>
 
       {item.categories.length > 0 && (
@@ -105,6 +113,8 @@ export default async function DetailPage({ params }: DetailPageProps) {
           <span className="font-semibold">Strategy:</span> {item.download_strategy}
         </div>
       </div>
+
+      <Reviews itemId={item.id} />
     </div>
   );
 }

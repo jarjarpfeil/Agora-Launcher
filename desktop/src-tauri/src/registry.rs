@@ -218,6 +218,58 @@ pub fn list_categories(conn: &Connection) -> LauncherResult<Vec<CategoryInfo>> {
     Ok(out)
 }
 
+/// A row from the `pack_mods` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackModRow {
+    pub pack_id: String,
+    pub mod_id: String,
+    pub source: String,
+    pub version: Option<String>,
+    pub status: String,
+    pub description: Option<String>,
+}
+
+/// List all mods in a pack, ordered by mod_id.
+pub fn pack_mods_for_pack(
+    conn: &Connection,
+    pack_id: &str,
+) -> LauncherResult<Vec<PackModRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT pack_id, mod_id, source, version, status, description \
+             FROM pack_mods WHERE pack_id = ?1 ORDER BY mod_id ASC",
+        )
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let rows = stmt
+        .query_map([pack_id], |row| {
+            Ok(PackModRow {
+                pack_id: row.get(0)?,
+                mod_id: row.get(1)?,
+                source: row.get(2)?,
+                version: row.get(3)?,
+                status: row.get(4)?,
+                description: row.get(5)?,
+            })
+        })
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?);
+    }
+    Ok(out)
+}
+
 fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegistryItem> {
     Ok(RegistryItem {
         id: row.get(0)?,

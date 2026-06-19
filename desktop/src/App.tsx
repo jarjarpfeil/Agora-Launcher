@@ -7,6 +7,7 @@ import { Governance } from './pages/Governance';
 import { Settings } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
 import { ModDetail } from './pages/ModDetail';
+import { InstanceEditor } from './pages/InstanceEditor';
 import { getSetting } from './lib/tauri';
 
 type Tab = 'home' | 'browse' | 'instances' | 'governance' | 'settings';
@@ -22,6 +23,7 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [selectedModId, setSelectedModId] = useState<string | null>(null);
+  const [editingInstanceId, setEditingInstanceId] = useState<string | null>(null);
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -53,17 +55,19 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
-        <Sidebar tabs={TABS} activeTab={activeTab} onSelectTab={(t) => { setSelectedModId(null); setActiveTab(t); }} />
+        <Sidebar tabs={TABS} activeTab={activeTab} onSelectTab={(t) => { setSelectedModId(null); setEditingInstanceId(null); setActiveTab(t); }} />
         <main className="flex-1 overflow-y-auto p-6 surface">
-          {selectedModId !== null ? (
-            <ModDetail itemId={selectedModId} onBack={() => setSelectedModId(null)} />
+          {editingInstanceId !== null ? (
+            <InstanceEditor instanceId={editingInstanceId} onBack={() => setEditingInstanceId(null)} />
+          ) : selectedModId !== null ? (
+            <ModDetail itemId={selectedModId} onBack={() => setSelectedModId(null)} onOpenInstanceEditor={(id) => { setSelectedModId(null); setEditingInstanceId(id); }} />
           ) : (
             <>
               {activeTab === 'home' && <Home />}
               {activeTab === 'browse' && (
                 <Browse onSelectMod={(id) => setSelectedModId(id)} />
               )}
-              {activeTab === 'instances' && <Instances />}
+              {activeTab === 'instances' && <Instances onEditInstance={(id) => setEditingInstanceId(id)} />}
               {activeTab === 'governance' && <Governance />}
               {activeTab === 'settings' && <Settings />}
             </>

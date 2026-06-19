@@ -8,6 +8,26 @@ use crate::mojang;
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tauri::Emitter;
+
+/// Emit a staged progress event to the frontend during instance creation.
+///
+/// Failure to emit is non-fatal — the frontend watcher is best-effort.
+fn emit_progress<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+    stage: &str,
+    message: &str,
+) {
+    let _ = app.emit(
+        "instance:create-progress",
+        serde_json::json!({
+            "instance_id": instance_id,
+            "stage": stage,
+            "message": message,
+        }),
+    );
+}
 
 /// Request payload for creating a custom instance (see §6.5b).
 #[derive(Debug, Clone, Deserialize)]
@@ -23,6 +43,8 @@ pub struct CreateInstanceRequest {
     pub jvm_gc: Option<String>,
     #[serde(default)]
     pub jvm_custom_args: Option<String>,
+    #[serde(default)]
+    pub jvm_always_pre_touch: Option<bool>,
 }
 
 /// Summary of an available pinned loader version (for the create-instance UI).
@@ -51,6 +73,7 @@ pub async fn create_instance<R: tauri::Runtime>(
     let instance_id_for_prep = instance_id.clone();
 
     // Step 1: blocking directory/manifest setup.
+    emit_progress(&app, &instance_id, "preparing", "Preparing instance directory...");
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_instance_dir(&app_for_blocking, &instance_id_for_prep, &req_for_prep)
     })
@@ -58,28 +81,52 @@ pub async fn create_instance<R: tauri::Runtime>(
     .map_err(|_| LauncherError::InstanceCreateFailed)??;
 
     // Step 2: async loader injection (network + hash verification).
-    if let Err(e) = inject_loader(&app, &req.loader, &req.minecraft_version, &req.loader_version).await {
+    if let Err(e) =
+        inject_loader(&app, &instance_id, &req.loader, &req.minecraft_version, &req.loader_version)
+            .await
+    {
+        emit_progress(
+            &app,
+            &instance_id,
+            "error",
+            &format!("Failed during loader injection. See logs."),
+        );
         cleanup_instance_dir(&app, &instance_id);
         return Err(e);
     }
 
     // Step 3: blocking DB + profile persistence.
+    emit_progress(&app, &instance_id, "persisting", "Saving instance to local state...");
     let app_for_persist = app.clone();
     let row = match tokio::task::spawn_blocking(move || persist_instance(&app_for_persist, &prepared))
         .await
     {
         Ok(Ok(row)) => row,
         Ok(Err(e)) => {
+            emit_progress(
+                &app,
+                &instance_id,
+                "error",
+                &format!("Failed during persistence. See logs."),
+            );
             cleanup_instance_dir(&app, &instance_id);
             cleanup_loader_version_json(&req.loader, &req.minecraft_version, &req.loader_version);
             return Err(e);
         }
         Err(_) => {
+            emit_progress(
+                &app,
+                &instance_id,
+                "error",
+                "Failed during persistence (task error). See logs.",
+            );
             cleanup_instance_dir(&app, &instance_id);
             cleanup_loader_version_json(&req.loader, &req.minecraft_version, &req.loader_version);
             return Err(LauncherError::InstanceCreateFailed);
         }
     };
+
+    emit_progress(&app, &instance_id, "done", "Instance created successfully.");
 
     Ok(row)
 }
@@ -128,6 +175,7 @@ fn prepare_instance_dir<R: tauri::Runtime>(
         jvm_memory_mb: req.jvm_memory_mb.unwrap_or(4096),
         jvm_gc: req.jvm_gc.clone().unwrap_or_else(|| "g1gc".to_string()),
         jvm_custom_args: req.jvm_custom_args.clone().unwrap_or_default(),
+        jvm_always_pre_touch: req.jvm_always_pre_touch.unwrap_or(true),
         created_at: chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -288,12 +336,20 @@ pub fn list_loader_versions(loader: &str, mc_version: &str) -> Vec<LoaderVersion
 /// itself writes into `~/.minecraft/versions/` and `~/.minecraft/libraries/`.
 async fn inject_loader<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
+    instance_id: &str,
     loader: &str,
     mc_version: &str,
     loader_version: &str,
 ) -> LauncherResult<()> {
     let entry = loader_manifests::find_entry(loader, mc_version, loader_version)
         .ok_or(LauncherError::UnsupportedLoader)?;
+
+    emit_progress(
+        app,
+        instance_id,
+        "downloading_loader",
+        &format!("Downloading {loader} {loader_version}..."),
+    );
 
     let data = download::download_verified(
         loader,
@@ -304,7 +360,15 @@ async fn inject_loader<R: tauri::Runtime>(
     )
     .await?;
 
+    emit_progress(app, instance_id, "verifying_loader", "Verifying SHA-256...");
+
     if entry.file_type == "profile_json" {
+        emit_progress(
+            app,
+            instance_id,
+            "injecting_loader",
+            &format!("Writing profile JSON for {loader} {loader_version}..."),
+        );
         let version_id = entry.file_name.trim_end_matches(".json");
         let mc_dir = paths::minecraft_dir().ok_or(LauncherError::MojangNotFound)?;
         let version_dir = mc_dir.join("versions").join(version_id);
@@ -313,6 +377,12 @@ async fn inject_loader<R: tauri::Runtime>(
             .map_err(|_| LauncherError::InstanceCreateFailed)?;
         Ok(())
     } else if entry.file_type == "installer_jar" {
+        emit_progress(
+            app,
+            instance_id,
+            "injecting_loader",
+            &format!("Staging installer jar for {loader} {loader_version}..."),
+        );
         let app_data =
             paths::app_data_dir(app).map_err(|_| LauncherError::InstanceCreateFailed)?;
         let installer_path = app_data.join(format!("{loader}-installer.jar"));
@@ -386,11 +456,35 @@ fn build_profile_entry<R: tauri::Runtime>(
 ) -> LauncherResult<LauncherProfileEntry> {
     let game_dir = paths::instance_dir(app, &row.instance_id)
         .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    // GC-conditional default for AlwaysPreTouch (§8.5):
+    // - G1GC (or empty/default): true — safe and beneficial
+    // - ZGC / Shenandoah: false — may cause issues
+    let gc_conditional = matches!(
+        row.jvm_gc.as_str(),
+        "g1gc" | ""
+    );
+    let instance_pre_touch = row.jvm_always_pre_touch;
+
+    // Allow user-level override via `jvm_always_pre_touch` setting in user_settings.
+    let user_override = db::get_setting(&db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?, "jvm_always_pre_touch")
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_bool());
+
+    let always_pre_touch = user_override.unwrap_or_else(|| {
+        if instance_pre_touch {
+            gc_conditional
+        } else {
+            false
+        }
+    });
+
     let jvm = JvmConfig {
         memory_mb: row.jvm_memory_mb,
         gc: row.jvm_gc.clone(),
         custom_args: row.jvm_custom_args.clone(),
-        always_pre_touch: true,
+        always_pre_touch,
     };
     let version_id = loader_version_id(&row.loader, &row.loader_version, &row.minecraft_version);
 

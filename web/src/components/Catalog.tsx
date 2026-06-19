@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useState, useMemo } from 'react';
 import Link from 'next/link';
-import { RegistryItem } from '@/lib/db';
+import type { RegistryItem } from '@/lib/db';
 
 interface CatalogProps {
   items: RegistryItem[];
@@ -12,23 +12,132 @@ interface CatalogProps {
 
 export function Catalog({ items, typeLabel, typePath }: CatalogProps) {
   const [query, setQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+  const [selectedMcVersion, setSelectedMcVersion] = useState<string>('all');
+  const [selectedLoader, setSelectedLoader] = useState<string>('all');
+  const [selectedSort, setSelectedSort] = useState<'net_score' | 'velocity' | 'newest'>('net_score');
 
+  // Derive categories from the pre-fetched items (no server action needed).
+  const categories = useMemo(() => {
+    const cats = new Set<string>();
+    items.forEach((item) => item.categories.forEach((c) => cats.add(c)));
+    return Array.from(cats).sort();
+  }, [items]);
+
+  // Client-side filtering + sorting of pre-fetched items.
   const filtered = useMemo(() => {
+    let result = items.slice();
+
+    if (selectedCategory) {
+      result = result.filter((item) => item.categories.includes(selectedCategory));
+    }
+
+    if (selectedMcVersion !== 'all') {
+      result = result.filter((item) =>
+        item.compatible_versions.some((v) => v.mc_version === selectedMcVersion)
+      );
+    }
+
+    if (selectedLoader !== 'all') {
+      result = result.filter((item) =>
+        item.compatible_versions.some((v) => v.loader === selectedLoader)
+      );
+    }
+
+    // Search query
     const q = query.toLowerCase().trim();
-    if (!q) return items;
-    return items.filter((item) => {
-      const text = `${item.name} ${item.curator_note} ${item.categories.join(' ')}`.toLowerCase();
-      return text.includes(q);
-    });
-  }, [query, items]);
+    if (q) {
+      result = result.filter((item) => {
+        const text = `${item.name} ${item.curator_note} ${item.categories.join(' ')}`.toLowerCase();
+        return text.includes(q);
+      });
+    }
+
+    // Sort
+    switch (selectedSort) {
+      case 'velocity':
+        result.sort((a, b) => b.velocity - a.velocity);
+        break;
+      case 'newest':
+        result.sort((a, b) => (b.date_added ?? '').localeCompare(a.date_added ?? ''));
+        break;
+      case 'net_score':
+      default:
+        result.sort((a, b) => b.net_score - a.net_score);
+        break;
+    }
+
+    return result;
+  }, [items, selectedCategory, selectedMcVersion, selectedLoader, selectedSort, query]);
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-3xl font-bold">{typeLabel}</h1>
         <p className="text-gray-600 dark:text-gray-400">
-          {items.length} curated {typeLabel.toLowerCase()}.
+          {filtered.length} curated {typeLabel.toLowerCase()}.
         </p>
+      </div>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setSelectedCategory(null)}
+            className={`rounded-full px-3 py-1 text-sm font-medium transition ${
+              selectedCategory === null
+                ? 'bg-indigo-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
+            }`}
+          >
+            All
+          </button>
+          {categories.map((cat) => (
+            <button
+              key={cat}
+              onClick={() => setSelectedCategory(selectedCategory === cat ? null : cat)}
+              className={`rounded-full px-3 py-1 text-sm font-medium transition ${
+                selectedCategory === cat
+                  ? 'bg-indigo-600 text-white'
+                  : 'bg-gray-100 text-gray-700 hover:bg-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600'
+              }`}
+            >
+              {cat}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap gap-3">
+        <select
+          value={selectedMcVersion}
+          onChange={(e) => setSelectedMcVersion(e.target.value)}
+          className="rounded-lg border bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-800"
+        >
+          <option value="all">All MC Versions</option>
+          <option value="1.21.11">1.21.11</option>
+          <option value="1.21.10">1.21.10</option>
+          <option value="1.21.9">1.21.9</option>
+        </select>
+        <select
+          value={selectedLoader}
+          onChange={(e) => setSelectedLoader(e.target.value)}
+          className="rounded-lg border bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-800"
+        >
+          <option value="all">All Loaders</option>
+          <option value="fabric">Fabric</option>
+          <option value="quilt">Quilt</option>
+          <option value="neoforge">NeoForge</option>
+          <option value="forge">Forge</option>
+        </select>
+        <select
+          value={selectedSort}
+          onChange={(e) => setSelectedSort(e.target.value as 'net_score' | 'velocity' | 'newest')}
+          className="rounded-lg border bg-white px-3 py-2 text-sm dark:border-gray-700 dark:bg-gray-800"
+        >
+          <option value="net_score">Default</option>
+          <option value="velocity">Trending</option>
+          <option value="newest">Newest</option>
+        </select>
       </div>
 
       <div>
@@ -42,7 +151,7 @@ export function Catalog({ items, typeLabel, typePath }: CatalogProps) {
       </div>
 
       {filtered.length === 0 ? (
-        <p className="text-gray-600 dark:text-gray-400">No results match your search.</p>
+        <p className="text-gray-600 dark:text-gray-400">No results match your filters.</p>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((item) => (

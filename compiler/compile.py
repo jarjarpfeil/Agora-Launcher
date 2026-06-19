@@ -13,8 +13,11 @@ import argparse
 import json
 import logging
 import os
+import platform
 import re
+import signal
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +37,54 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 REGISTRY_DIR = REPO_ROOT / "registry"
 CRASH_SIGNATURES_DIR = REPO_ROOT / "crash-signatures"
 LOADER_MANIFESTS_DIR = REPO_ROOT / "loader-manifests"
+
+# ---------------------------------------------------------------------------
+# Regex DoS protection (§2.4.1)
+# ---------------------------------------------------------------------------
+
+# 100 KB corpus for catastrophic-backtracking detection.
+_REGEX_TEST_CORPUS = "a" * 100000
+
+
+def _test_regex_timeout(pattern: re.Pattern[str], timeout_secs: float = 1.0) -> bool:
+    """Return True if the pattern matches the test corpus within *timeout_secs*.
+
+    On Unix this uses ``signal.alarm``.  On Windows it spawns a subprocess with
+    a timeout because ``signal.alarm`` is unavailable.
+
+    Returns False on any error (timeout, crash, etc.) to fail-safe.
+    """
+    if platform.system() != "Windows":
+        # Unix: signal.alarm provides a hard process-level timeout.
+        old_handler = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError()))
+        signal.setitimer(signal.ITIMER_REAL, timeout_secs)
+        try:
+            pattern.search(_REGEX_TEST_CORPUS)
+            return True
+        except TimeoutError:
+            return False
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)  # cancel the alarm
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Windows: no signal.alarm — use subprocess with timeout.
+        # Embed the corpus in the code string to avoid CLI length limits.
+        code = (
+            "import re, sys; "
+            "p = re.compile(sys.argv[1]); "
+            "p.search('a' * 100000)"
+        )
+        try:
+            subprocess.run(
+                [sys.executable, "-c", code, pattern.pattern],
+                timeout=timeout_secs,
+                check=True,
+            )
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+        except Exception:
+            return False
 
 
 def _load_dotenv(path: Path) -> None:
@@ -484,7 +535,45 @@ def insert_pack_mods(conn: sqlite3.Connection, pack_id: str, mods: list[dict[str
 # ---------------------------------------------------------------------------
 
 
-def insert_crash_signature(conn: sqlite3.Connection, sig: dict[str, Any]) -> None:
+def insert_crash_signature(
+    conn: sqlite3.Connection,
+    sig: dict[str, Any],
+    rejected: list[int],
+) -> None:
+    """Insert a crash signature after validating its regex pattern.
+
+    Validation per §2.4.1:
+    - Reject patterns longer than 256 characters.
+    - Test each pattern against a 100 KB corpus with a 1 s timeout to catch
+      catastrophic backtracking.
+
+    *rejected* is a one-element list used as a mutable counter so the caller
+    can track how many signatures were skipped.
+    """
+    name = sig.get("name", sig["id"])
+    raw_pattern = sig.get("regex_pattern", "")
+
+    # --- Length check ---
+    if len(raw_pattern) > 256:
+        logger.error("Crash signature '%s' rejected: pattern exceeds 256 characters (%d)", name, len(raw_pattern))
+        rejected[0] += 1
+        return
+
+    # --- Compile ---
+    try:
+        compiled = re.compile(raw_pattern)
+    except re.error as exc:
+        logger.error("Crash signature '%s' rejected: invalid regex (%s)", name, exc)
+        rejected[0] += 1
+        return
+
+    # --- Catastrophic backtracking test ---
+    if not _test_regex_timeout(compiled):
+        logger.error("Crash signature '%s' rejected: regex timed out on 100 KB corpus (possible catastrophic backtracking)", name)
+        rejected[0] += 1
+        return
+
+    # --- Insert ---
     cursor = conn.cursor()
     action_button = sig.get("action_button")
     cursor.execute(
@@ -648,10 +737,11 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
 
     # Crash signatures.
     sig_count = 0
+    rejected: list[int] = [0]
     for path, data in load_json_files(CRASH_SIGNATURES_DIR):
-        insert_crash_signature(conn, data)
+        insert_crash_signature(conn, data, rejected)
         sig_count += 1
-    logger.info("Inserted %d crash signature(s)", sig_count)
+    logger.info("Inserted %d crash signature(s), rejected %d", sig_count, rejected[0])
 
     # Loader manifests domain/hash allowlist.
     load_loader_manifests(conn)
@@ -665,6 +755,38 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
     conn.close()
 
     logger.info("Wrote database to %s", output_path)
+
+    # --- Audit log (§4.6) ---
+    audit_log_path = REGISTRY_DIR / "governance" / "audit_log.json"
+    audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+    total_items = mod_count + pack_count + other_count
+    total_crash_sigs = sig_count
+    new_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "action": "compile",
+        "details": f"Compiled registry with {total_items} items, {total_crash_sigs} crash signatures",
+    }
+    if audit_log_path.exists():
+        with audit_log_path.open("r", encoding="utf-8") as fh:
+            audit_data = json.load(fh)
+    else:
+        audit_data = {"entries": []}
+    audit_data["entries"].append(new_entry)
+    # Rotation: keep last 1000 entries.
+    if len(audit_data["entries"]) > 1000:
+        audit_data["entries"] = audit_data["entries"][-1000:]
+    with audit_log_path.open("w", encoding="utf-8") as fh:
+        json.dump(audit_data, fh, indent=2)
+    logger.info("Wrote audit log to %s", audit_log_path)
+
+    # Register audit log path in system_config.
+    audit_conn = sqlite3.connect(str(output_path))
+    audit_conn.execute(
+        "INSERT OR REPLACE INTO system_config (key, value_json) VALUES ('audit_log_json', ?)",
+        ("registry/governance/audit_log.json",),
+    )
+    audit_conn.commit()
+    audit_conn.close()
 
     # Sign and write signature.
     sig_path = output_path.with_suffix(output_path.suffix + ".sig")
