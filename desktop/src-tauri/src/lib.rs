@@ -84,6 +84,13 @@ pub fn run() {
                 if let Err(e) = db::init_local_state_db(&handle) {
                     eprintln!("Failed to initialize local state: {}", e);
                 }
+                // Dev-only: seed registry.db from a local compiler build when
+                // running `tauri:dev`. The re-seed path copies an unverified
+                // local db+sig pair (acceptable in debug builds, which relax
+                // signature checks) — must NEVER run in release binaries, where
+                // it could overwrite the CI-signed registry from any
+                // registry.db found in the cwd parent walk.
+                #[cfg(debug_assertions)]
                 if let Err(e) = crate::registry_sync::seed_from_local_build(&handle) {
                     eprintln!("Failed to seed registry: {}", e);
                 }

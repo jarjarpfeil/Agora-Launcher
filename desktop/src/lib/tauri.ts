@@ -338,7 +338,7 @@ export interface ModrinthSearchResult {
   license: string | null;
 }
 
-export type ModrinthSort = 'relevance' | 'downloads' | 'follows' | 'newest' | 'updated';
+export type ModrinthSort = 'relevance' | 'follows' | 'newest' | 'updated';
 
 export interface ModrinthSearchParams {
   query?: string;

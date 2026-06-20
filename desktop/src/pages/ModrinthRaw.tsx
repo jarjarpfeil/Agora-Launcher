@@ -26,7 +26,6 @@ const PRIMARY_LOADERS = ['fabric', 'quilt', 'neoforge', 'forge'];
 
 const SORTS: { label: string; value: ModrinthSort }[] = [
   { label: 'Relevance', value: 'relevance' },
-  { label: 'Most Downloads', value: 'downloads' },
   { label: 'Most Followers', value: 'follows' },
   { label: 'Newest', value: 'newest' },
   { label: 'Recently Updated', value: 'updated' },

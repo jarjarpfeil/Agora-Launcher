@@ -361,6 +361,23 @@ fn read_cached_schema_version<R: tauri::Runtime>(
     .map_err(|_| LauncherError::RegistryMissing)
 }
 
+/// Open a read-only connection at an arbitrary path and read the schema version.
+#[cfg(debug_assertions)]
+fn read_schema_version_at(path: &std::path::Path) -> Option<i64> {
+    let conn = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = conn.pragma_update(None, "query_only", "ON");
+    conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
 fn atomic_replace_db<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     db_bytes: &[u8],
@@ -428,19 +445,47 @@ fn set_last_check_time<R: tauri::Runtime>(
 
 /// On first run with no cached DB, copy the local registry.db from the repo
 /// if it exists. Development convenience for local testing.
+#[cfg(debug_assertions)]
 pub fn seed_from_local_build<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> LauncherResult<bool> {
     let dest = paths::registry_db_path(app).map_err(|_| LauncherError::RegistryMissing)?;
+
     if dest.exists() {
+        let cached_version = read_cached_schema_version(app).unwrap_or(0);
+        let mut search_dir = std::env::current_dir().ok();
+        for _ in 0..5 {
+            if let Some(dir) = search_dir {
+                let candidate = dir.join("registry.db");
+                if candidate.exists() {
+                    if let Some(local_version) = read_schema_version_at(&candidate) {
+                        if local_version > cached_version {
+                            let dest_sig = paths::registry_sig_path(app)
+                                .map_err(|_| LauncherError::RegistryMissing)?;
+                            let local_sig = candidate.with_extension("db.sig");
+                            std::fs::copy(&candidate, &dest)
+                                .map_err(|_| LauncherError::RegistryDownloadFailed)?;
+                            if local_sig.exists() {
+                                std::fs::copy(&local_sig, &dest_sig)
+                                    .map_err(|_| LauncherError::RegistryDownloadFailed)?;
+                            }
+                            eprintln!(
+                                "Re-seeded registry.db (schema {} -> {}) from local build at {}",
+                                cached_version, local_version, candidate.display()
+                            );
+                            return Ok(true);
+                        }
+                    }
+                    break;
+                }
+                search_dir = dir.parent().map(std::path::Path::to_path_buf);
+            } else {
+                break;
+            }
+        }
         return Ok(false);
     }
 
-    // When `npm run tauri:dev` launches the exe, current_dir() is typically
-    // `desktop/src-tauri/`. The compiler writes `registry.db` at the repo
-    // root, so we walk up to four parent directories looking for it. This
-    // covers dev workflows where the user runs `python compiler/compile.py`
-    // from the repo root before launching the app.
     let mut search_dir = std::env::current_dir().ok();
     for _ in 0..5 {
         if let Some(dir) = search_dir {

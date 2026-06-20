@@ -165,7 +165,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={mcVersion ?? ''}
           onChange={(e) => setMcVersion(e.target.value || null)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
           title="Filter by Minecraft version"
         >
           <option value="">Any MC version</option>
@@ -176,7 +176,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={loader ?? ''}
           onChange={(e) => setLoader(e.target.value || null)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
           title="Filter by modloader"
         >
           <option value="">Any loader</option>
@@ -187,7 +187,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={sort}
           onChange={(e) => handleSortChange(e.target.value as SortOption)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
         >
           {SORTS.map((s) => (
             <option key={s.value} value={s.value}>{s.label}</option>

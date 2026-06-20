@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
+import { defaultSchema, type Schema } from 'hast-util-sanitize';
 import {
   getRegistryItem,
   listInstances,
@@ -15,6 +18,41 @@ import {
 } from '../lib/tauri';
 
 type CompatibleVersionEntry = Record<string, unknown> | string;
+
+// Allowlist schema for rendering community/upstream markdown (Modrinth body).
+// Built on rehype-sanitize's default (already strips <script>, on* handlers,
+// javascript:/data: URLs, <iframe>). Additionally allows richer structural tags
+// (details/summary, tables) for formatting; drops `style` (blocks CSS-based UI
+// overlay) and `className` (blocks Tailwind-class UI-deception injection);
+// restricts href/src to https only. Satisfies AGENTS.md: no
+// dangerouslySetInnerHTML — unsafe nodes are stripped from the tree pre-render.
+//
+// MIRRORS web/src/components/MarkdownRenderer.tsx SANITIZE_SCHEMA — there is no
+// shared monorepo package, so keep both in sync when tightening this allowlist.
+const SANITIZE_SCHEMA: Schema = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    'details', 'summary', 'section', 'article', 'header', 'footer', 'aside',
+    'figure', 'figcaption', 'mark', 'abbr', 'kbd', 'var', 'samp',
+    'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'caption', 'colgroup', 'col',
+    'blockquote', 'hr', 'br', 'wbr',
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    a: [...(defaultSchema.attributes?.a ?? []), 'title'],
+    img: [...(defaultSchema.attributes?.img ?? []), 'alt', 'title', 'loading'],
+    th: ['align'], td: ['align'], col: ['span'], colgroup: ['span'],
+    details: ['open'],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: ['https'],
+    src: ['https'],
+    cite: ['https'],
+    poster: ['https'],
+  },
+};
 
 function parseCompatibleVersions(json: string | null): CompatibleVersionEntry[] {
   if (!json) return [];
@@ -431,13 +469,18 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
           {/*
             body_markdown is community-authored content baked into the signed
             registry.db by the nightly compiler. It is rendered with
-            react-markdown, which escapes raw HTML by default (no rehype-raw)
-            so no upstream-injected HTML/scripts can execute — satisfying the
-            AGENTS.md prohibition on dangerouslySetInnerHTML for community
-            content. Links open in a new tab with safe rel attributes.
+            react-markdown + rehype-raw + rehype-sanitize: rehype-raw parses
+            upstream HTML (e.g. Modrinth <details>/<summary>, tables) into the
+            hast tree, then rehype-sanitize strips <script>, on* handlers,
+            javascript:/data: URLs, <iframe>, and `style` attributes via an
+            allowlist BEFORE React renders — so no unsafe nodes ever reach the
+            DOM. This satisfies the AGENTS.md prohibition on
+            dangerouslySetInnerHTML for community content. Links open in a new
+            tab with safe rel attributes.
           */}
           <div className="prose prose-sm dark:prose-invert max-w-none text-[rgb(var(--foreground))]">
             <ReactMarkdown
+              rehypePlugins={[[rehypeRaw, { passThrough: ['html'] }], [rehypeSanitize, SANITIZE_SCHEMA]]}
               components={{
                 a: ({ node, ...props }) => (
                   <a {...props} target="_blank" rel="noopener noreferrer" />

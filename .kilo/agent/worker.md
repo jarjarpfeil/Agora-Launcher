@@ -2,7 +2,7 @@
 description: "Lightweight executor subagent. Completes one focused objective given as intent by the brain agent: locates the code, makes the change, verifies, and returns; escalates blockers instead of looping."
 mode: subagent
 color: "#059669"
-steps: 14
+steps: 50
 permission:
   bash:
     "cargo check *": allow
@@ -12,7 +12,10 @@ permission:
     "cargo clippy *": allow
     "npm run *": allow
     "npm -w *": allow
+    "npx *": allow
     "python compiler/*": allow
+    "python -c *": ask
+    "python scripts/*": allow
     "rg *": allow
     "*": ask
   read: allow
