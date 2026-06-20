@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
   checkRegistryUpdate,
+  formatError,
   githubLogin,
   githubLoginPoll,
   setSetting,
@@ -128,7 +129,7 @@ function ServicesStep({
       await setSetting('ai_mcp_enabled', aiMcp);
       onContinue();
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setSaving(false);
     }
@@ -285,7 +286,7 @@ function GithubStep({
       }
     } catch (e) {
       console.error('[onboarding] signIn failed:', e);
-      const msg = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : formatError(e);
       if (!isStale()) setError(`Sign-in failed: ${msg}`);
     } finally {
       console.log('[onboarding] signIn finally: clearing polling state');
@@ -382,7 +383,7 @@ function RegistryStep({
       setStatus(result);
       setDone(true);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setDownloading(false);
     }

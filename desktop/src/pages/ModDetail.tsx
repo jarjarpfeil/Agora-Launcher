@@ -77,7 +77,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
           if (!result) setError('Mod not found in the registry.');
         }
       } catch (e) {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) setError(formatError(e));
       } finally {
         if (!cancelled) setLoading(false);
       }

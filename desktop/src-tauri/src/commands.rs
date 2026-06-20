@@ -6,7 +6,7 @@ use crate::instances::{self, CreateInstanceRequest, InstanceDetail, LoaderVersio
 use crate::mod_install;
 use crate::models::{InstanceRow, InstalledMod, ModVersionCandidate};
 use crate::modrinth_raw;
-use crate::registry::{self, CategoryInfo, PackModRow, RegistryItem, SortOption};
+use crate::registry::{self, AuditLogEntry, CategoryInfo, PackModRow, RegistryItem, SortOption};
 use crate::state::LauncherState;
 
 #[tauri::command]
@@ -41,6 +41,37 @@ pub async fn browse_items(
             mc_version.as_deref(),
             loader.as_deref(),
             limit.unwrap_or(100),
+        )
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_REGISTRY_QUERY".to_string(),
+        message: "Registry query task failed.".to_string(),
+    })?
+}
+
+/// "For You" recommendations: boost uninstalled mods whose categories overlap
+/// with the user's installed mods (§6.2). Honors the user's selected MC version
+/// and loader compatibility filters when supplied.
+#[tauri::command]
+pub async fn for_you_items(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    modrinth_enabled: Option<bool>,
+    mc_version: Option<String>,
+    loader: Option<String>,
+    limit: Option<i64>,
+) -> LauncherResult<Vec<RegistryItem>> {
+    let modrinth_enabled = modrinth_enabled.unwrap_or(false);
+    let limit = limit.unwrap_or(50).clamp(1, 500);
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        registry::for_you_items(
+            &app,
+            modrinth_enabled,
+            mc_version.as_deref(),
+            loader.as_deref(),
+            limit,
         )
     })
     .await
@@ -100,6 +131,25 @@ pub async fn list_pack_mods(
     .map_err(|_| LauncherError::Generic {
         code: "ERR_REGISTRY_QUERY".to_string(),
         message: "Pack mods query task failed.".to_string(),
+    })?
+}
+
+/// List audit log entries from the registry DB (§4.6).
+#[tauri::command]
+pub async fn list_audit_log(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    limit: Option<i64>,
+) -> LauncherResult<Vec<AuditLogEntry>> {
+    let limit = limit.unwrap_or(200).clamp(1, 1000);
+    tokio::task::spawn_blocking(move || {
+        let conn = registry::open_registry(&app)?;
+        registry::list_audit_log(&conn, limit)
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_REGISTRY_QUERY".to_string(),
+        message: "Audit log query task failed.".to_string(),
     })?
 }
 
@@ -380,6 +430,28 @@ pub async fn remove_mod_from_instance(
     filename: String,
 ) -> LauncherResult<()> {
     mod_install::remove_mod_from_instance(&app, &instance_id, &filename).await
+}
+
+/// Add a manually-dropped .jar file into an instance's `mods/` folder (§6.5b).
+#[tauri::command]
+pub async fn add_manual_mod(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    source_path: String,
+) -> LauncherResult<InstalledMod> {
+    mod_install::add_manual_mod(&app, &instance_id, &source_path).await
+}
+
+/// Export an instance as a shareable pack file (§6.5c).
+#[tauri::command]
+pub async fn export_instance_pack(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    format: String,
+) -> LauncherResult<String> {
+    mod_install::export_instance_pack(&app, &instance_id, &format).await
 }
 
 /// Whether the Modrinth integration is currently enabled (§6.3 toggle).

@@ -972,6 +972,26 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
         "INSERT OR REPLACE INTO system_config (key, value_json) VALUES ('audit_log_json', ?)",
         ("registry/governance/audit_log.json",),
     )
+
+    # Bake audit log entries into a queryable table.
+    audit_conn.execute(
+        "CREATE TABLE IF NOT EXISTS audit_log ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "timestamp TEXT NOT NULL, "
+        "action TEXT NOT NULL, "
+        "details TEXT)"
+    )
+    audit_conn.execute("DELETE FROM audit_log")
+    rows = [
+        (e["timestamp"], e["action"], e.get("details"))
+        for e in audit_data.get("entries", [])
+    ]
+    audit_conn.executemany(
+        "INSERT INTO audit_log (timestamp, action, details) VALUES (?, ?, ?)",
+        rows,
+    )
+    logger.info("Inserted %d audit log entries into registry.db", len(rows))
+
     audit_conn.commit()
     audit_conn.close()
 

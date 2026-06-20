@@ -198,8 +198,9 @@
   - **Spec:** §6.2
   - **Acceptance:** User opens a mod, sees compatible versions, can install it to their active instance.
 
-- [ ] **"For You" algorithm** (§6.2)
+- [x] **"For You" algorithm** (§6.2)
   - **Short:** Track locally installed categories; boost uninstalled mods in matching categories.
+  - **Detail:** Backend `for_you_items` (`desktop/src-tauri/src/registry.rs`): walks all `instance_manifest.json` files under `instances/` to collect installed mod `registry_id`s; derives the user's interest categories from `item_categories` for those ids; runs a single parameterized SQL query that joins `registry_items` ↔ `item_categories`, excludes already-installed items, and ranks by `COUNT(ic.category_id) DESC, net_score DESC` (more category overlap = higher rank). Degrades to plain `net_score` ordering when the user has no installed mods (or none resolve categories). Registered as `for_you_items` command. Frontend: `SORTS` gains a "For You" option (default sort) in `Browse.tsx`; when selected, `forYouItems(modrinthEnabled)` is called instead of `browseItems` (category/content-type/MC/loader filters are intentionally inert for For You, as it's a global recommendation). The Modrinth toggle is still respected.
   - **Spec:** §6.2
   - **Acceptance:** After installing 3 "magic" mods, Browse surfaces more magic mods.
 
@@ -209,13 +210,15 @@
   - **Spec:** §6.3
   - **Acceptance:** User can search Modrinth directly, download a mod, and it's hash-verified before writing to `mods/`.
 
-- [ ] **Manual .jar drag-and-drop** (§6.5b)
+- [x] **Manual .jar drag-and-drop** (§6.5b)
   - **Short:** Drag-and-drop .jar files into an instance's `mods/` folder.
+  - **Detail:** Backend `add_manual_mod` (`desktop/src-tauri/src/mod_install.rs`) copies the dropped file into the instance `mods/` dir (validates `.jar` + rejects path-traversal filenames), computes SHA-256, and appends an `InstalledMod` with `source: "manual_drag_drop"` atomically. Registered as `add_manual_mod` command. `InstanceEditor.tsx` renders a drop zone over the mods list that reads the Tauri `File.path`, calls the command, and refreshes the manifest.
   - **Spec:** §6.5b
   - **Acceptance:** Dragged file appears in `instance_manifest.json` with `source: "manual_drag_drop"`.
 
-- [ ] **Pack export (.mrpack / custom JSON)** (§6.5c)
+- [x] **Pack export (.mrpack / custom JSON)** (§6.5c)
   - **Short:** Export an instance as a shareable `.mrpack` or custom `.json` pack file.
+  - **Detail:** Backend `export_instance_pack` (`desktop/src-tauri/src/mod_install.rs`): `format: "json"` writes a small `.agora-pack.json` manifest (instance meta + mod list with registry ids / sources / versions / SHA-256 — no binaries, ~5–20KB); `format: "mrpack"` writes a `.mrpack` zip containing `modrinth.index.json` (formatVersion 1 + dependencies) plus the mod `.jar`s under `mods/<filename>`. Output written to `<app_data>/exports/<id>.<ext>` atomically (.tmp + rename). `InstanceEditor.tsx` exposes "Export as JSON" and "Export as .mrpack" buttons with loading + success-path display.
   - **Spec:** §6.5c
   - **Acceptance:** Exported file is 5–20KB and can rebuild the instance on another machine.
 
@@ -244,9 +247,9 @@
   - **Spec:** §4.1c #3, §13
   - **Acceptance:** Curator note renders bold/italic/links but never raw HTML.
 
-- [ ] **Fetch registry.db from GitHub Release Asset during CI** (§13)
+- [x] **Fetch registry.db from GitHub Release Asset during CI** (§13)
   - **Short:** Web build should fetch the latest `registry.db` from GitHub Releases, not read a sibling file.
-  - **Detail:** `web/src/lib/db.ts` currently reads `../registry.db` from the filesystem. Spec says the web build should fetch the latest release asset during CI. This requires a CI step that downloads `registry.db` before `next build`.
+  - **Detail:** New `scripts/fetch_registry_db.py` (stdlib only) queries the GitHub Releases API for the latest `registry-*` release and downloads `registry.db` (+ `.sig` if present) to a target dir. New `.github/workflows/web-build.yml` (dispatch / daily schedule / push to `web/**`) sets up Node 20 + Python 3.11, runs the fetch script to place `registry.db` at the repo root (matching `web/src/lib/db.ts` fallback), then `npm ci && npm run build`, uploading `web/out` as `web-static`. Depends on a `registry-*` release existing (created by `compile.yml`).
   - **Spec:** §13
   - **Acceptance:** `npm run build` in CI works without a local `registry.db`.
 
@@ -278,8 +281,9 @@
   - **Spec:** §5, §6.1
   - **Acceptance:** Under-review item appears in Triage Center with live poll percentage.
 
-- [ ] **Curator Shield banner** (§5.4)
+- [x] **Curator Shield banner** (§5.4)
   - **Short:** Display a non-dismissable steel-blue banner on immune items' detail pages.
+  - **Detail:** Desktop `ModDetail.tsx` already rendered the "Immunity Shield Active" banner above the install button. Added the same Curator Shield banner to the **web** detail page (`web/src/app/[type]/[id]/page.tsx`): rendered at the top of the page when `item.is_immune` is truthy, using the existing `is_immune` field on the web `RegistryItem`. No `dangerouslySetInnerHTML`.
   - **Spec:** §5.4
   - **Acceptance:** Immune mod profile page shows "Curator Shield" banner above download button.
 
@@ -288,8 +292,9 @@
   - **Spec:** §5.6
   - **Acceptance:** User can flag a comment; triggering creates a GitHub issue in `agora-mc/admin-alerts`.
 
-- [ ] **In-app Transparency Log** (§4.6)
+- [x] **In-app Transparency Log** (§4.6)
   - **Short:** Display `audit_log_json` entries in the Governance tab.
+  - **Detail:** Compiler (`compiler/compile.py`) now bakes the audit entries into an `audit_log` table (`id, timestamp, action, details`) in `registry.db` (parameterized `executemany`; table created if absent; `verify_db.py` reports `audit_log: 8`). Desktop backend `list_audit_log` command (`registry.rs` + `commands.rs`, reads newest-first, defensively returns `[]` if the table is absent in older builds). `Governance.tsx` renders a scrollable Transparency Log section (loading/error/empty states, `<time>` timestamps, action badge, details). `audit_log_json` path indicator in `system_config` preserved.
   - **Spec:** §4.6
   - **Acceptance:** User can see governance actions (immune grants, velocity overrides) in a scrollable log.
 
@@ -324,8 +329,9 @@
   - **Spec:** §17
   - **Acceptance:** New release auto-downloads and installs on next launch.
 
-- [ ] **Telemetry opt-in flow** (§12)
+- [x] **Telemetry opt-in flow** (§12)
   - **Short:** Clear opt-in prompt for anonymous crash telemetry; respects user choice.
+  - **Detail:** Adding setting `crash_telemetry_opt_in` (boolean, default off/unset). `db::purge_stale_crash_telemetry` (defined but previously uncalled) now runs at startup inside `spawn_blocking` in `lib.rs` `.setup()` — it is local data hygiene (90-day / count<2 retention), independent of opt-in. `Settings.tsx` adds a "Crash Telemetry" toggle card; `App.tsx` shows a one-time opt-in prompt only while the setting is unset (`null`), with "Allow" (true) / "Not now" (false) — once answered it never reappears. No upload endpoint exists yet (separate "anonymous crash telemetry aggregation" backlog item); opting out disables all future sharing.
   - **Spec:** §12
   - **Acceptance:** User is prompted once; saying no disables all telemetry.
 

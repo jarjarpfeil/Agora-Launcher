@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getRegistryStatus, checkRegistryUpdate, type RegistryStatus } from '../lib/tauri';
+import { formatError, getRegistryStatus, checkRegistryUpdate, type RegistryStatus } from '../lib/tauri';
 
 export function Home() {
   const [status, setStatus] = useState<RegistryStatus | null>(null);
@@ -10,7 +10,7 @@ export function Home() {
     try {
       setStatus(await getRegistryStatus());
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     }
   };
 
@@ -25,7 +25,7 @@ export function Home() {
       const result = await checkRegistryUpdate(true);
       setStatus(result);
     } catch (e) {
-      setError(String(e));
+      setError(formatError(e));
     } finally {
       setChecking(false);
     }

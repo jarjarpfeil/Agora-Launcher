@@ -38,6 +38,20 @@ export default async function DetailPage({ params }: DetailPageProps) {
 
   return (
     <div className="space-y-8">
+      {item.is_immune ? (
+        <div
+          className="rounded-xl border border-blue-300 bg-blue-50 px-4 py-3 text-sm text-blue-900 dark:border-blue-700 dark:bg-blue-950 dark:text-blue-200"
+          role="status"
+        >
+          <div className="flex items-center gap-2 font-semibold">
+            <span aria-hidden="true">🛡️</span>
+            <span>Curator Shield Active</span>
+          </div>
+          <p className="mt-1 text-xs opacity-90">
+            This entry is immune to community demotion and curated by Agora maintainers.
+          </p>
+        </div>
+      ) : null}
       <div>
         <Link
           href={contentTypePath(params.type as ContentType)}

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react';
 import {
   getInstanceDetail,
   removeModFromInstance,
+  addManualMod,
+  exportInstancePack,
   browseItems,
   listCategories,
   listModVersions,
@@ -30,7 +32,9 @@ export function InstanceEditor({ instanceId, onBack }: { instanceId: string; onB
   const [detail, setDetail] = useState<InstanceDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
   const [removeBusy, setRemoveBusy] = useState<string | null>(null);
+  const [exportBusy, setExportBusy] = useState(false);
 
   // Add-mod state
   const [showAdd, setShowAdd] = useState(false);
@@ -216,6 +220,43 @@ export function InstanceEditor({ instanceId, onBack }: { instanceId: string; onB
     getInstanceDetail(instanceId).then((result) => setDetail(result));
   };
 
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setError(null);
+    setStatus(null);
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const filePath = (file as File & { path?: string }).path;
+    if (!filePath) {
+      setError('Could not resolve the dropped file path.');
+      return;
+    }
+    try {
+      await addManualMod(instanceId, filePath);
+      const result = await getInstanceDetail(instanceId);
+      setDetail(result);
+      setStatus(`Added "${file.name}" to instance.`);
+    } catch (e) {
+      setError(formatError(e));
+    }
+  };
+
+  const handleExportPack = async (format: 'json' | 'mrpack') => {
+    setExportBusy(true);
+    setError(null);
+    setStatus(null);
+    try {
+      const path = await exportInstancePack(instanceId, format);
+      setStatus(`Exported ${format === 'json' ? 'pack' : '.mrpack'} to: ${path}`);
+    } catch (e) {
+      setError(formatError(e));
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
   const row = detail?.row;
   const manifest = detail?.manifest;
   const mods = manifest?.mods ?? [];
@@ -286,6 +327,20 @@ export function InstanceEditor({ instanceId, onBack }: { instanceId: string; onB
               title="JVM settings edit — backend command not yet implemented"
             >
               ⚙️ Edit Settings (TODO)
+            </button>
+            <button
+              onClick={() => handleExportPack('json')}
+              disabled={exportBusy}
+              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+            >
+              {exportBusy ? 'Exporting…' : 'Export as JSON'}
+            </button>
+            <button
+              onClick={() => handleExportPack('mrpack')}
+              disabled={exportBusy}
+              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+            >
+              {exportBusy ? 'Exporting…' : 'Export as .mrpack'}
             </button>
           </div>
         </div>
@@ -411,9 +466,23 @@ export function InstanceEditor({ instanceId, onBack }: { instanceId: string; onB
         </section>
       )}
 
+      {/* Status message */}
+      {status && (
+        <div className="rounded-lg border border-green-300 bg-green-50 p-3 text-sm text-green-700 dark:border-green-700 dark:bg-green-900/30 dark:text-green-200">
+          {status}
+        </div>
+      )}
+
       {/* Mods list */}
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+      <section
+        className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4"
+        onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+        onDrop={handleDrop}
+      >
         <h3 className="font-semibold text-sm mb-3">Installed Mods ({mods.length})</h3>
+        <p className="text-xs text-[rgb(var(--muted))] mb-3">
+          Drag and drop a .jar file here to add it manually.
+        </p>
         {mods.length === 0 ? (
           <p className="text-sm text-[rgb(var(--muted))]">No mods installed.</p>
         ) : (

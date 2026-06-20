@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react';
 import {
   browseItems,
+  forYouItems,
+  formatError,
   getSetting,
   listCategories,
+  setSetting,
   type CategoryInfo,
   type RegistryItem,
   type SortOption,
 } from '../lib/tauri';
 
 const SORTS: { label: string; value: SortOption }[] = [
+  { label: 'For You', value: 'for_you' },
   { label: 'Net Score', value: 'net_score' },
   { label: 'Trending', value: 'velocity' },
   { label: 'Newest', value: 'newest' },
@@ -24,6 +28,8 @@ const MC_VERSIONS = ['1.21.11', '1.21.10', '1.21.9'];
 export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: string) => void; onOpenModrinth?: () => void }) {
   const [items, setItems] = useState<RegistryItem[]>([]);
   const [categories, setCategories] = useState<CategoryInfo[]>([]);
+  // Default to 'net_score' so existing users don't see a silent ordering
+  // shift on upgrade; the persisted preference (if any) is loaded below.
   const [sort, setSort] = useState<SortOption>('net_score');
   const [category, setCategory] = useState<string | null>(null);
   const [contentType, setContentType] = useState<string | null>(null);
@@ -33,6 +39,35 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Load the persisted sort preference once on mount. Defaults to 'net_score'
+  // when unset so no upgrade silently shifts ordering; users opt into "For You".
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const saved = await getSetting('browse_sort');
+        if (!cancelled && typeof saved === 'string') {
+          setSort(saved as SortOption);
+        }
+      } catch {
+        // Setting read failure: keep the safe 'net_score' default.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleSortChange = (next: SortOption) => {
+    setSort(next);
+    // "For You" is a recommendation sort and does not filter by category;
+    // clear any stale category selection so the UI stays consistent.
+    if (next === 'for_you') setCategory(null);
+    void setSetting('browse_sort', next).catch(() => {
+      // Persist failure is non-fatal; the in-memory sort still applies.
+    });
+  };
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -41,7 +76,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         const cats = await listCategories();
         if (!cancelled) setCategories(cats);
       } catch (e) {
-        if (!cancelled) setError(String(e));
+        if (!cancelled) setError(formatError(e));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -67,18 +102,20 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
           // (Modrinth-hidden) behaviour.
           modrinthEnabled = false;
         }
-        const result = await browseItems(
-          contentType ?? undefined,
-          category ?? undefined,
-          sort,
-          modrinthEnabled,
-          mcVersion ?? undefined,
-          loader ?? undefined,
-        );
+        const result = sort === 'for_you'
+          ? await forYouItems(modrinthEnabled, mcVersion ?? undefined, loader ?? undefined)
+          : await browseItems(
+              contentType ?? undefined,
+              category ?? undefined,
+              sort,
+              modrinthEnabled,
+              mcVersion ?? undefined,
+              loader ?? undefined,
+            );
         if (!cancelled) setItems(result);
       } catch (e) {
         if (!cancelled) {
-          setError(String(e));
+          setError(formatError(e));
           setItems([]);
         }
       } finally {
@@ -117,7 +154,8 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={contentType ?? ''}
           onChange={(e) => setContentType(e.target.value || null)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+          disabled={sort === 'for_you'}
+          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <option value="">All types</option>
           {CONTENT_TYPES.map((ct) => (
@@ -148,7 +186,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         </select>
         <select
           value={sort}
-          onChange={(e) => setSort(e.target.value as SortOption)}
+          onChange={(e) => handleSortChange(e.target.value as SortOption)}
           className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
         >
           {SORTS.map((s) => (
@@ -179,7 +217,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         </div>
       )}
 
-      {categories.length > 0 && (
+      {sort !== 'for_you' && categories.length > 0 && (
         <div className="flex flex-wrap gap-2">
           <button
             onClick={() => setCategory(null)}

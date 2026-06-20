@@ -40,9 +40,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::greet,
             commands::browse_items,
+            commands::for_you_items,
             commands::get_registry_item,
             commands::list_categories,
             commands::list_pack_mods,
+            commands::list_audit_log,
             commands::check_registry_update,
             commands::get_registry_status,
             commands::extract_overrides,
@@ -65,6 +67,8 @@ pub fn run() {
             commands::read_crash_log_cmd,
             commands::list_mod_versions,
             commands::install_mod_version,
+            commands::add_manual_mod,
+            commands::export_instance_pack,
             commands::remove_mod_from_instance,
             commands::is_modrinth_enabled,
             commands::search_modrinth,
@@ -83,6 +87,16 @@ pub fn run() {
                 if let Err(e) = crate::registry_sync::seed_from_local_build(&handle) {
                     eprintln!("Failed to seed registry: {}", e);
                 }
+                let purge_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        if let Ok(conn) = db::local_state_connection(&purge_handle) {
+                            if let Err(e) = db::purge_stale_crash_telemetry(&conn) {
+                                eprintln!("Failed to purge stale crash telemetry: {}", e);
+                            }
+                        }
+                    }).await;
+                });
             });
             Ok(())
         })

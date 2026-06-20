@@ -551,3 +551,356 @@ pub async fn remove_mod_from_instance(
 
     Ok(())
 }
+
+/// Add a manually-dropped .jar file into an instance's `mods/` folder (§6.5b).
+///
+/// Copies the file at `source_path` into the instance mods directory, computes
+/// its SHA-256, and appends an `InstalledMod` with `source: "manual_drag_drop"`
+/// to `instance_manifest.json` (atomic .tmp + rename).
+///
+/// Security: `source_path` arrives from IPC and is untrusted. It is
+/// canonicalized and required to resolve within one of the user's allowlisted
+/// drop directories (Downloads / Desktop / Documents / OS temp). Anything
+/// outside that whitelist is rejected, so a compromised frontend cannot use
+/// this command as an arbitrary-file-read primitive to exfiltrate e.g.
+/// `~/.ssh/id_rsa` into a discoverable location. All blocking file I/O runs
+/// inside a single `spawn_blocking` so the async runtime is never blocked.
+pub async fn add_manual_mod(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+    source_path: &str,
+) -> LauncherResult<InstalledMod> {
+    use std::path::Path;
+
+    let src = Path::new(source_path);
+    let ext = src.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+    if ext.as_deref() != Some("jar") {
+        return Err(LauncherError::Generic {
+            code: "ERR_INVALID_FILENAME".to_string(),
+            message: "Only .jar files can be added manually.".to_string(),
+        });
+    }
+    let file_name = src.file_name().and_then(|n| n.to_str()).ok_or_else(|| LauncherError::Generic {
+        code: "ERR_INVALID_FILENAME".to_string(),
+        message: "Could not determine a valid file name.".to_string(),
+    })?;
+    if file_name.contains("..") || file_name.contains('/') || file_name.contains('\\') {
+        return Err(LauncherError::Generic {
+            code: "ERR_INVALID_FILENAME".to_string(),
+            message: "Filename contains invalid characters.".to_string(),
+        });
+    }
+
+    let mods_dir = paths::instance_dir(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?
+        .join("mods");
+    let dest = mods_dir.join(file_name);
+    let manifest_path = paths::instance_manifest_path(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    let source_path_owned = source_path.to_string();
+    let file_name_owned = file_name.to_string();
+
+    let installed_mod = tokio::task::spawn_blocking(move || -> LauncherResult<InstalledMod> {
+        // Canonicalize the source path so symlinks resolve and we can compare
+        // against the allowlisted drop roots.
+        let canonical = std::fs::canonicalize(&source_path_owned).map_err(|_| LauncherError::Generic {
+            code: "ERR_INVALID_SOURCE".to_string(),
+            message: "Source file does not exist or cannot be resolved.".to_string(),
+        })?;
+
+        // Build the allowlist of canonical drop directories. `dirs` roots may
+        // themselves contain symlinks, so canonicalize each before comparing.
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for r in [
+            dirs::download_dir(),
+            dirs::desktop_dir(),
+            dirs::document_dir(),
+            Some(std::env::temp_dir()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Ok(c) = std::fs::canonicalize(&r) {
+                roots.push(c);
+            }
+        }
+        let allowed = roots.iter().any(|root| canonical.starts_with(root));
+        if !allowed {
+            return Err(LauncherError::Generic {
+                code: "ERR_SOURCE_NOT_ALLOWED".to_string(),
+                message: "Source file is outside the allowed drop directories \
+                          (Downloads, Desktop, Documents, or system temp)."
+                    .to_string(),
+            });
+        }
+
+        let bytes = std::fs::read(&canonical).map_err(|_| LauncherError::Generic {
+            code: "ERR_READ_FAILED".to_string(),
+            message: "Failed to read the dropped file.".to_string(),
+        })?;
+
+        std::fs::create_dir_all(&mods_dir).map_err(|_| LauncherError::InstanceCreateFailed)?;
+        std::fs::write(&dest, &bytes).map_err(|_| LauncherError::InstanceCreateFailed)?;
+        let sha256 = download::sha256_hex(&bytes);
+
+        if !manifest_path.exists() {
+            return Err(LauncherError::Generic {
+                code: "ERR_MANIFEST_MISSING".to_string(),
+                message: "Instance manifest not found. Create the instance first.".to_string(),
+            });
+        }
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+        let mut manifest: InstanceManifest =
+            serde_json::from_str(&text).map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+        let installed_mod = InstalledMod {
+            filename: file_name_owned.clone(),
+            registry_id: None,
+            modrinth_id: None,
+            source: "manual_drag_drop".to_string(),
+            version: None,
+            sha256,
+            installed_at: chrono::Utc::now().to_rfc3339(),
+        };
+        manifest.mods.push(installed_mod.clone());
+
+        let tmp_path = manifest_path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(&manifest)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+        std::fs::write(&tmp_path, text).map_err(|_| LauncherError::InstanceCreateFailed)?;
+        std::fs::rename(&tmp_path, &manifest_path)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+        Ok(installed_mod)
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_MANIFEST_WRITE".to_string(),
+        message: "Manual mod add task failed.".to_string(),
+    })??;
+
+    Ok(installed_mod)
+}
+
+/// Validate a mod filename and return its zip entry name (`mods/<filename>`).
+///
+/// Returns `None` for names that could escape the `mods/` directory (traversal
+/// via `..`, `/`, `\`, or absolute/null) so the caller can record a manifest-
+/// only fallback instead of writing the bytes. This guards the mrpack export
+/// against zip-slip and against mods added through non-`add_manual_mod` paths
+/// (e.g. Modrinth download, override extraction) that don't pre-sanitize.
+fn safe_zip_entry_name(filename: &str) -> Option<String> {
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.contains('\0')
+    {
+        return None;
+    }
+    Some(format!("mods/{}", filename))
+}
+
+/// Stream a single file into the zip writer, computing SHA-256 + size as bytes
+/// flow through. Peak memory is bounded by `CHUNK` rather than the full file.
+fn stream_jar_into_zip(
+    zip: &mut zip::ZipWriter<std::fs::File>,
+    opts: zip::write::FileOptions,
+    entry_name: &str,
+    path: &std::path::Path,
+) -> LauncherResult<(String, u64)> {
+    use std::io::{Read, Write};
+    use sha2::Digest;
+    const CHUNK: usize = 64 * 1024;
+
+    let mut f = std::fs::File::open(path).map_err(|_| LauncherError::InstanceCreateFailed)?;
+    zip.start_file(entry_name, opts)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; CHUNK];
+    let mut size: u64 = 0;
+    loop {
+        let n = f.read(&mut buf).map_err(|_| LauncherError::InstanceCreateFailed)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        zip.write_all(&buf[..n])
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+        size += n as u64;
+    }
+    Ok((hex::encode(hasher.finalize()), size))
+}
+
+/// Export an instance as a shareable pack file (§6.5c).
+///
+/// - `format == "json"`: a custom `.agora-pack.json` manifest containing the
+///   instance metadata + installed-mod list (registry ids, sources, versions,
+///   SHA-256 hashes). Small (5–20KB) and sufficient to rebuild the instance on
+///   another machine. No mod binaries are bundled.
+/// - `format == "mrpack"`: a `.mrpack` (zip) containing `modrinth.index.json`
+///   plus the actual mod `.jar` files under their `mods/<filename>` paths.
+///
+/// Returns the absolute path to the written export file.
+pub async fn export_instance_pack(
+    app: &tauri::AppHandle,
+    instance_id: &str,
+    format: &str,
+) -> LauncherResult<String> {
+    use std::io::Write;
+
+    let manifest_path = paths::instance_manifest_path(app, instance_id)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    if !manifest_path.exists() {
+        return Err(LauncherError::Generic {
+            code: "ERR_MANIFEST_MISSING".to_string(),
+            message: "Instance manifest not found.".to_string(),
+        });
+    }
+    let manifest: InstanceManifest = {
+        let text = std::fs::read_to_string(&manifest_path)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+        serde_json::from_str(&text).map_err(|_| LauncherError::InstanceCreateFailed)?
+    };
+
+    let exports_dir = paths::app_data_dir(app)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?
+        .join("exports");
+    std::fs::create_dir_all(&exports_dir).map_err(|_| LauncherError::InstanceCreateFailed)?;
+    let safe_id = paths::sanitize_id(instance_id);
+
+    match format {
+        "json" => {
+            let pack = serde_json::json!({
+                "format": "agora-pack/v1",
+                "instance": {
+                    "id": manifest.instance_id,
+                    "name": manifest.name,
+                    "minecraft_version": manifest.minecraft_version,
+                    "loader": manifest.loader,
+                    "loader_version": manifest.loader_version,
+                },
+                "mods": manifest.mods.iter().map(|m| serde_json::json!({
+                    "filename": m.filename,
+                    "registry_id": m.registry_id,
+                    "modrinth_id": m.modrinth_id,
+                    "source": m.source,
+                    "version": m.version,
+                    "sha256": m.sha256,
+                })).collect::<Vec<_>>(),
+            });
+            let out_path = exports_dir.join(format!("{}.agora-pack.json", safe_id));
+            let tmp_path = out_path.with_extension("json.tmp");
+            let text = serde_json::to_string_pretty(&pack)
+                .map_err(|_| LauncherError::InstanceCreateFailed)?;
+            std::fs::write(&tmp_path, text).map_err(|_| LauncherError::InstanceCreateFailed)?;
+            std::fs::rename(&tmp_path, &out_path).map_err(|_| LauncherError::InstanceCreateFailed)?;
+            Ok(out_path.to_string_lossy().to_string())
+        }
+        "mrpack" => {
+            let mods_dir = paths::instance_dir(app, instance_id)
+                .map_err(|_| LauncherError::InstanceCreateFailed)?
+                .join("mods");
+
+            let out_path = exports_dir.join(format!("{}.mrpack", safe_id));
+            let tmp_path = out_path.with_extension("mrpack.tmp");
+
+            {
+                let file = std::fs::File::create(&tmp_path)
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+                let mut zip = zip::ZipWriter::new(file);
+                let opts: zip::write::FileOptions =
+                    zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+                let mut files_meta: Vec<serde_json::Value> = Vec::new();
+
+                for m in &manifest.mods {
+                    let entry_name = match safe_zip_entry_name(&m.filename) {
+                        Some(n) => n,
+                        None => {
+                            // Unsanitizable filename (traversal / null) — record
+                            // the manifest hash only; do not bundle bytes.
+                            files_meta.push(serde_json::json!({
+                                "path": format!("mods/{}", m.filename),
+                                "hashes": { "sha256": m.sha256 },
+                                "downloads": [],
+                                "fileSize": 0u64,
+                            }));
+                            continue;
+                        }
+                    };
+                    let p = mods_dir.join(&m.filename);
+
+                    // Reject symlinks in mods/ so an attacker cannot bundle an
+                    // arbitrary file the user did not intend to ship.
+                    let is_symlink = std::fs::symlink_metadata(&p)
+                        .map(|md| md.file_type().is_symlink())
+                        .unwrap_or(false);
+                    if is_symlink {
+                        files_meta.push(serde_json::json!({
+                            "path": entry_name,
+                            "hashes": { "sha256": m.sha256 },
+                            "downloads": [],
+                            "fileSize": 0u64,
+                        }));
+                        continue;
+                    }
+
+                    match stream_jar_into_zip(&mut zip, opts, &entry_name, &p) {
+                        Ok((sha, size)) => {
+                            files_meta.push(serde_json::json!({
+                                "path": entry_name,
+                                "hashes": { "sha256": sha },
+                                "downloads": [],
+                                "fileSize": size,
+                            }));
+                        }
+                        Err(_) => {
+                            // File unreadable/missing — record the manifest
+                            // hash + zero size so the pack still lists intent.
+                            files_meta.push(serde_json::json!({
+                                "path": entry_name,
+                                "hashes": { "sha256": m.sha256 },
+                                "downloads": [],
+                                "fileSize": 0u64,
+                            }));
+                        }
+                    }
+                }
+
+                // Write modrinth.index.json last so its metadata reflects the
+                // streamed file hashes/sizes. Archive entry order is irrelevant
+                // to mrpack consumers.
+                let mut deps = serde_json::Map::new();
+                deps.insert("minecraft".to_string(), serde_json::Value::String(manifest.minecraft_version.clone()));
+                deps.insert(manifest.loader.clone(), serde_json::Value::String(manifest.loader_version.clone()));
+                let index = serde_json::json!({
+                    "formatVersion": 1,
+                    "game": "minecraft",
+                    "versionId": manifest.loader_version,
+                    "name": manifest.name,
+                    "dependencies": deps,
+                    "files": files_meta,
+                });
+                let index_text = serde_json::to_string_pretty(&index)
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+                zip.start_file("modrinth.index.json", opts)
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+                zip.write_all(index_text.as_bytes())
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+                zip.finish().map_err(|_| LauncherError::InstanceCreateFailed)?;
+            }
+
+            std::fs::rename(&tmp_path, &out_path).map_err(|_| LauncherError::InstanceCreateFailed)?;
+            Ok(out_path.to_string_lossy().to_string())
+        }
+        other => Err(LauncherError::Generic {
+            code: "ERR_INVALID_FORMAT".to_string(),
+            message: format!("Unknown export format '{}'. Use 'json' or 'mrpack'.", other),
+        }),
+    }
+}

@@ -1,28 +1,31 @@
 import { useEffect, useState } from 'react';
-import { getSetting, setSetting } from '../lib/tauri';
+import { formatError, getSetting, setSetting } from '../lib/tauri';
 
 export function Settings() {
   const [modrinth, setModrinth] = useState(false);
   const [aiMcp, setAiMcp] = useState(false);
   const [launcherPath, setLauncherPath] = useState('');
   const [alwaysPreTouch, setAlwaysPreTouch] = useState(true);
+  const [crashTelemetry, setCrashTelemetry] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [m, a, p, apt] = await Promise.all([
+        const [m, a, p, apt, ct] = await Promise.all([
           getSetting('modrinth_enabled'),
           getSetting('ai_mcp_enabled'),
           getSetting('mojang_launcher_path'),
           getSetting('jvm_always_pre_touch'),
+          getSetting('crash_telemetry_opt_in'),
         ]);
         if (cancelled) return;
         setModrinth(Boolean(m));
         setAiMcp(Boolean(a));
         if (typeof p === 'string') setLauncherPath(p);
         if (typeof apt === 'boolean') setAlwaysPreTouch(apt);
+        if (typeof ct === 'boolean') setCrashTelemetry(ct);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -38,7 +41,7 @@ export function Settings() {
       await setSetting('modrinth_enabled', value);
     } catch (e) {
       setModrinth(!value);
-      alert(String(e));
+      alert(formatError(e));
     }
   };
 
@@ -48,7 +51,7 @@ export function Settings() {
       await setSetting('ai_mcp_enabled', value);
     } catch (e) {
       setAiMcp(!value);
-      alert(String(e));
+      alert(formatError(e));
     }
   };
 
@@ -56,7 +59,7 @@ export function Settings() {
     try {
       await setSetting('mojang_launcher_path', launcherPath);
     } catch (e) {
-      alert(String(e));
+      alert(formatError(e));
     }
   };
 
@@ -66,7 +69,17 @@ export function Settings() {
       await setSetting('jvm_always_pre_touch', value);
     } catch (e) {
       setAlwaysPreTouch(!value);
-      alert(String(e));
+      alert(formatError(e));
+    }
+  };
+
+  const toggleCrashTelemetry = async (value: boolean) => {
+    setCrashTelemetry(value);
+    try {
+      await setSetting('crash_telemetry_opt_in', value);
+    } catch (e) {
+      setCrashTelemetry(!value);
+      alert(formatError(e));
     }
   };
 
@@ -145,6 +158,22 @@ export function Settings() {
             </label>
             <p className="text-xs text-[rgb(var(--muted))]">
               Recommended for G1GC, may cause issues with ZGC/Shenandoah.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-3">
+            <h3 className="font-semibold">Crash Telemetry</h3>
+            <label className="flex items-center justify-between">
+              <span className="text-sm">Allow anonymous crash telemetry</span>
+              <input
+                type="checkbox"
+                checked={crashTelemetry}
+                onChange={(e) => toggleCrashTelemetry(e.target.checked)}
+                className="h-5 w-5 accent-brand-600"
+              />
+            </label>
+            <p className="text-xs text-[rgb(var(--muted))]">
+              Allow anonymous local crash telemetry to be collected for mod-incompatibility research. Aggregates are never uploaded unless you opt in. Saying no disables all telemetry.
             </p>
           </div>
         </>

@@ -129,7 +129,7 @@ export interface CategoryInfo {
   is_community: boolean;
 }
 
-export type SortOption = 'net_score' | 'velocity' | 'most_downvoted' | 'newest' | 'most_upvoted';
+export type SortOption = 'for_you' | 'net_score' | 'velocity' | 'most_downvoted' | 'newest' | 'most_upvoted';
 
 export interface RegistryStatus {
   has_cached_db: boolean;
@@ -184,6 +184,19 @@ export const listLoaderVersions = (loader: string, mcVersion: string) =>
     loader,
     mcVersion,
   });
+export const forYouItems = (
+  modrinthEnabled?: boolean,
+  mcVersion?: string,
+  loader?: string,
+  limit?: number,
+) =>
+  invoke<RegistryItem[]>('for_you_items', {
+    modrinthEnabled,
+    mcVersion,
+    loader,
+    limit,
+  });
+
 export const browseItems = (
   contentType?: string,
   category?: string,
@@ -205,6 +218,26 @@ export const browseItems = (
 export const getRegistryItem = (itemId: string) =>
   invoke<RegistryItem | null>('get_registry_item', { itemId });
 export const listCategories = () => invoke<CategoryInfo[]>('list_categories');
+
+// --- Governance / Transparency Log ---
+
+/**
+ * AuditLogEntry — mirrors the Rust `AuditLogEntry` struct in
+ * desktop/src-tauri/src/registry.rs. Keep these two definitions in sync:
+ * adding/removing/renaming a field on the Rust struct requires the same change
+ * here, or the value will be silently dropped at the IPC boundary.
+ * TODO: replace this hand-mirror with generated types (e.g. ts-rs) once a
+ * codegen step is wired into the build.
+ */
+export interface AuditLogEntry {
+  id: number;
+  timestamp: string;
+  action: string;
+  details: string | null;
+}
+
+export const listAuditLog = (limit?: number) =>
+  invoke<AuditLogEntry[]>('list_audit_log', { limit });
 export const checkRegistryUpdate = (force?: boolean) =>
   invoke<RegistryStatus>('check_registry_update', { force });
 export const getRegistryStatus = () => invoke<RegistryStatus>('get_registry_status');
@@ -279,6 +312,12 @@ export const installModVersion = (
 
 export const removeModFromInstance = (instanceId: string, filename: string) =>
   invoke<void>('remove_mod_from_instance', { instanceId, filename });
+
+export const addManualMod = (instanceId: string, sourcePath: string) =>
+  invoke<InstalledMod>('add_manual_mod', { instanceId, sourcePath });
+
+export const exportInstancePack = (instanceId: string, format: 'json' | 'mrpack') =>
+  invoke<string>('export_instance_pack', { instanceId, format });
 
 // --- Raw (uncurated) Modrinth integration (§6.3) ---
 

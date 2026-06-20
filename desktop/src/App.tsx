@@ -9,7 +9,7 @@ import { Settings } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
 import { ModDetail } from './pages/ModDetail';
 import { InstanceEditor } from './pages/InstanceEditor';
-import { getSetting } from './lib/tauri';
+import { getSetting, setSetting } from './lib/tauri';
 
 type Tab = 'home' | 'browse' | 'modrinth' | 'instances' | 'governance' | 'settings';
 
@@ -33,6 +33,7 @@ export default function App() {
   const [editingInstanceId, setEditingInstanceId] = useState<string | null>(null);
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [modrinthEnabled, setModrinthEnabled] = useState<boolean>(false);
+  const [showTelemetryPrompt, setShowTelemetryPrompt] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,6 +67,30 @@ export default function App() {
     };
   }, [activeTab, onboardingComplete]);
 
+  // One-time telemetry opt-in prompt: show only when the setting has never been set.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const v = await getSetting('crash_telemetry_opt_in');
+        if (!cancelled) setShowTelemetryPrompt(v === null || v === undefined);
+      } catch {
+        if (!cancelled) setShowTelemetryPrompt(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleTelemetryChoice = async (allow: boolean) => {
+    try {
+      await setSetting('crash_telemetry_opt_in', allow);
+    } finally {
+      setShowTelemetryPrompt(false);
+    }
+  };
+
   if (onboardingComplete === null) {
     return null;
   }
@@ -96,6 +121,28 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
+        {showTelemetryPrompt && (
+          <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 shadow-lg">
+            <p className="text-sm font-medium mb-2">Help improve Agora</p>
+            <p className="text-xs text-[rgb(var(--muted))] mb-3">
+              Allow anonymous crash telemetry to be collected for mod-incompatibility research?
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => handleTelemetryChoice(true)}
+                className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700"
+              >
+                Allow
+              </button>
+              <button
+                onClick={() => handleTelemetryChoice(false)}
+                className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+              >
+                Not now
+              </button>
+            </div>
+          </div>
+        )}
         <Sidebar tabs={tabs} activeTab={effectiveTab} onSelectTab={(t) => { setSelectedModId(null); setEditingInstanceId(null); setActiveTab(t); }} />
         <main className="flex-1 overflow-y-auto p-6 surface">
           {editingInstanceId !== null ? (

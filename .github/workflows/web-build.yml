@@ -1,0 +1,56 @@
+# Web Build
+#
+# Builds the static Next.js web site and uploads the exported output as an
+# artifact. Depends on a registry-* release existing (created by compile.yml).
+
+name: "Web Build"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+  push:
+    paths:
+      - "web/**"
+      - "scripts/fetch_registry_db.py"
+      - ".github/workflows/web-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fetch registry.db from GitHub Releases
+        run: python scripts/fetch_registry_db.py .
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+      - name: Upload static site
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-static
+          path: web/out
