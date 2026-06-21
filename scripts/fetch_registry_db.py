@@ -63,9 +63,22 @@ def api_get(url: str, token: str | None) -> dict:
         return json.loads(resp.read().decode())
 
 
-def download_file(url: str, dest: Path) -> None:
-    """Stream a file from url to dest."""
-    req = Request(url)
+def download_file(url: str, dest: Path, token: str | None) -> None:
+    """Stream a file from url to dest.
+
+    Uses the GitHub Assets API endpoint (passed in by the caller), which 302-
+    redirects to a signed `objects.githubusercontent.com` URL that succeeds
+    for both public and private repos when the request is authenticated.
+    `urllib` follows the redirect automatically; the signed target needs no
+    further auth.
+    """
+    headers = {
+        "Accept": "application/octet-stream",
+        "User-Agent": "AgoraRegistryFetch/1.0",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(url, headers=headers)
     log(f"Downloading {dest.name} ...")
     with urlopen(req) as resp:
         dest.write_bytes(resp.read())
@@ -262,37 +275,45 @@ def main() -> None:
     log(f"Using release: {tag}")
 
     # --- Resolve asset URLs + digests ------------------------------------
-    db_url = None
+    # GitHub's `browser_download_url` (https://github.com/.../releases/download/...)
+    # returns 404 for assets that require authentication. The Assets API
+    # endpoint (https://api.github.com/repos/.../releases/assets/{id}) returns
+    # a 302 to a signed S3 URL that works for both public and private repos
+    # when the request carries the Bearer token and `Accept: application/octet-stream`.
+    db_asset_id = None
     db_digest = None
-    sig_url = None
+    sig_asset_id = None
     for asset in registry_release.get("assets", []):
         name = asset["name"]
         if name == "registry.db":
-            db_url = asset["browser_download_url"]
+            db_asset_id = asset.get("id")
             db_digest = asset.get("digest")
         elif name == "registry.db.sig":
-            sig_url = asset["browser_download_url"]
+            sig_asset_id = asset.get("id")
 
-    if db_url is None:
+    if db_asset_id is None:
         print("ERROR: 'registry.db' asset not found in release.", file=sys.stderr)
         sys.exit(1)
 
+    db_url = f"https://api.github.com/repos/{repo}/releases/assets/{db_asset_id}"
     log(f"registry.db URL: {db_url}")
-    if sig_url:
+    if sig_asset_id is not None:
+        sig_url = f"https://api.github.com/repos/{repo}/releases/assets/{sig_asset_id}"
         log(f"registry.db.sig URL: {sig_url}")
     else:
+        sig_url = None
         log("registry.db.sig not present in release; skipping signature.")
 
     # --- Download ---------------------------------------------------------
     try:
-        download_file(db_url, db_dest)
+        download_file(db_url, db_dest, token)
     except (HTTPError, URLError) as exc:
         print(f"ERROR: Failed to download registry.db: {exc}", file=sys.stderr)
         sys.exit(1)
 
     if sig_url:
         try:
-            download_file(sig_url, sig_dest)
+            download_file(sig_url, sig_dest, token)
         except (HTTPError, URLError) as exc:
             print(
                 f"ERROR: Failed to download registry.db.sig: {exc}",

@@ -257,6 +257,13 @@ pub fn store_token(_app: &tauri::AppHandle, token: &str) -> LauncherResult<()> {
 }
 
 /// Read the GitHub token from the OS keyring, if present.
+///
+/// # Returns
+///
+/// `Some(token)` when the keyring holds a token, or `None` when no token
+/// is stored or the OS keyring is unavailable. Both the keyring-entry
+/// lookup and the password read are folded to `None` so callers can treat
+/// "not authenticated" uniformly.
 pub fn get_token(_app: &tauri::AppHandle) -> Option<String> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).ok()?;
     entry.get_password().ok()

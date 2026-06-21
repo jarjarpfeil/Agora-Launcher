@@ -23,6 +23,8 @@ Your model is large, capable, and **expensive**; the `worker` model is small, ch
 
 Concretely, this means: give workers the **intent** of a change, the file(s), the constraints, and the verification — and let them locate the exact code and write the replacement. Do **not** burn your expensive tokens quoting verbatim `oldString`/`newString`, reading whole files into your window to extract snippets, or dispatching a read-only worker just to fetch the literal text of an edit you could describe in one sentence. Over-specifying is the failure mode you are optimizing against.
 
+**Naming the target is not over-specifying.** A worker on a small model struggles to *guess which code to change* from a vague noun. Always identify the target unambiguously: the function or struct name, the module path, or a one-line unique phrase from the code you want changed. This costs you a few tokens and saves a wasted dispatch round-trip. The line to hold: **name the target precisely, but let the worker write the body of the change itself.**
+
 Ground every decision in `AGENTS.md` and `.kilo/plans/MASTER_SPEC.md`. Prefer the smallest diff that satisfies the request. Never modify `.kilo/plans/MASTER_SPEC.md`, `.lock` files, or upstream registry history.
 
 ## Operating loop
@@ -56,7 +58,7 @@ Ground every decision in `AGENTS.md` and `.kilo/plans/MASTER_SPEC.md`. Prefer th
 
 - **One focused objective.** 1–2 sentences of intent — what to accomplish and why. If you can describe the change that briefly without the worker needing to make a judgment call, it's the right size. When resolving a past failure, you may add the verbatim text of just the one line/function being disputed to disambiguate — quote fragments, not whole files.
 - **File path(s) or search target.** Absolute or workspace-relative.
-- **Intent for the change** — what the new code should do, what the old code did wrong, or what to look for. Let the worker locate the exact code and write the replacement. Quote verbatim `oldString`/`newString` only when a prior dispatch failed to locate the right spot and you need to disambiguate.
+- **Intent for the change** — what the new code should do, what the old code did wrong, or what to look for. Let the worker locate the exact code and write the replacement. Quote verbatim `oldString`/`newString` only when a prior dispatch failed to locate the right spot and you need to disambiguate. **Always name the target (function/struct/symbol or a one-line distinguishing phrase) — small worker models cannot infer which code to change from a vague description, and that ambiguity is the most common cause of stuck workers.**
 - **Explicit do/don't constraints**, stated as rules not principles:
   - "Bind every SQL value with `?`. Never concatenate SQL strings."
   - "Do not use `dangerouslySetInnerHTML` or `innerHTML` for community content; render as plain text or React children."

@@ -107,12 +107,23 @@ pub async fn check_and_download_update<R: tauri::Runtime>(
         });
     }
 
-    let db_url = latest
+    let db_id = latest
         .find_asset("registry.db")
         .ok_or(LauncherError::RegistryDownloadFailed)?;
-    let sig_url = latest
+    let sig_id = latest
         .find_asset("registry.db.sig")
         .ok_or(LauncherError::RegistrySignatureInvalid)?;
+
+    // Download via the GitHub Assets API endpoint, which 302-redirects to a
+    // signed URL. The `browser_download_url` returns 404 for this repo.
+    let db_url = format!(
+        "https://api.github.com/repos/{}/releases/assets/{}",
+        REGISTRY_REPO, db_id
+    );
+    let sig_url = format!(
+        "https://api.github.com/repos/{}/releases/assets/{}",
+        REGISTRY_REPO, sig_id
+    );
 
     let db_bytes = download_file(&db_url).await?;
     let sig_bytes = download_file(&sig_url).await?;
@@ -178,16 +189,25 @@ struct GitHubRelease {
 
 #[derive(Debug, Deserialize)]
 struct GitHubAsset {
+    id: u64,
     name: String,
+    #[serde(default)]
     browser_download_url: String,
 }
 
 impl GitHubRelease {
-    fn find_asset(&self, name: &str) -> Option<String> {
+    /// Return the asset id for the named asset.
+    ///
+    /// We resolve downloads through the GitHub Assets API endpoint
+    /// (`/releases/assets/{id}`) rather than the `browser_download_url`,
+    /// because the latter returns 404 for assets that require authentication.
+    /// The Assets endpoint 302-redirects to a signed `objects.githubusercontent.com`
+    /// URL that `reqwest` follows automatically and works for public repos.
+    fn find_asset(&self, name: &str) -> Option<u64> {
         self.assets
             .iter()
             .find(|a| a.name == name)
-            .map(|a| a.browser_download_url.clone())
+            .map(|a| a.id)
     }
 }
 
@@ -223,6 +243,7 @@ async fn download_file(url: &str) -> LauncherResult<Vec<u8>> {
         })?;
     let resp = client
         .get(url)
+        .header("Accept", "application/octet-stream")
         .send()
         .await
         .map_err(|_| LauncherError::NetworkOffline)?;
@@ -453,13 +474,31 @@ pub fn seed_from_local_build<R: tauri::Runtime>(
 
     if dest.exists() {
         let cached_version = read_cached_schema_version(app).unwrap_or(0);
+        let cached_mtime = dest
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok();
         let mut search_dir = std::env::current_dir().ok();
         for _ in 0..5 {
             if let Some(dir) = search_dir {
                 let candidate = dir.join("registry.db");
                 if candidate.exists() {
                     if let Some(local_version) = read_schema_version_at(&candidate) {
-                        if local_version > cached_version {
+                        // Re-seed when the local build's schema version is
+                        // newer, OR when the local registry.db file was
+                        // modified more recently than the cached copy. The
+                        // version check alone misses content-only recompiles
+                        // (added/edited mods at an unchanged schema version),
+                        // leaving the dev cache stale.
+                        let local_mtime = candidate
+                            .metadata()
+                            .and_then(|m| m.modified())
+                            .ok();
+                        let newer_mtime = match (cached_mtime, local_mtime) {
+                            (Some(c), Some(l)) => l > c,
+                            _ => false,
+                        };
+                        if local_version > cached_version || newer_mtime {
                             let dest_sig = paths::registry_sig_path(app)
                                 .map_err(|_| LauncherError::RegistryMissing)?;
                             let local_sig = candidate.with_extension("db.sig");
