@@ -413,9 +413,6 @@ class TestStep7(unittest.TestCase):
         self.assertEqual(reason, "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestPass3(unittest.TestCase):
     """Tests for §3.1 steps 5/6/8 + §3.2 Raid Shield (Pass 3 circuit-breaker response)."""
@@ -501,3 +498,67 @@ class TestPass3(unittest.TestCase):
         )
         # If we got here without raising, the test passes.
         self.assertTrue(True)
+
+
+class TestDiscordAlert(unittest.TestCase):
+    """Tests for Discord webhook notification channel (_load_discord_webhook_url, _post_discord_alert)."""
+
+    _prev_discord_url: str | None = None
+
+    def setUp(self):
+        # Back up existing DISCORD_WEBHOOK_URL if present.
+        self._prev_discord_url = os.environ.pop("DISCORD_WEBHOOK_URL", None)
+
+    def tearDown(self):
+        # Restore DISCORD_WEBHOOK_URL to its prior value.
+        if self._prev_discord_url is not None:
+            os.environ["DISCORD_WEBHOOK_URL"] = self._prev_discord_url
+
+    def test_load_discord_webhook_url_returns_none_when_unset(self):
+        """When DISCORD_WEBHOOK_URL is absent, _load_discord_webhook_url returns None."""
+        # Ensure it's unset (tearDown will restore).
+        os.environ.pop("DISCORD_WEBHOOK_URL", None)
+        result = _compile._load_discord_webhook_url()
+        self.assertIsNone(result)
+
+    def test_load_discord_webhook_url_returns_value_when_set(self):
+        """When DISCORD_WEBHOOK_URL is set, _load_discord_webhook_url returns it."""
+        os.environ["DISCORD_WEBHOOK_URL"] = "https://discord.com/api/webhooks/test/abc"
+        result = _compile._load_discord_webhook_url()
+        self.assertEqual(result, "https://discord.com/api/webhooks/test/abc")
+
+    def test_post_discord_alert_is_noop_when_url_unset(self):
+        """When DISCORD_WEBHOOK_URL is unset, _post_discord_alert returns without making a network call."""
+        os.environ.pop("DISCORD_WEBHOOK_URL", None)
+        # Should not raise even with no webhook configured.
+        _compile._post_discord_alert(mod_id="testmod", reason="test", severity="spike")
+        self.assertTrue(True)
+
+    @unittest.skipIf(os.environ.get("CI") == "true", "skip network test on CI")
+    def test_post_discord_alert_swallows_invalid_webhook_failures(self):
+        """An invalid webhook URL must not raise — the function logs a warning instead."""
+        os.environ["DISCORD_WEBHOOK_URL"] = "https://discord.com/api/webhooks/INVALID/INVALID"
+        # Should not raise despite the URL being invalid.
+        _compile._post_discord_alert(
+            mod_id="testmod",
+            reason="test reason",
+            severity="spike",
+            offending_reactions=[{"user": "bob"}],
+        )
+        self.assertTrue(True)
+
+    def test_post_discord_alert_accepts_optional_fields(self):
+        """Calling _post_discord_alert with optional fields still returns cleanly when no webhook is configured."""
+        os.environ.pop("DISCORD_WEBHOOK_URL", None)
+        _compile._post_discord_alert(
+            mod_id="testmod",
+            reason="test reason",
+            severity="spike",
+            offending_reactions=[{"user": "alice"}],
+            admin_alert_issue_url="https://example.com/issues/1",
+        )
+        self.assertTrue(True)
+
+
+if __name__ == "__main__":
+    unittest.main()

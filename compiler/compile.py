@@ -963,6 +963,88 @@ def _append_audit_entry(action: str, details: str) -> None:
         json.dump(data, fh, indent=2)
 
 
+# --- §3.2 Discord webhook alert (real-time push to curator alerts channel) ---
+
+def _load_discord_webhook_url() -> str | None:
+    """Read DISCORD_WEBHOOK_URL from env. Returns None when unset.
+
+    The webhook URL is a Discord channel-level integration (Settings →
+    Integrations → Webhooks → New Webhook). No bot account required — just
+    a webhook URL. When absent, all Discord notifications are silently skipped
+    (curator alerts only via the audit trail + admin-alert issue). When Discord
+    returns 4xx/5xx, the warning is logged but the compile continues.
+    """
+    url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
+    return url or None
+
+
+def _post_discord_alert(
+    *,
+    mod_id: str,
+    reason: str,
+    severity: str,  # "spike" or "organic"
+    offending_reactions: list[dict[str, Any]] | None = None,
+    admin_alert_issue_url: str | None = None,
+) -> None:
+    """Post a formatted Discord alert to the configured webhook.
+
+    Uses Discord's webhook JSON API: POST {webhook_url} with a JSON body
+    containing `embeds[]`. Sev-volume colors: red (#ED4245) for spike-triggered
+    attacks, orange (#EE8430) for organic under_review triggers. Failure-safe:
+    logs a warning and returns None on any network or HTTP error. NEVER raises.
+    """
+    webhook_url = _load_discord_webhook_url()
+    if not webhook_url:
+        return  # Discord notifications are optional; silent no-op.
+
+    # Pick embed color by severity.
+    color = 0xED4245 if severity == "spike" else 0xEE8430
+    title = f"🚨 Coordinated Attack: `{mod_id}`" if severity == "spike" else f"⚠️ Mod under review: `{mod_id}`"
+
+    fields: list[dict[str, Any]] = [
+        {"name": "Reason", "value": reason, "inline": False},
+        {"name": "Severity", "value": severity, "inline": True},
+    ]
+    if offending_reactions is not None:
+        unique_users = sorted({r.get("user") or "?" for r in offending_reactions})
+        fields.append({
+            "name": "Offending users",
+            "value": (", ".join(unique_users)[:1024] or "(none captured)"),
+            "inline": False,
+        })
+        fields.append({
+            "name": "Reactions DELETEd",
+            "value": str(len(offending_reactions)),
+            "inline": True,
+        })
+    if admin_alert_issue_url:
+        fields.append({
+            "name": "Admin-alert issue",
+            "value": admin_alert_issue_url,
+            "inline": False,
+        })
+
+    body = {
+        "username": "Agora Compiler",
+        "embeds": [{
+            "title": title,
+            "color": color,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "fields": fields,
+            "footer": {"text": "Agora nightly compiler"},
+        }],
+    }
+    try:
+        resp = requests.post(webhook_url, json=body, timeout=15)
+        if resp.status_code not in (200, 204):
+            logger.warning(
+                "Discord webhook returned HTTP %d: %s",
+                resp.status_code, resp.text[:300] if resp.text else "",
+            )
+    except Exception as exc:
+        logger.warning("Discord webhook POST failed: %s", exc)
+
+
 def _create_admin_alert_issue(
     owner: str,
     repo: str,
@@ -1261,6 +1343,12 @@ def _respond_to_circuit_breaker(
                 reason=f"Organic net_score dropped below threshold ({ORGANIC_UNDER_REVIEW_THRESHOLD}).",
                 token=token,
             )
+            _post_discord_alert(
+                mod_id=social.mod_id,
+                reason=f"Organic net_score dropped below threshold ({ORGANIC_UNDER_REVIEW_THRESHOLD}).",
+                severity="organic",
+                offending_reactions=None,
+            )
             continue
         # Spike-triggered under_review (circuit breaker already fired in Pass 2).
         if social.status == "under_review" and social.anomaly_window_start is not None:
@@ -1298,6 +1386,14 @@ def _respond_to_circuit_breaker(
                 mod_id=social.mod_id,
                 offending_reactions=offending,
                 token=token,
+            )
+            # Discord webhook — real-time push to curator alerts channel
+            # (silent no-op when DISCORD_WEBHOOK_URL env var is absent).
+            _post_discord_alert(
+                mod_id=social.mod_id,
+                reason="Velocity circuit breaker: coordinated downvote spike detected (>5× historical, >20 in 6h).",
+                severity="spike",
+                offending_reactions=offending,
             )
 
 
