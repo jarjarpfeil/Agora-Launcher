@@ -120,3 +120,71 @@ pub fn list_mc_versions(loader: Option<&str>) -> Vec<String> {
 pub fn strip_sha_prefix(s: &str) -> &str {
     s.strip_prefix("sha256:").unwrap_or(s)
 }
+
+/// --- Tests ---
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allowed_loader_domain() {
+        assert!(is_allowed_host("files.minecraftforge.net"));
+        assert!(is_allowed_host("maven.fabricmc.net"));
+        assert!(is_allowed_host("maven.neoforged.net"));
+        assert!(is_allowed_host("maven.quiltmc.org"));
+        assert!(is_allowed_host("neoforged.net"));
+    }
+
+    #[test]
+    fn test_disallowed_localhost() {
+        assert!(!is_allowed_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_disallowed_metadata_ip() {
+        assert!(!is_allowed_host("169.254.169.254"));
+    }
+
+    #[test]
+    fn test_disallowed_random_host() {
+        assert!(!is_allowed_host("evil.com"));
+    }
+
+    #[test]
+    fn test_disallowed_file_scheme() {
+        // ensure_allowed_domain should reject file:// URLs.
+        let result = ensure_allowed_domain("file:///etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_manifest_allowlist_nonempty() {
+        let m = manifest();
+        assert!(!m.domain_allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_ensure_allowed_domain_valid() {
+        let result = ensure_allowed_domain("https://maven.fabricmc.net/v2/versions/loader/1.21/0.19.0/profile/json");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ensure_allowed_domain_invalid() {
+        let result = ensure_allowed_domain("https://evil.example.com/loader.jar");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ensure_allowed_domain_invalid_url() {
+        let result = ensure_allowed_domain("not-a-valid-url");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_strip_sha_prefix() {
+        assert_eq!(strip_sha_prefix("sha256:abc123"), "abc123");
+        assert_eq!(strip_sha_prefix("abc123"), "abc123");
+    }
+}

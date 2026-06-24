@@ -740,6 +740,90 @@ fn safe_zip_entry_name(filename: &str) -> Option<String> {
     Some(format!("mods/{}", filename))
 }
 
+/// --- Tests ---
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allowed_host_github() {
+        assert!(is_mod_download_host("github.com"));
+    }
+
+    #[test]
+    fn test_allowed_host_modrinth() {
+        assert!(is_mod_download_host("cdn.modrinth.com"));
+    }
+
+    #[test]
+    fn test_disallowed_host_localhost() {
+        assert!(!is_mod_download_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_disallowed_host_metadata_ip() {
+        assert!(!is_mod_download_host("169.254.169.254"));
+    }
+
+    #[test]
+    fn test_disallowed_host_random() {
+        assert!(!is_mod_download_host("evil.example.com"));
+    }
+
+    #[test]
+    fn test_disallowed_host_file_scheme() {
+        // The function takes a bare host string; a file-scheme URL would
+        // typically be parsed and its host would be empty or "etc".
+        // Test that an empty host is rejected and "etc" is rejected.
+        assert!(!is_mod_download_host(""));
+        assert!(!is_mod_download_host("etc"));
+    }
+
+    #[test]
+    fn test_disallowed_host_empty() {
+        assert!(!is_mod_download_host(""));
+    }
+
+    #[test]
+    fn test_filename_path_traversal_rejected() {
+        assert!(safe_zip_entry_name("../../evil.jar").is_none());
+        assert!(safe_zip_entry_name("../../../etc/passwd.jar").is_none());
+    }
+
+    #[test]
+    fn test_safe_zip_entry_name_valid() {
+        let result = safe_zip_entry_name("some-mod-1.0.jar");
+        assert_eq!(result, Some("mods/some-mod-1.0.jar".to_string()));
+    }
+
+    #[test]
+    fn test_safe_zip_entry_name_slash_rejected() {
+        assert!(safe_zip_entry_name("foo/bar.jar").is_none());
+    }
+
+    #[test]
+    fn test_safe_zip_entry_name_backslash_rejected() {
+        assert!(safe_zip_entry_name("foo\\bar.jar").is_none());
+    }
+
+    #[test]
+    fn test_safe_zip_entry_name_null_rejected() {
+        assert!(safe_zip_entry_name("foo\0bar.jar").is_none());
+    }
+
+    #[test]
+    fn test_safe_zip_entry_name_dot_rejected() {
+        assert!(safe_zip_entry_name(".").is_none());
+        assert!(safe_zip_entry_name("..").is_none());
+    }
+
+    #[test]
+    fn test_safe_zip_entry_name_empty_rejected() {
+        assert!(safe_zip_entry_name("").is_none());
+    }
+}
+
 /// Stream a single file into the zip writer, computing SHA-256 + size as bytes
 /// flow through. Peak memory is bounded by `CHUNK` rather than the full file.
 fn stream_jar_into_zip(

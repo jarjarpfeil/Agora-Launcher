@@ -463,6 +463,27 @@ fn get_java_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
         .unwrap_or_else(|| "java".to_string())
 }
 
+/// Compute the effective AlwaysPreTouch value based on GC type, instance setting,
+/// and optional user override.
+///
+/// GC-conditional default (§8.5):
+/// - G1GC (or empty/default): true — safe and beneficial
+/// - ZGC / Shenandoah: false — may cause issues
+/// - Unknown GC: treat as G1GC (default on)
+///
+/// User override always wins. When no override, the instance setting is applied
+/// unless the GC is ZGC or Shenandoah, in which case it defaults to false.
+fn compute_always_pre_touch(gc: &str, instance_setting: bool, user_override: Option<bool>) -> bool {
+    user_override.unwrap_or_else(|| {
+        let gc_lower = gc.to_lowercase();
+        if gc_lower.contains("zgc") || gc_lower.contains("shenandoah") {
+            false
+        } else {
+            instance_setting
+        }
+    })
+}
+
 fn build_profile_entry<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     row: &InstanceRow,
@@ -470,28 +491,17 @@ fn build_profile_entry<R: tauri::Runtime>(
     let game_dir = paths::instance_dir(app, &row.instance_id)
         .map_err(|_| LauncherError::InstanceCreateFailed)?;
 
-    // GC-conditional default for AlwaysPreTouch (§8.5):
-    // - G1GC (or empty/default): true — safe and beneficial
-    // - ZGC / Shenandoah: false — may cause issues
-    let gc_conditional = matches!(
-        row.jvm_gc.as_str(),
-        "g1gc" | ""
-    );
-    let instance_pre_touch = row.jvm_always_pre_touch;
-
     // Allow user-level override via `jvm_always_pre_touch` setting in user_settings.
     let user_override = db::get_setting(&db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?, "jvm_always_pre_touch")
         .ok()
         .flatten()
         .and_then(|v| v.as_bool());
 
-    let always_pre_touch = user_override.unwrap_or_else(|| {
-        if instance_pre_touch {
-            gc_conditional
-        } else {
-            false
-        }
-    });
+    let always_pre_touch = compute_always_pre_touch(
+        &row.jvm_gc,
+        row.jvm_always_pre_touch,
+        user_override,
+    );
 
     let jvm = JvmConfig {
         memory_mb: row.jvm_memory_mb,
@@ -563,4 +573,69 @@ fn write_manifest<R: tauri::Runtime>(
     let text = serde_json::to_string_pretty(manifest).map_err(|_| LauncherError::InstanceCreateFailed)?;
     std::fs::write(&path, text).map_err(|_| LauncherError::InstanceCreateFailed)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_always_pre_touch;
+
+    #[test]
+    fn test_g1gc_default_on() {
+        assert!(compute_always_pre_touch("G1GC", true, None));
+    }
+
+    #[test]
+    fn test_empty_gc_default_on() {
+        assert!(compute_always_pre_touch("", true, None));
+    }
+
+    #[test]
+    fn test_zgc_default_off() {
+        assert!(!compute_always_pre_touch("ZGC", true, None));
+    }
+
+    #[test]
+    fn test_shenandoah_default_off() {
+        assert!(!compute_always_pre_touch("Shenandoah", true, None));
+    }
+
+    #[test]
+    fn test_case_insensitive_zgc() {
+        assert!(!compute_always_pre_touch("zgc", true, None));
+    }
+
+    #[test]
+    fn test_user_override_true() {
+        assert!(compute_always_pre_touch("ZGC", false, Some(true)));
+    }
+
+    #[test]
+    fn test_user_override_false() {
+        assert!(!compute_always_pre_touch("G1GC", true, Some(false)));
+    }
+
+    #[test]
+    fn test_unknown_gc_default_on() {
+        assert!(compute_always_pre_touch("ParallelGC", true, None));
+    }
+
+    #[test]
+    fn test_zgc_in_mixed_string() {
+        assert!(!compute_always_pre_touch("-XX:+UseZGC", true, None));
+    }
+
+    #[test]
+    fn test_g1_in_mixed_string() {
+        assert!(compute_always_pre_touch("-XX:+UseG1GC", true, None));
+    }
+
+    #[test]
+    fn test_instance_setting_false_no_override() {
+        assert!(!compute_always_pre_touch("G1GC", false, None));
+    }
+
+    #[test]
+    fn test_instance_setting_false_with_zgc() {
+        assert!(!compute_always_pre_touch("ZGC", false, None));
+    }
 }

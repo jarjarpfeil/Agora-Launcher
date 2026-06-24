@@ -607,3 +607,209 @@ pub fn get_total_survival_count(conn: &Connection) -> anyhow::Result<i64> {
     )
     .map_err(Into::into)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Helper: create a unique temp-file-backed test database with migrations applied.
+    fn test_db() -> (Connection, PathBuf) {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir()
+            .join(format!("agora-test-{}.db", n));
+        let _ = std::fs::remove_file(&path);
+        let conn = Connection::open(&path).expect("failed to open test db");
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;",
+        )
+        .ok();
+        run_migrations(&conn).expect("failed to run migrations in test db");
+        (conn, path)
+    }
+
+    // ---- normalize_pair (pure, no DB) ----
+
+    #[test]
+    fn test_normalize_pair_lexicographic() {
+        let (a, b) = normalize_pair("zinc", "sodium");
+        assert_eq!(a, "sodium");
+        assert_eq!(b, "zinc");
+    }
+
+    #[test]
+    fn test_normalize_pair_already_ordered() {
+        let (a, b) = normalize_pair("a", "b");
+        assert_eq!(a, "a");
+        assert_eq!(b, "b");
+    }
+
+    #[test]
+    fn test_normalize_pair_symmetric() {
+        assert_eq!(normalize_pair("a", "b"), normalize_pair("b", "a"));
+    }
+
+    #[test]
+    fn test_normalize_pair_same_id() {
+        let (a, b) = normalize_pair("x", "x");
+        assert_eq!(a, "x");
+        assert_eq!(b, "x");
+    }
+
+    // ---- get_setting / set_setting ----
+
+    #[test]
+    fn test_get_setting_absent_returns_none() {
+        let (conn, _path) = test_db();
+        assert!(get_setting(&conn, "nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_set_setting_roundtrip() {
+        let (conn, _path) = test_db();
+        set_setting(&conn, "key", &serde_json::json!("value")).unwrap();
+        let val = get_setting(&conn, "key").unwrap();
+        assert_eq!(val, Some(serde_json::json!("value")));
+    }
+
+    #[test]
+    fn test_set_setting_overwrite() {
+        let (conn, _path) = test_db();
+        set_setting(&conn, "key", &serde_json::json!("v1")).unwrap();
+        set_setting(&conn, "key", &serde_json::json!("v2")).unwrap();
+        let val = get_setting(&conn, "key").unwrap();
+        assert_eq!(val, Some(serde_json::json!("v2")));
+    }
+
+    // ---- record_co_crash ----
+
+    #[test]
+    fn test_record_co_crash_increments() {
+        let (conn, _path) = test_db();
+        record_co_crash(&conn, "a", "b").unwrap();
+        record_co_crash(&conn, "a", "b").unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT crash_count FROM local_crash_telemetry WHERE mod_a_id = ?1 AND mod_b_id = ?2",
+                rusqlite::params!["a", "b"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_record_co_crash_symmetric() {
+        let (conn, _path) = test_db();
+        record_co_crash(&conn, "a", "b").unwrap();
+        record_co_crash(&conn, "b", "a").unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT crash_count FROM local_crash_telemetry WHERE mod_a_id = ?1 AND mod_b_id = ?2",
+                rusqlite::params!["a", "b"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    // ---- flag rate limiting ----
+
+    #[test]
+    fn test_flag_rate_limit_empty_can_flag() {
+        let (conn, _path) = test_db();
+        let now = 1_000_000_000i64;
+        let status = get_flag_rate_limit_status(&conn, now).unwrap();
+        assert!(status.can_flag);
+        assert_eq!(status.remaining_hour, 5);
+        assert_eq!(status.remaining_day, 20);
+    }
+
+    #[test]
+    fn test_flag_rate_limit_after_three() {
+        let (conn, _path) = test_db();
+        let now = 1_000_000_000i64;
+        for _ in 0..3 {
+            record_flag_submission(&conn, now).unwrap();
+        }
+        let status = get_flag_rate_limit_status(&conn, now).unwrap();
+        assert_eq!(status.remaining_hour, 2);
+        assert_eq!(status.remaining_day, 17);
+    }
+
+    #[test]
+    fn test_flag_rate_limit_hourly_exceeded() {
+        let (conn, _path) = test_db();
+        let now = 1_000_000_000i64;
+        for _ in 0..5 {
+            record_flag_submission(&conn, now).unwrap();
+        }
+        let status = get_flag_rate_limit_status(&conn, now).unwrap();
+        assert!(!status.can_flag);
+        assert_eq!(status.remaining_hour, 0);
+    }
+
+    #[test]
+    fn test_flag_rate_limit_daily_exceeded() {
+        let (conn, _path) = test_db();
+        let now = 1_000_000_000i64;
+        for _ in 0..20 {
+            record_flag_submission(&conn, now).unwrap();
+        }
+        let status = get_flag_rate_limit_status(&conn, now).unwrap();
+        assert!(!status.can_flag);
+        assert_eq!(status.remaining_day, 0);
+    }
+
+    // ---- crash attribution ----
+
+    #[test]
+    fn test_increment_confirmation_inserts() {
+        let (conn, _path) = test_db();
+        increment_confirmation(&conn, "fp1", "mod_a").unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT confirm_count FROM crash_attribution WHERE fingerprint = ?1 AND mod_id = ?2",
+                rusqlite::params!["fp1", "mod_a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_increment_confirmation_increments() {
+        let (conn, _path) = test_db();
+        increment_confirmation(&conn, "fp1", "mod_a").unwrap();
+        increment_confirmation(&conn, "fp1", "mod_a").unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT confirm_count FROM crash_attribution WHERE fingerprint = ?1 AND mod_id = ?2",
+                rusqlite::params!["fp1", "mod_a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_get_confirmed_attribution() {
+        let (conn, _path) = test_db();
+        increment_confirmation(&conn, "fp1", "mod_b").unwrap();
+        increment_confirmation(&conn, "fp1", "mod_a").unwrap();
+        increment_confirmation(&conn, "fp1", "mod_a").unwrap();
+        let results = get_confirmed_attribution(&conn, "fp1").unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].mod_id, "mod_a");
+        assert_eq!(results[0].confirm_count, 2);
+        assert_eq!(results[1].mod_id, "mod_b");
+        assert_eq!(results[1].confirm_count, 1);
+    }
+}

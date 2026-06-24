@@ -94,3 +94,59 @@ pub fn sanitize_id(id: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_id;
+
+    #[test]
+    fn test_sanitize_id_preserves_alphanumeric() {
+        assert_eq!(sanitize_id("my-instance-1"), "my-instance-1");
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_path_separators() {
+        let result = sanitize_id("foo/bar");
+        assert!(!result.contains('/'));
+        assert!(!result.contains('\\'));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_dot_dot() {
+        let result = sanitize_id("..");
+        assert!(!result.contains(".."));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_dot_dot_slash() {
+        let result = sanitize_id("../etc/passwd");
+        assert!(!result.contains(".."));
+        assert!(!result.contains('/'));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_special_chars() {
+        let result = sanitize_id("foo!@#bar");
+        assert!(!result.contains('!'));
+        assert!(!result.contains('@'));
+        assert!(!result.contains('#'));
+    }
+
+    #[test]
+    fn test_sanitize_id_empty() {
+        let result = sanitize_id("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_sanitize_id_unicode() {
+        let result = sanitize_id("café");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_id_null_bytes() {
+        let result = sanitize_id("foo\0bar");
+        assert!(!result.contains('\0'));
+    }
+}

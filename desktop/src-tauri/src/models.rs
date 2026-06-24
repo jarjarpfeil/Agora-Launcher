@@ -109,3 +109,173 @@ pub struct InstanceManifest {
     #[serde(default)]
     pub user_preferences: serde_json::Value,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_installed_mod_missing_java_packages() {
+        let json = r#"{
+            "filename": "test.jar",
+            "source": "local",
+            "sha256": "abc123",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let mod_: InstalledMod = serde_json::from_str(json).unwrap();
+        assert_eq!(mod_.java_packages, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_installed_mod_missing_mod_jar_id() {
+        let json = r#"{
+            "filename": "test.jar",
+            "source": "local",
+            "sha256": "abc123",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let mod_: InstalledMod = serde_json::from_str(json).unwrap();
+        assert!(mod_.mod_jar_id.is_none());
+    }
+
+    #[test]
+    fn test_installed_mod_missing_depends_on() {
+        let json = r#"{
+            "filename": "test.jar",
+            "source": "local",
+            "sha256": "abc123",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let mod_: InstalledMod = serde_json::from_str(json).unwrap();
+        assert_eq!(mod_.depends_on, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_installed_mod_missing_optional_deps() {
+        let json = r#"{
+            "filename": "test.jar",
+            "source": "local",
+            "sha256": "abc123",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let mod_: InstalledMod = serde_json::from_str(json).unwrap();
+        assert_eq!(mod_.optional_deps, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_installed_mod_missing_incompatible_deps() {
+        let json = r#"{
+            "filename": "test.jar",
+            "source": "local",
+            "sha256": "abc123",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let mod_: InstalledMod = serde_json::from_str(json).unwrap();
+        assert_eq!(mod_.incompatible_deps, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_installed_mod_minimal_fields() {
+        let json = r#"{
+            "filename": "test.jar",
+            "source": "local",
+            "sha256": "abc123",
+            "installed_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let mod_: InstalledMod = serde_json::from_str(json).unwrap();
+        assert_eq!(mod_.filename, "test.jar");
+        assert_eq!(mod_.source, "local");
+        assert_eq!(mod_.sha256, "abc123");
+        assert_eq!(mod_.installed_at, "2024-01-01T00:00:00Z");
+        assert_eq!(mod_.registry_id, None);
+        assert_eq!(mod_.modrinth_id, None);
+        assert_eq!(mod_.version, None);
+        assert_eq!(mod_.java_packages, Vec::<String>::new());
+        assert_eq!(mod_.mod_jar_id, None);
+        assert_eq!(mod_.depends_on, Vec::<String>::new());
+        assert_eq!(mod_.optional_deps, Vec::<String>::new());
+        assert_eq!(mod_.incompatible_deps, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_instance_manifest_with_mods() {
+        let json = r#"{
+            "instance_id": "my-instance",
+            "name": "My Instance",
+            "minecraft_version": "1.20.1",
+            "loader": "fabric",
+            "loader_version": "0.15.0",
+            "mods": [
+                {
+                    "filename": "cloth-config.jar",
+                    "source": "modrinth",
+                    "sha256": "def456",
+                    "installed_at": "2024-01-01T00:00:00Z",
+                    "depends_on": ["fabric-api"]
+                }
+            ],
+            "user_preferences": {}
+        }"#;
+        let manifest: InstanceManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.instance_id, "my-instance");
+        assert_eq!(manifest.name, "My Instance");
+        assert_eq!(manifest.mods.len(), 1);
+        assert_eq!(manifest.mods[0].filename, "cloth-config.jar");
+        assert_eq!(manifest.mods[0].depends_on, vec!["fabric-api"]);
+    }
+
+    #[test]
+    fn test_instance_manifest_roundtrip() {
+        let manifest = InstanceManifest {
+            instance_id: "rt-instance".to_string(),
+            name: "RoundTrip".to_string(),
+            created_from_pack: Some("some-pack".to_string()),
+            minecraft_version: "1.21.0".to_string(),
+            loader: "forge".to_string(),
+            loader_version: "52.0.0".to_string(),
+            is_locked: true,
+            mods: vec![
+                InstalledMod {
+                    filename: "rt-mod.jar".to_string(),
+                    registry_id: Some("reg-1".to_string()),
+                    modrinth_id: None,
+                    source: "github".to_string(),
+                    version: Some("1.0.0".to_string()),
+                    sha256: "sha123".to_string(),
+                    installed_at: "2024-06-01T12:00:00Z".to_string(),
+                    java_packages: vec!["com.example.mod".to_string()],
+                    mod_jar_id: Some("jar-1".to_string()),
+                    depends_on: vec!["core-lib".to_string()],
+                    optional_deps: vec!["opt-mod".to_string()],
+                    incompatible_deps: vec!["bad-mod".to_string()],
+                },
+            ],
+            user_preferences: serde_json::json!({"key": "value"}),
+        };
+
+        let serialized = serde_json::to_string(&manifest).unwrap();
+        let deserialized: InstanceManifest = serde_json::from_str(&serialized).unwrap();
+
+        assert_eq!(deserialized.instance_id, manifest.instance_id);
+        assert_eq!(deserialized.name, manifest.name);
+        assert_eq!(deserialized.created_from_pack, manifest.created_from_pack);
+        assert_eq!(deserialized.minecraft_version, manifest.minecraft_version);
+        assert_eq!(deserialized.loader, manifest.loader);
+        assert_eq!(deserialized.loader_version, manifest.loader_version);
+        assert_eq!(deserialized.is_locked, manifest.is_locked);
+        assert_eq!(deserialized.mods.len(), manifest.mods.len());
+        assert_eq!(deserialized.mods[0].filename, manifest.mods[0].filename);
+        assert_eq!(deserialized.mods[0].registry_id, manifest.mods[0].registry_id);
+        assert_eq!(deserialized.mods[0].modrinth_id, manifest.mods[0].modrinth_id);
+        assert_eq!(deserialized.mods[0].source, manifest.mods[0].source);
+        assert_eq!(deserialized.mods[0].version, manifest.mods[0].version);
+        assert_eq!(deserialized.mods[0].sha256, manifest.mods[0].sha256);
+        assert_eq!(deserialized.mods[0].installed_at, manifest.mods[0].installed_at);
+        assert_eq!(deserialized.mods[0].java_packages, manifest.mods[0].java_packages);
+        assert_eq!(deserialized.mods[0].mod_jar_id, manifest.mods[0].mod_jar_id);
+        assert_eq!(deserialized.mods[0].depends_on, manifest.mods[0].depends_on);
+        assert_eq!(deserialized.mods[0].optional_deps, manifest.mods[0].optional_deps);
+        assert_eq!(deserialized.mods[0].incompatible_deps, manifest.mods[0].incompatible_deps);
+        assert_eq!(deserialized.user_preferences, manifest.user_preferences);
+    }
+}

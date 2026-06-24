@@ -210,3 +210,106 @@ impl serde::Serialize for LauncherError {
 impl std::error::Error for LauncherError {}
 
 pub type LauncherResult<T> = Result<T, LauncherError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_serialize_generic_error() {
+        let err = LauncherError::Generic {
+            code: "ERR_CUSTOM".to_string(),
+            message: "Something went wrong".to_string(),
+        };
+        let val = serde_json::to_value(err).unwrap();
+        assert_eq!(val["code"], "ERR_CUSTOM");
+        assert_eq!(val["message"], "Something went wrong");
+        assert!(val["details"].is_null());
+        assert!(val["suggested_action"].is_null());
+    }
+
+    #[test]
+    fn test_serialize_hash_mismatch() {
+        let err = LauncherError::HashMismatch;
+        let val = serde_json::to_value(err).unwrap();
+        assert!(val["suggested_action"].is_string());
+    }
+
+    #[test]
+    fn test_serialize_mojang_not_found() {
+        let err = LauncherError::MojangNotFound;
+        let val = serde_json::to_value(err).unwrap();
+        assert!(val["suggested_action"].is_string());
+    }
+
+    #[test]
+    fn test_serialize_network_offline() {
+        let err = LauncherError::NetworkOffline;
+        let val = serde_json::to_value(err).unwrap();
+        assert!(val["suggested_action"].is_string());
+    }
+
+    #[test]
+    fn test_serialize_auth_required() {
+        let err = LauncherError::AuthRequired;
+        let val = serde_json::to_value(err).unwrap();
+        assert!(val["suggested_action"].is_string());
+    }
+
+    #[test]
+    fn test_serialize_local_state_failed() {
+        let err = LauncherError::LocalStateFailed;
+        let val = serde_json::to_value(err).unwrap();
+        assert!(val["details"].is_null());
+        assert!(val["suggested_action"].is_null());
+    }
+
+    #[test]
+    fn test_serialize_roundtrip_code() {
+        let err = LauncherError::Generic {
+            code: "ERR_ROUNDTRIP".to_string(),
+            message: "test".to_string(),
+        };
+        let val = serde_json::to_value(err).unwrap();
+        assert_eq!(val["code"], "ERR_ROUNDTRIP");
+    }
+
+    #[test]
+    fn test_all_variants_no_panic() {
+        let variants: Vec<LauncherError> = vec![
+            LauncherError::NetworkOffline,
+            LauncherError::RegistryDownloadFailed,
+            LauncherError::RegistrySignatureInvalid,
+            LauncherError::SchemaTooNew,
+            LauncherError::ZipBomb,
+            LauncherError::OverrideSecurityViolation,
+            LauncherError::HashMismatch,
+            LauncherError::UntrustedSource,
+            LauncherError::DiskFull,
+            LauncherError::AuthExpired,
+            LauncherError::AuthRequired,
+            LauncherError::ModrinthDisabled,
+            LauncherError::InstanceLocked,
+            LauncherError::SandboxUnavailable,
+            LauncherError::MojangNotFound,
+            LauncherError::LaunchFailed,
+            LauncherError::LocalStateFailed,
+            LauncherError::InstanceCreateFailed,
+            LauncherError::ProfileWriteFailed,
+            LauncherError::RegistryMissing,
+            LauncherError::UnsupportedLoader,
+            LauncherError::VersionNotFound,
+            LauncherError::DependencyMissing,
+            LauncherError::McpTooManyRequests,
+            LauncherError::McpDenied,
+            LauncherError::McpUnauthorized,
+            LauncherError::Generic {
+                code: "TEST".to_string(),
+                message: "test".to_string(),
+            },
+        ];
+        for err in variants {
+            let _val = serde_json::to_value(&err).unwrap();
+        }
+    }
+}
