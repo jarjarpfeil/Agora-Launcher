@@ -581,3 +581,60 @@ export const getInstallPlan = (instanceId: string, itemId: string, jarPath: stri
 
 export const enableModWithAutoDeps = (instanceId: string, filename: string) =>
   invoke<string[]>('enable_mod_with_auto_deps', { instanceId, filename });
+
+// --- MCP Server Lifecycle ---
+
+export interface McpStatus {
+  running: boolean;
+  url: string | null;
+}
+
+export const startMcpServer = () => invoke<McpStatus>('start_mcp_server');
+export const stopMcpServer = () => invoke<void>('stop_mcp_server');
+export const getMcpStatus = () => invoke<McpStatus>('get_mcp_status');
+export const getMcpSkillContent = () => invoke<string>('get_mcp_skill_content');
+export const setMcpApproval = (toolName: string, instanceId: string, state: string) =>
+  invoke<void>('set_mcp_approval', { toolName, instanceId, state });
+
+// --- AI Assistant (GitHub Models) ---
+
+export interface ChatMessage {
+  role: string;
+  content: string;
+}
+
+export interface ChatResponse {
+  content: string;
+  model: string;
+}
+
+export interface AiContext {
+  instance_id: string | null;
+  crash_log: string | null;
+  crash_signatures: string | null;
+  suspects: string | null;
+}
+
+export interface AvailableModel {
+    id: string;
+    name: string;
+    description: string;
+    free_tier: boolean;
+}
+
+export const aiChat = (
+  messages: ChatMessage[],
+  context?: AiContext | null,
+  model?: string | null,
+) =>
+  invoke<ChatResponse>('ai_chat', {
+    messages,
+    context: context ?? null,
+    model: model ?? null,
+  });
+
+export const aiGetModels = () =>
+  invoke<AvailableModel[]>('ai_get_models');
+
+export const aiGetDefaultModel = () =>
+  invoke<string>('ai_get_default_model');

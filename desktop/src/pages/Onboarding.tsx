@@ -118,6 +118,7 @@ function ServicesStep({
 }) {
   const [modrinth, setModrinth] = useState(false);
   const [aiMcp, setAiMcp] = useState(false);
+  const [aiChat, setAiChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -127,6 +128,7 @@ function ServicesStep({
     try {
       await setSetting('modrinth_enabled', modrinth);
       await setSetting('ai_mcp_enabled', aiMcp);
+      await setSetting('ai_chat_enabled', aiChat);
       onContinue();
     } catch (e) {
       setError(formatError(e));
@@ -140,7 +142,7 @@ function ServicesStep({
       <Stepper current="services" />
       <h2 className="text-2xl font-bold mb-2">Connect External Services</h2>
       <p className="text-[rgb(var(--muted))] mb-6">
-        Optional integrations. Both are disabled by default and can be changed later in Settings.
+        Optional integrations. All are disabled by default and can be changed later in Settings.
       </p>
 
       <div className="space-y-4">
@@ -156,7 +158,19 @@ function ServicesStep({
           checked={aiMcp}
           onChange={setAiMcp}
         />
+        <ServiceToggle
+          title="Integrated AI Assistant"
+          description="Built-in AI chat using free GitHub Models. Get instant crash analysis and mod help without any external setup."
+          checked={aiChat}
+          onChange={setAiChat}
+        />
       </div>
+
+      <p className="mt-3 text-xs text-[rgb(var(--muted))]">
+        <strong>MCP Server</strong> connects your existing AI agent to Agora.{' '}
+        <strong>Integrated AI</strong> gives you a built-in chat — simpler, no setup, but less
+        powerful. You can use either, both, or neither.
+      </p>
 
       {error && <p className="mt-4 text-xs text-red-600 dark:text-red-300">{error}</p>}
 

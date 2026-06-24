@@ -1,3 +1,4 @@
+use crate::ai_assistant::{self, ChatMessage, ChatResponse};
 use crate::auth::{DeviceFlowResponse, GithubProfile};
 use crate::crash_diagnostics::{self, CrashReportInfo, CrashTriageResult};
 use crate::crash_investigator;
@@ -6,12 +7,21 @@ use crate::dependency_ops;
 use crate::error::{LauncherError, LauncherResult};
 use crate::instances::{self, CreateInstanceRequest, InstanceDetail, LoaderVersionSummary};
 use crate::loader_manifests;
+use crate::mcp;
 use crate::mod_install;
 use crate::models::{InstanceManifest, InstanceRow, InstalledMod, ModVersionCandidate};
 use crate::modrinth_raw;
 use crate::paths;
 use crate::registry::{self, AuditLogEntry, CategoryInfo, ModReview, PackModRow, RegistryItem, SortOption, UnderReviewItem};
 use crate::state::LauncherState;
+use tauri::Manager;
+
+/// Current status of the MCP server.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpStatus {
+    pub running: bool,
+    pub url: String,
+}
 
 #[tauri::command]
 pub async fn greet(name: String) -> String {
@@ -1031,4 +1041,200 @@ pub async fn enable_mod_with_auto_deps(
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
+}
+
+/// Start the MCP server if not already running.
+/// Checks the `ai_mcp_enabled` setting and manages the server in Tauri state.
+/// Returns the server URL.
+#[tauri::command]
+pub async fn start_mcp_server(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<McpStatus> {
+    // If already running, return existing status.
+    if let Some(server) = app.try_state::<mcp::McpServer>() {
+        return Ok(McpStatus {
+            running: true,
+            url: format!("http://127.0.0.1:{}", server.port()),
+        });
+    }
+
+    // Check if the feature is enabled.
+    let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let enabled = match db::get_setting(&conn, "ai_mcp_enabled") {
+        Ok(Some(val)) => val == serde_json::json!("true"),
+        _ => false,
+    };
+    if !enabled {
+        return Ok(McpStatus {
+            running: false,
+            url: String::new(),
+        });
+    }
+
+    // Start the server.
+    let app_for_start = app.clone();
+    match mcp::start_server(app_for_start).await {
+        Ok(server) => {
+            app.manage(server);
+            Ok(McpStatus {
+                running: true,
+                url: "http://127.0.0.1:39741".to_string(),
+            })
+        }
+        Err(e) => Err(LauncherError::Generic {
+            code: "ERR_MCP_START_FAILED".to_string(),
+            message: format!("Failed to start MCP server: {}", e),
+        }),
+    }
+}
+
+/// Stop the MCP server if running.
+#[tauri::command]
+pub async fn stop_mcp_server(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<()> {
+    if let Some(server) = app.try_state::<mcp::McpServer>() {
+        server.stop();
+    }
+    Ok(())
+}
+
+/// Return the current MCP server status.
+#[tauri::command]
+pub async fn get_mcp_status(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<McpStatus> {
+    if let Some(server) = app.try_state::<mcp::McpServer>() {
+        Ok(McpStatus {
+            running: true,
+            url: format!("http://127.0.0.1:{}", server.port()),
+        })
+    } else {
+        Ok(McpStatus {
+            running: false,
+            url: String::new(),
+        })
+    }
+}
+
+/// Return the baked-in MCP skill guide content.
+#[tauri::command]
+pub fn get_mcp_skill_content() -> String {
+    crate::mcp::MCP_SKILL_CONTENT.to_string()
+}
+
+/// Record a user approval grant for an MCP tool + instance pair.
+/// `state` is one of: "always_allow", "always_deny", "session".
+#[tauri::command]
+pub async fn set_mcp_approval(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    tool_name: String,
+    instance_id: String,
+    state: String,
+) -> LauncherResult<()> {
+    tokio::task::spawn_blocking(move || {
+        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let expires_at = if state == "session" {
+            // Session grants expire after 24 hours.
+            Some((chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339())
+        } else {
+            None
+        };
+        conn.execute(
+            "INSERT INTO mcp_approval_grants (tool_name, instance_id, state, granted_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(tool_name, instance_id) DO UPDATE SET
+                 state = excluded.state,
+                 granted_at = excluded.granted_at,
+                 expires_at = excluded.expires_at",
+            rusqlite::params![tool_name, instance_id, state, now, expires_at],
+        )
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| LauncherError::LocalStateFailed)?
+}
+
+/// Send a chat message to the AI assistant and return the response.
+///
+/// If `context` is provided and the messages don't already contain a context
+/// message, one is prepended. A system prompt is always inserted as the first
+/// message.
+#[tauri::command]
+pub async fn ai_chat(
+    app: tauri::AppHandle,
+    messages: Vec<ChatMessage>,
+    context: Option<serde_json::Value>,
+    model: Option<String>,
+) -> Result<ChatResponse, LauncherError> {
+    let mut messages = messages;
+
+    // Build context message if context JSON is provided and not already present.
+    if let Some(ctx_val) = &context {
+        let has_context = messages.iter().any(|m| {
+            m.role == "system"
+                || (m.role == "user"
+                    && (m.content.contains("## Crash Log")
+                        || m.content.contains("## Ranked Suspect Mods")
+                        || m.content.contains("## Curated Crash Signatures")))
+        });
+        if !has_context {
+            // Manually extract AiContext fields from JSON (AiContext lacks Deserialize).
+            let instance_id = ctx_val
+                .get("instance_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let crash_log = ctx_val
+                .get("crash_log")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let crash_signatures = ctx_val
+                .get("crash_signatures")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let suspects = ctx_val
+                .get("suspects")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let ctx = ai_assistant::AiContext {
+                instance_id,
+                crash_log,
+                crash_signatures,
+                suspects,
+            };
+            let context_text = ai_assistant::build_context_message(&ctx);
+            messages.insert(0, ChatMessage {
+                role: "user".to_string(),
+                content: context_text,
+            });
+        }
+    }
+
+    // Ensure system prompt is first.
+    if messages.is_empty() || messages[0].role != "system" {
+        messages.insert(0, ChatMessage {
+            role: "system".to_string(),
+            content: ai_assistant::build_system_prompt(),
+        });
+    }
+
+    ai_assistant::chat_completion(&app, messages, model).await
+}
+
+/// Return the list of available AI models (curated free-tier list).
+#[tauri::command]
+pub fn ai_get_models() -> Vec<ai_assistant::AvailableModel> {
+    ai_assistant::AVAILABLE_MODELS.to_vec()
+}
+
+/// Return the default AI model ID.
+#[tauri::command]
+pub fn ai_get_default_model() -> String {
+    ai_assistant::DEFAULT_AI_MODEL.to_string()
 }

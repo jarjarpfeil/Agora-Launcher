@@ -217,6 +217,59 @@ non-fatal: signature verification is skipped with a console warning, to
 keep the local-dev loop smooth. In release builds (`npm run tauri:build`),
 the app refuses to verify any registry without the key compiled in.
 
+## Releasing the Desktop App
+
+Desktop releases are built by GitHub Actions via `.github/workflows/release-desktop.yml`. When a `v*` tag is pushed, the workflow builds native installers for Windows (`.msi` + `.exe`), macOS (`.dmg`), and Linux (`.AppImage` + `.deb`), then uploads them as assets on a GitHub Release.
+
+### Prerequisites (one-time setup)
+
+Add these as GitHub repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Description | Example |
+|---|---|---|
+| `AGORA_OAUTH_CLIENT_ID` | GitHub OAuth App client ID (same one used for local dev) | `Iv1.xxxxxxxxxxxxxxxx` |
+| `AGORA_REGISTRY_PUBKEY` | Ed25519 public key (hex) matching the compiler's signing key | `a7f07f88d56b...` |
+
+`AGORA_REGISTRY_REPO` is set automatically by the workflow from `github.repository`. `GITHUB_TOKEN` is provided automatically by Actions.
+
+### Cutting a release
+
+```bash
+# 1. Update the version in desktop/src-tauri/tauri.conf.json (if not already bumped)
+#    and desktop/package.json to match.
+
+# 2. Commit and tag
+git add -A
+git commit -m "release: v0.1.0"
+git tag v0.1.0
+git push origin v0.1.0
+
+# 3. The workflow runs automatically — builds 3 platforms, creates a DRAFT release
+#    with all installers attached.
+
+# 4. Review the draft release on GitHub, edit the release notes, then click "Publish."
+```
+
+You can also trigger a build manually via Actions → "Release Desktop App" → Run workflow (enter the tag name).
+
+### What users download
+
+Users go to the GitHub Releases page and download the file for their platform:
+- **Windows**: `Agora_0.1.0_x64.msi` (installer) or `Agora_0.1.0_x64.exe` (standalone)
+- **macOS**: `Agora_0.1.0_aarch64.dmg` (Apple Silicon) or `Agora_0.1.0_x64.dmg` (Intel)
+- **Linux**: `Agora_0.1.0_amd64.AppImage` (portable) or `Agora_0.1.0_amd64.deb` (apt)
+
+No Node.js, no npm — just a standard installer. The app is ~10–15 MB (Tauri uses the OS native webview, not a bundled Chromium).
+
+### Registry vs Desktop release streams
+
+| Tag pattern | Contents | Frequency |
+|---|---|---|
+| `registry-YYYY-MM-DD` | `registry.db` + `registry.db.sig` | Nightly (automated by `compile.yml`) |
+| `v0.1.0`, `v0.2.0`, ... | Desktop installers per platform | On-demand (when you cut a release) |
+
+The two streams are independent. The desktop app fetches `registry.db` from the `registry-*` releases at runtime; the `v*` releases only ship the app binary.
+
 ## Agent Tooling
 
 This repository includes Kilo agent configuration under `.kilo/`:

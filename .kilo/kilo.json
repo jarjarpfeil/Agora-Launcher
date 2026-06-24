@@ -29,10 +29,7 @@
     "agora-mc": {
       "type": "remote",
       "url": "http://127.0.0.1:39741/sse",
-      "headers": {
-        "Authorization": "Bearer ${env.LAUNCHER_MCP_TOKEN}"
-      },
-      "enabled": false,
+      "enabled": true,
       "timeout": 10000
     }
   },

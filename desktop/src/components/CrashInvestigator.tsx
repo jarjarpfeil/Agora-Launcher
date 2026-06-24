@@ -16,6 +16,7 @@ import {
   type SuggestedAction,
 } from '../lib/tauri';
 import { DependencyPrompt } from './DependencyPrompt';
+import { AiAssistant } from './AiAssistant';
 
 interface CrashInvestigatorProps {
   instanceId: string;
@@ -272,6 +273,8 @@ export function CrashInvestigator({
     originalFilename: string;
     plan: DisablePlan;
   } | null>(null);
+  // AI assistant panel
+  const [showAiAssistant, setShowAiAssistant] = useState(false);
 
   // Run investigation on mount
   useEffect(() => {
@@ -528,68 +531,91 @@ export function CrashInvestigator({
               </p>
             )}
           </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1 text-[rgb(var(--muted))] hover:text-[rgb(var(--text))] transition-colors ml-4"
-            aria-label="Close"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setShowAiAssistant(true)}
+              className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-700"
+            >
+              Ask AI Assistant
+            </button>
+            <button
+              onClick={onClose}
+              className="rounded-lg p-1 text-[rgb(var(--muted))] hover:text-[rgb(var(--text))] transition-colors"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         <div className="p-6 space-y-4">
-          {/* Suspect list */}
-          {suspects.length > 0 && (
-            <div className="space-y-3">
-              <p className="text-xs font-semibold uppercase tracking-wider text-[rgb(var(--muted))]">
-                Suspects
-              </p>
-              {suspects.map((suspect, idx) => (
-                <SuspectCard
-                  key={suspect.filename}
-                  suspect={suspect}
-                  rank={idx + 1}
-                  isTop={idx === 0}
-                  action={idx === 0 ? actionCard : undefined}
-                  onAction={idx === 0 ? handleDisableAndRelaunch : undefined}
+          {/* AI Assistant panel or suspect list */}
+          {showAiAssistant ? (
+            <div className="h-[480px]">
+              <AiAssistant
+                instanceId={instanceId}
+                crashLog={crashLogText || manualLogText || null}
+                crashSignatures={JSON.stringify(result.signature_name ?? null)}
+                suspects={JSON.stringify(result.suspects)}
+                onClose={() => setShowAiAssistant(false)}
+              />
+            </div>
+          ) : (
+            <>
+              {/* Suspect list */}
+              {suspects.length > 0 && (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-[rgb(var(--muted))]">
+                    Suspects
+                  </p>
+                  {suspects.map((suspect, idx) => (
+                    <SuspectCard
+                      key={suspect.filename}
+                      suspect={suspect}
+                      rank={idx + 1}
+                      isTop={idx === 0}
+                      action={idx === 0 ? actionCard : undefined}
+                      onAction={idx === 0 ? handleDisableAndRelaunch : undefined}
+                      loading={loading}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* Ruled out */}
+              <RuledOutList ruledOut={ruled_out} />
+
+              {/* Post-launch confirmation */}
+              {postLaunch && (
+                <FixConfirmation
+                  filename={postLaunch.filename}
+                  onFix={handleFixConfirmed}
+                  onStillCrashing={handleStillCrashing}
                   loading={loading}
                 />
-              ))}
-            </div>
+              )}
+
+              {/* Triage banner */}
+              {suggested_action.kind === 'ShowTriageBanner' && (
+                <TriageBanner
+                  modId={suggested_action.mod_id}
+                  onViewTriage={handleViewTriage}
+                />
+              )}
+
+              {/* No suspects */}
+              {suggested_action.kind === 'NoSuspects' && (
+                <div className="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
+                  <p className="text-sm text-[rgb(var(--muted))]">
+                    No suspects identified. The crash may not be mod-related. Use the manual log viewer for deeper inspection.
+                  </p>
+                </div>
+              )}
+
+              {/* Success */}
+              {success && <SuccessBanner message={success} />}
+            </>
           )}
-
-          {/* Ruled out */}
-          <RuledOutList ruledOut={ruled_out} />
-
-          {/* Post-launch confirmation */}
-          {postLaunch && (
-            <FixConfirmation
-              filename={postLaunch.filename}
-              onFix={handleFixConfirmed}
-              onStillCrashing={handleStillCrashing}
-              loading={loading}
-            />
-          )}
-
-          {/* Triage banner */}
-          {suggested_action.kind === 'ShowTriageBanner' && (
-            <TriageBanner
-              modId={suggested_action.mod_id}
-              onViewTriage={handleViewTriage}
-            />
-          )}
-
-          {/* No suspects */}
-          {suggested_action.kind === 'NoSuspects' && (
-            <div className="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-              <p className="text-sm text-[rgb(var(--muted))]">
-                No suspects identified. The crash may not be mod-related. Use the manual log viewer for deeper inspection.
-              </p>
-            </div>
-          )}
-
-          {/* Success */}
-          {success && <SuccessBanner message={success} />}
         </div>
       </div>
 

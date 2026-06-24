@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { getAllItems, CONTENT_TYPES, contentTypeLabel, contentTypePath } from '@/lib/db';
 import { GITHUB_REPO_URL, GITHUB_RELEASES_URL } from '@/lib/site';
+import { DownloadButton } from '@/components/DownloadButton';
 
 export default async function HomePage() {
   const mods = await getAllItems('mod');
@@ -24,14 +25,7 @@ export default async function HomePage() {
           >
             Browse the database
           </Link>
-          <a
-            href={GITHUB_RELEASES_URL}
-            className="rounded-lg bg-indigo-500 px-5 py-3 font-semibold text-white hover:bg-indigo-400"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Install the desktop app
-          </a>
+          <DownloadButton />
           <a
             href={GITHUB_REPO_URL}
             className="rounded-lg border border-white px-5 py-3 font-semibold text-white hover:bg-white/10"

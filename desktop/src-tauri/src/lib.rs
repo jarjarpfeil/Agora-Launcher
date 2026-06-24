@@ -1,5 +1,6 @@
-pub mod commands;
+pub mod ai_assistant;
 pub mod auth;
+pub mod commands;
 pub mod crash_diagnostics;
 pub mod crash_investigator;
 pub mod db;
@@ -15,12 +16,14 @@ pub mod mod_install;
 pub mod modrinth_raw;
 pub mod mojang;
 pub mod override_sanitizer;
+pub mod mcp;
 pub mod paths;
 pub mod registry;
 pub mod registry_sync;
 pub mod state;
 
 use state::LauncherState;
+use tauri::Manager;
 
 /// Run the Tauri application.
 pub fn run() {
@@ -99,7 +102,15 @@ pub fn run() {
             commands::get_disable_plan,
             commands::get_removal_plan,
             commands::get_install_plan,
-            commands::enable_mod_with_auto_deps
+            commands::enable_mod_with_auto_deps,
+            commands::start_mcp_server,
+            commands::stop_mcp_server,
+            commands::get_mcp_status,
+            commands::get_mcp_skill_content,
+            commands::set_mcp_approval,
+            commands::ai_chat,
+            commands::ai_get_models,
+            commands::ai_get_default_model
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -127,8 +138,28 @@ pub fn run() {
                         }
                     }).await;
                 });
+                // Start MCP server if enabled.
+                if let Ok(conn) = db::local_state_connection(&handle) {
+                    if let Ok(Some(val)) = db::get_setting(&conn, "ai_mcp_enabled") {
+                        if val == serde_json::json!("true") {
+                            let mcp_app = handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Ok(server) = crate::mcp::start_server(mcp_app.clone()).await {
+                                    mcp_app.manage(server);
+                                }
+                            });
+                        }
+                    }
+                }
             });
             Ok(())
+        })
+        .on_window_event(|app, event| {
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Some(server) = app.try_state::<crate::mcp::McpServer>() {
+                    server.stop();
+                }
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

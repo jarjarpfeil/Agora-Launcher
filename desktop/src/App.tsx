@@ -6,12 +6,13 @@ import { ModrinthRaw } from './pages/ModrinthRaw';
 import { Instances } from './pages/Instances';
 import { Governance } from './pages/Governance';
 import { Settings } from './pages/Settings';
+import AiChatPage from './pages/AiChatPage';
 import { Onboarding } from './pages/Onboarding';
 import { ModDetail } from './pages/ModDetail';
 import { InstanceEditor } from './pages/InstanceEditor';
 import { getSetting } from './lib/tauri';
 
-type Tab = 'home' | 'browse' | 'modrinth' | 'instances' | 'governance' | 'settings';
+type Tab = 'home' | 'browse' | 'modrinth' | 'instances' | 'governance' | 'ai' | 'settings';
 
 const BASE_TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'home', label: 'Home', icon: '🏠' },
@@ -27,12 +28,19 @@ const MODRINTH_TAB: { id: Tab; label: string; icon: string } = {
   icon: '🌐',
 };
 
+const AI_TAB: { id: Tab; label: string; icon: string } = {
+  id: 'ai',
+  label: 'AI Assistant',
+  icon: '🤖',
+};
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [selectedModId, setSelectedModId] = useState<string | null>(null);
   const [editingInstanceId, setEditingInstanceId] = useState<string | null>(null);
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [modrinthEnabled, setModrinthEnabled] = useState<boolean>(false);
+  const [aiChatEnabled, setAiChatEnabled] = useState<boolean>(false);
   // Telemetry upload prompt disabled — no aggregation endpoint exists yet ($0/month footprint). Local crash learning runs regardless. The crash_telemetry_opt_in setting is preserved for future shared-data use.
   // const [showTelemetryPrompt, setShowTelemetryPrompt] = useState(false);
 
@@ -59,8 +67,11 @@ export default function App() {
       try {
         const m = await getSetting('modrinth_enabled');
         if (!cancelled) setModrinthEnabled(m === true);
+        const ai = await getSetting('ai_chat_enabled');
+        if (!cancelled) setAiChatEnabled(ai === 'true');
       } catch {
         if (!cancelled) setModrinthEnabled(false);
+        if (!cancelled) setAiChatEnabled(false);
       }
     })();
     return () => {
@@ -105,6 +116,7 @@ export default function App() {
   }
 
   // Build the tab list; the Modrinth tab only appears when the toggle is on.
+  // The AI Assistant tab appears between Governance and Settings when enabled.
   const tabs = modrinthEnabled
     ? [
         BASE_TABS[0],
@@ -112,13 +124,19 @@ export default function App() {
         MODRINTH_TAB,
         BASE_TABS[2],
         BASE_TABS[3],
+        ...(aiChatEnabled ? [AI_TAB] : []),
         BASE_TABS[4],
       ]
-    : BASE_TABS;
+    : [
+        ...BASE_TABS,
+        ...(aiChatEnabled ? [AI_TAB] : []),
+      ];
 
-  // If the user disables Modrinth while on the Modrinth tab, bounce back home.
+  // If the user disables Modrinth or AI while on those tabs, bounce back home.
   const effectiveTab: Tab =
-    activeTab === 'modrinth' && !modrinthEnabled ? 'home' : activeTab;
+    (activeTab === 'modrinth' && !modrinthEnabled) ||
+    (activeTab === 'ai' && !aiChatEnabled)
+      ? 'home' : activeTab;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -165,6 +183,7 @@ export default function App() {
               )}
               {effectiveTab === 'instances' && <Instances onEditInstance={(id) => setEditingInstanceId(id)} />}
               {effectiveTab === 'governance' && <Governance />}
+              {effectiveTab === 'ai' && aiChatEnabled && <AiChatPage />}
               {effectiveTab === 'settings' && <Settings />}
             </>
           )}
