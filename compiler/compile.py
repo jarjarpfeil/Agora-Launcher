@@ -367,12 +367,15 @@ def _github_paginate(
     token: str,
     per_page: int = 100,
     max_pages: int = 50,
+    params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch all pages of a GitHub list endpoint (Link-header pagination)."""
     out: list[dict[str, Any]] = []
     for page in range(1, max_pages + 1):
-        params = {"per_page": per_page, "page": page}
-        page_items = _github_request("GET", path, token=token, params=params)
+        page_params: dict[str, Any] = {"per_page": per_page, "page": page}
+        if params:
+            page_params.update(params)
+        page_items = _github_request("GET", path, token=token, params=page_params)
         if not isinstance(page_items, list):
             break
         out.extend(page_items)
