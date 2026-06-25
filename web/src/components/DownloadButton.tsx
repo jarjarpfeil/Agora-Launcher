@@ -107,8 +107,8 @@ export function DownloadButton() {
         </p>
       </div>
       {!asset && !loading && (
-        <p className="max-w-xs text-center text-xs text-indigo-100/70">
-          ⚠️ On the releases page, download the file for your platform (`.msi`, `.dmg`, or `.AppImage`). Ignore releases tagged `registry-*` — those are database updates, not the app itself.
+        <p className="text-center text-xs text-indigo-100/70">
+          ⚠️ We couldn't find a download for your platform. On the releases page, download the file for your platform (`.msi`, `.dmg`, or `.AppImage`). Ignore releases tagged `registry-*` — those are database updates, not the app itself.
         </p>
       )}
     </div>
