@@ -31,7 +31,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-xl rounded-2xl border border-gray-200 dark:border-gray-700 surface shadow-xl">
+        <div className="w-full max-w-xl rounded-2xl border border-border bg-card shadow-xl">
         <div className="p-6 sm:p-8">
           {step === 'welcome' && <WelcomeStep onContinue={() => setStep('services')} />}
           {step === 'services' && (
@@ -63,12 +63,12 @@ function Stepper({ current }: { current: Step }) {
         <div key={s.id} className="flex items-center gap-2">
           <span
             className={`h-2 w-2 rounded-full ${
-              i <= currentIndex ? 'bg-brand-600' : 'bg-gray-300 dark:bg-gray-600'
+              i <= currentIndex ? 'bg-primary' : 'bg-muted'
             }`}
           />
           <span
             className={`text-xs ${
-              i === currentIndex ? 'font-semibold' : 'text-[rgb(var(--muted))]'
+              i === currentIndex ? 'font-semibold' : 'text-muted-foreground'
             }`}
           >
             {s.label}
@@ -87,7 +87,7 @@ function WelcomeStep({ onContinue }: { onContinue: () => void }) {
     <div>
       <Stepper current="welcome" />
       <h2 className="text-2xl font-bold mb-2">Welcome to Agora</h2>
-      <p className="text-[rgb(var(--muted))] mb-4">
+      <p className="text-muted-foreground mb-4">
         A decentralized, ad-free, open-source Minecraft mod launcher and discovery platform.
       </p>
       <p className="text-sm mb-6">
@@ -100,7 +100,7 @@ function WelcomeStep({ onContinue }: { onContinue: () => void }) {
       <div className="flex justify-end">
         <button
           onClick={onContinue}
-          className="rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700"
+          className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           Get Started
         </button>
@@ -141,7 +141,7 @@ function ServicesStep({
     <div>
       <Stepper current="services" />
       <h2 className="text-2xl font-bold mb-2">Connect External Services</h2>
-      <p className="text-[rgb(var(--muted))] mb-6">
+      <p className="text-muted-foreground mb-6">
         Optional integrations. All are disabled by default and can be changed later in Settings.
       </p>
 
@@ -166,25 +166,25 @@ function ServicesStep({
         />
       </div>
 
-      <p className="mt-3 text-xs text-[rgb(var(--muted))]">
+      <p className="mt-3 text-xs text-muted-foreground">
         <strong>MCP Server</strong> connects your existing AI agent to Agora.{' '}
         <strong>Integrated AI</strong> gives you a built-in chat — simpler, no setup, but less
         powerful. You can use either, both, or neither.
       </p>
 
-      {error && <p className="mt-4 text-xs text-red-600 dark:text-red-300">{error}</p>}
+      {error && <p className="mt-4 text-xs text-destructive">{error}</p>}
 
       <div className="mt-8 flex justify-between">
         <button
           onClick={onBack}
-          className="rounded-lg px-4 py-2 text-sm font-medium text-[rgb(var(--muted))] hover:underline"
+          className="rounded-lg px-4 py-2 text-sm font-medium text-muted-foreground hover:underline"
         >
           Back
         </button>
         <button
           onClick={handleContinue}
           disabled={saving}
-          className="rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           {saving ? 'Saving…' : 'Continue'}
         </button>
@@ -205,7 +205,7 @@ function ServiceToggle({
   onChange: (value: boolean) => void;
 }) {
   return (
-    <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+    <div className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-4">
         <span className="font-medium text-sm">{title}</span>
         <button
@@ -214,7 +214,7 @@ function ServiceToggle({
           aria-checked={checked}
           onClick={() => onChange(!checked)}
           className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
-            checked ? 'bg-brand-600' : 'bg-gray-300 dark:bg-gray-600'
+            checked ? 'bg-primary' : 'bg-muted'
           }`}
         >
           <span
@@ -224,7 +224,7 @@ function ServiceToggle({
           />
         </button>
       </div>
-      <p className="mt-2 text-xs text-[rgb(var(--muted))]">{description}</p>
+      <p className="mt-2 text-xs text-muted-foreground">{description}</p>
     </div>
   );
 }
@@ -312,15 +312,15 @@ function GithubStep({
     <div>
       <Stepper current="github" />
       <h2 className="text-2xl font-bold mb-2">Connect GitHub</h2>
-      <p className="text-[rgb(var(--muted))] mb-6">
+      <p className="text-muted-foreground mb-6">
         Sign in with GitHub to participate in community governance (voting, proposals). This is
         optional and can be completed later in Settings.
       </p>
 
       {device && (
-        <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 mb-4">
+        <div className="rounded-xl border border-border bg-card p-4 mb-4">
           <p className="text-sm">Opening your browser… If it didn't open, click the button below:</p>
-          <p className="mt-1 text-sm font-semibold break-all text-brand-600 dark:text-brand-400">
+          <p className="mt-1 text-sm font-semibold break-all text-primary dark:text-primary">
             {device.verification_uri}
           </p>
           <p className="mt-2 text-sm">
@@ -335,23 +335,23 @@ function GithubStep({
               });
             }}
             disabled={polling}
-            className="mt-3 rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+            className="mt-3 rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-50"
           >
             Open in browser
           </button>
           {polling && (
-            <p className="mt-2 text-xs text-[rgb(var(--muted))]">Waiting for authorization…</p>
+            <p className="mt-2 text-xs text-muted-foreground">Waiting for authorization…</p>
           )}
         </div>
       )}
 
-      {result && <p className="mb-4 text-sm text-green-600 dark:text-green-400">{result}</p>}
-      {error && <p className="mb-4 text-xs text-red-600 dark:text-red-300">{error}</p>}
+      {result && <p className="mb-4 text-sm text-primary">{result}</p>}
+      {error && <p className="mb-4 text-xs text-destructive">{error}</p>}
 
       <div className="flex justify-between">
         <button
           onClick={onBack}
-          className="rounded-lg px-4 py-2 text-sm font-medium text-[rgb(var(--muted))] hover:underline"
+          className="rounded-lg px-4 py-2 text-sm font-medium text-muted-foreground hover:underline"
           disabled={polling}
         >
           Back
@@ -360,14 +360,14 @@ function GithubStep({
           <button
             onClick={onContinue}
             disabled={polling}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-[rgb(var(--muted))] hover:underline disabled:opacity-50"
+            className="rounded-lg px-4 py-2 text-sm font-medium text-muted-foreground hover:underline disabled:opacity-50"
           >
             I'll do this later
           </button>
           <button
             onClick={signIn}
             disabled={polling}
-            className="rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
             {polling ? 'Waiting…' : 'Sign in with GitHub'}
           </button>
@@ -412,23 +412,23 @@ function RegistryStep({
     <div>
       <Stepper current="registry" />
       <h2 className="text-2xl font-bold mb-2">Download Registry</h2>
-      <p className="text-[rgb(var(--muted))] mb-6">
+      <p className="text-muted-foreground mb-6">
         Agora needs the curated registry database to show mods, packs, shaders, and more.
       </p>
 
-      <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+    <div className="rounded-xl border border-border bg-card p-4">
         {downloading && <p className="text-sm">Downloading the latest registry…</p>}
         {!downloading && status && (
           <>
             <p className="text-sm font-medium">Registry ready.</p>
-            <p className="text-xs text-[rgb(var(--muted))] mt-1">{status.message}</p>
+            <p className="text-xs text-muted-foreground mt-1">{status.message}</p>
             {status.cached_tag && (
-              <p className="text-xs text-[rgb(var(--muted))]">Version: {status.cached_tag}</p>
+              <p className="text-xs text-muted-foreground">Version: {status.cached_tag}</p>
             )}
           </>
         )}
         {!downloading && error && (
-          <p className="text-xs text-red-600 dark:text-red-300">{error}</p>
+          <p className="text-xs text-destructive">{error}</p>
         )}
       </div>
 
@@ -436,14 +436,14 @@ function RegistryStep({
         <button
           onClick={onBack}
           disabled={downloading}
-          className="rounded-lg px-4 py-2 text-sm font-medium text-[rgb(var(--muted))] hover:underline disabled:opacity-50"
+          className="rounded-lg px-4 py-2 text-sm font-medium text-muted-foreground hover:underline disabled:opacity-50"
         >
           Back
         </button>
         <button
           onClick={onFinish}
           disabled={downloading}
-          className="rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           {done ? 'Finish' : 'Skip & Finish'}
         </button>

@@ -1,48 +1,17 @@
+//! Crash diagnostics shim — preserves all original public signatures while
+//! delegating to `agora_core::crash_diagnostics` for the actual logic.
+//!
+//! Phase 3: triage works with ZERO `registry.db` dependency. The shim passes
+//! `None` for the DB connection when `registry_connection` fails, ensuring
+//! crash-triage succeeds even when the registry database is absent.
+
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 use crate::paths;
-use crate::registry;
-use rusqlite::Connection;
-use serde::Serialize;
-
-/// Per §2.4.1, crash signature regex patterns longer than this are rejected.
-const MAX_REGEX_LEN: usize = 256;
-
-/// Summary of a single crash report file on disk.
-#[derive(Debug, Clone, Serialize)]
-pub struct CrashReportInfo {
-    pub filename: String,
-    pub modified_at: String,
-    pub size_bytes: u64,
-}
-
-/// Result of matching a crash log against the curated signature set.
-#[derive(Debug, Clone, Serialize)]
-pub struct CrashTriageResult {
-    pub matched: bool,
-    pub signature_name: Option<String>,
-    pub solution_markdown: Option<String>,
-    pub action_button_json: Option<String>,
-}
-
-impl CrashTriageResult {
-    fn no_match() -> Self {
-        Self {
-            matched: false,
-            signature_name: None,
-            solution_markdown: None,
-            action_button_json: None,
-        }
-    }
-}
-
-/// A row from the registry `crash_signatures` table.
-struct CrashSignatureRow {
-    name: String,
-    regex_pattern: String,
-    solution_markdown: Option<String>,
-    action_button_json: Option<String>,
-}
+pub use agora_core::crash_diagnostics::{
+    CrashReportInfo, CrashTriageResult, MAX_REGEX_LEN,
+};
+use agora_core::crash_diagnostics as core;
 
 /// Check whether a fresh crash report appeared after the instance's
 /// `last_launched_at`. Returns the newest qualifying file.
@@ -65,66 +34,31 @@ pub fn check_for_crash<R: tauri::Runtime>(
         Some(ts) => ts,
         None => return Ok(None),
     };
-    let last_launched = parse_rfc3339(&last_launched_at);
 
-    let reports_dir = match crash_reports_dir(app, &sanitized) {
-        Ok(dir) => dir,
+    let dir = match paths::instance_dir(app, &sanitized) {
+        Ok(d) => d.join("crash-reports"),
         Err(_) => return Ok(None),
     };
-    if !reports_dir.exists() {
-        return Ok(None);
-    }
 
-    let mut newest: Option<(CrashReportInfo, std::time::SystemTime)> = None;
-    let entries = match std::fs::read_dir(&reports_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(None),
-    };
-    for entry in entries.flatten() {
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        let mtime = match meta.modified() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if let Some(ref last) = last_launched {
-            if mtime <= *last {
-                continue;
-            }
-        }
-        let filename = entry.file_name().to_string_lossy().to_string();
-        let info = CrashReportInfo {
-            filename: filename.clone(),
-            modified_at: system_time_to_rfc3339(mtime),
-            size_bytes: meta.len(),
-        };
-        match &newest {
-            Some((_, best_mtime)) if mtime <= *best_mtime => {}
-            _ => newest = Some((info, mtime)),
-        }
-    }
-
-    Ok(newest.map(|(info, _)| info))
+    core::check_for_crash_from_path(&dir, &last_launched_at)
 }
 
-/// Triage a crash log against curated signatures. Reads the crash log text,
-/// queries `crash_signatures` from `registry.db` (read-only), and returns the
-/// first match. Per §2.4.1, patterns longer than 256 chars are rejected.
+/// Triage a crash log against curated signatures.
 ///
-/// The crash log is identified by `(instance_id, filename)` and sanitized
-/// the same way as `read_crash_log` to prevent path traversal.
+/// Phase 3: uses the embedded signature corpus by default. If `registry.db`
+/// is present and contains the `crash_signatures` table, runtime-added
+/// signatures are also checked. Triage succeeds even when `registry.db`
+/// is absent.
 pub fn triage_crash<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
     filename: &str,
 ) -> LauncherResult<CrashTriageResult> {
     let sanitized = paths::sanitize_id(instance_id);
-    let reports_dir = crash_reports_dir(app, &sanitized)?;
+    let reports_dir = match paths::instance_dir(app, &sanitized) {
+        Ok(d) => d.join("crash-reports"),
+        Err(_) => return Ok(CrashTriageResult::no_match()),
+    };
     let safe_name = std::path::Path::new(filename)
         .file_name()
         .ok_or_else(|| LauncherError::Generic {
@@ -140,34 +74,10 @@ pub fn triage_crash<R: tauri::Runtime>(
         Err(_) => return Ok(CrashTriageResult::no_match()),
     };
 
-    let conn = match registry::open_registry(app) {
-        Ok(c) => c,
-        Err(_) => return Ok(CrashTriageResult::no_match()),
-    };
-    let signatures = match load_signatures(&conn) {
-        Ok(s) => s,
-        Err(_) => return Ok(CrashTriageResult::no_match()),
-    };
-
-    for sig in signatures {
-        if sig.regex_pattern.chars().count() > MAX_REGEX_LEN {
-            continue;
-        }
-        let re = match regex::Regex::new(&sig.regex_pattern) {
-            Ok(re) => re,
-            Err(_) => continue,
-        };
-        if re.is_match(&text) {
-            return Ok(CrashTriageResult {
-                matched: true,
-                signature_name: Some(sig.name),
-                solution_markdown: sig.solution_markdown,
-                action_button_json: sig.action_button_json,
-            });
-        }
-    }
-
-    Ok(CrashTriageResult::no_match())
+    // Open registry connection optionally — if it fails, triage still works
+    // against the embedded corpus (Phase 3 property).
+    let conn_opt = crate::db::registry_connection(app).ok();
+    Ok(core::triage_with_db(&text, conn_opt.as_ref()))
 }
 
 /// List all crash report files for an instance with modification times and sizes.
@@ -176,42 +86,11 @@ pub fn list_crash_reports<R: tauri::Runtime>(
     instance_id: &str,
 ) -> LauncherResult<Vec<CrashReportInfo>> {
     let sanitized = paths::sanitize_id(instance_id);
-    let reports_dir = match crash_reports_dir(app, &sanitized) {
-        Ok(dir) => dir,
+    let dir = match paths::instance_dir(app, &sanitized) {
+        Ok(d) => d.join("crash-reports"),
         Err(_) => return Ok(Vec::new()),
     };
-    if !reports_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut out: Vec<(CrashReportInfo, std::time::SystemTime)> = Vec::new();
-    let entries = match std::fs::read_dir(&reports_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(Vec::new()),
-    };
-    for entry in entries.flatten() {
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        let mtime = match meta.modified() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        out.push((
-            CrashReportInfo {
-                filename: entry.file_name().to_string_lossy().to_string(),
-                modified_at: system_time_to_rfc3339(mtime),
-                size_bytes: meta.len(),
-            },
-            mtime,
-        ));
-    }
-    out.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(out.into_iter().map(|(info, _)| info).collect())
+    Ok(core::list_reports_from_dir(&dir))
 }
 
 /// Read the content of a specific crash report file.
@@ -221,7 +100,13 @@ pub fn read_crash_log<R: tauri::Runtime>(
     filename: &str,
 ) -> LauncherResult<String> {
     let sanitized = paths::sanitize_id(instance_id);
-    let reports_dir = crash_reports_dir(app, &sanitized)?;
+    let reports_dir = match paths::instance_dir(app, &sanitized) {
+        Ok(d) => d.join("crash-reports"),
+        Err(_) => return Err(LauncherError::Generic {
+            code: "ERR_CRASH_LOG_READ".to_string(),
+            message: "Could not read the crash log file.".to_string(),
+        }),
+    };
     let safe_name = std::path::Path::new(filename)
         .file_name()
         .ok_or_else(|| LauncherError::Generic {
@@ -231,100 +116,25 @@ pub fn read_crash_log<R: tauri::Runtime>(
         .to_string_lossy()
         .to_string();
     let path = reports_dir.join(&safe_name);
-    std::fs::read_to_string(&path).map_err(|_| LauncherError::Generic {
-        code: "ERR_CRASH_LOG_READ".to_string(),
-        message: "Could not read the crash log file.".to_string(),
-    })
-}
-
-fn crash_reports_dir<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    instance_id: &str,
-) -> LauncherResult<std::path::PathBuf> {
-    let dir = paths::instance_dir(app, instance_id).map_err(|_| LauncherError::LocalStateFailed)?;
-    Ok(dir.join("crash-reports"))
-}
-
-fn load_signatures(conn: &Connection) -> anyhow::Result<Vec<CrashSignatureRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT name, regex_pattern, solution_markdown, action_button_json
-         FROM crash_signatures",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(CrashSignatureRow {
-            name: row.get(0)?,
-            regex_pattern: row.get(1)?,
-            solution_markdown: row.get(2)?,
-            action_button_json: row.get(3)?,
-        })
-    })?;
-    let mut out = Vec::new();
-    for r in rows {
-        out.push(r?);
-    }
-    Ok(out)
-}
-
-fn parse_rfc3339(ts: &str) -> Option<std::time::SystemTime> {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .ok()
-        .map(|dt| std::time::SystemTime::from(dt.with_timezone(&chrono::Utc)))
-}
-
-fn system_time_to_rfc3339(t: std::time::SystemTime) -> String {
-    let dt: chrono::DateTime<chrono::Utc> = t.into();
-    dt.to_rfc3339()
+    core::read_crash_log_from_path(&path)
 }
 
 /// Pure regex matching helper — compiles a pattern and checks if it matches
 /// the given text. Returns `false` for invalid patterns or non-matches.
 pub fn match_signature(pattern: &str, crash_text: &str) -> bool {
-    if pattern.is_empty() {
-        return false;
-    }
-    regex::Regex::new(pattern).map(|re| re.is_match(crash_text)).unwrap_or(false)
+    core::match_signature(pattern, crash_text)
 }
 
 /// Check whether a regex pattern exceeds the MAX_REGEX_LEN guard.
 pub fn is_regex_too_long(pattern: &str) -> bool {
-    pattern.chars().count() > MAX_REGEX_LEN
+    core::is_regex_too_long(pattern)
 }
 
 /// List crash report `.txt` files from a directory path, returning sorted
 /// (newest first) `[CrashReportInfo]`. Returns an empty vec when the
 /// directory does not exist or cannot be read.
 pub fn list_crash_reports_from_dir(dir: &std::path::Path) -> Vec<CrashReportInfo> {
-    if !dir.exists() {
-        return Vec::new();
-    }
-    let mut out: Vec<(CrashReportInfo, std::time::SystemTime)> = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    for entry in entries.flatten() {
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.is_file() {
-            continue;
-        }
-        let mtime = match meta.modified() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        out.push((
-            CrashReportInfo {
-                filename: entry.file_name().to_string_lossy().to_string(),
-                modified_at: system_time_to_rfc3339(mtime),
-                size_bytes: meta.len(),
-            },
-            mtime,
-        ));
-    }
-    out.sort_by(|a, b| b.1.cmp(&a.1));
-    out.into_iter().map(|(info, _)| info).collect()
+    core::list_reports_from_dir(dir)
 }
 
 #[cfg(test)]
@@ -333,18 +143,14 @@ mod tests {
 
     // --- Regex matching ---
 
-    /// test_regex_matches_known_crash: a real crash-signature regex from
-    /// `crash-signatures/mixin-conflict.json` should match a matching snippet.
     #[test]
     fn test_regex_matches_known_crash() {
-        // Pattern from mixin-conflict.json
         let pattern = "Mixin apply failed";
         let crash_text =
             "[06:12:33] [Worker-3/FABRIC]: Mixin apply failed mixins.fabric.json:debug.mixins.json:DebugMixin -> org.example.Mod: java/lang/RuntimeException";
         assert!(match_signature(pattern, crash_text));
     }
 
-    /// test_regex_no_match_unrelated: same regex against unrelated text.
     #[test]
     fn test_regex_no_match_unrelated() {
         let pattern = "Mixin apply failed";
@@ -352,26 +158,21 @@ mod tests {
         assert!(!match_signature(pattern, unrelated));
     }
 
-    /// test_regex_no_match_empty: empty input should not panic and returns false.
     #[test]
     fn test_regex_no_match_empty() {
         let pattern = "java\\.lang\\.OutOfMemoryError";
         assert!(!match_signature(pattern, ""));
     }
 
-    /// test_regex_no_match_malformed: garbage bytes should not panic.
     #[test]
     fn test_regex_no_match_malformed() {
         let pattern = "java\\.lang\\.OutOfMemoryError";
-        // Invalid UTF-8 bytes — Regex handles &str so we pass a valid string
-        // that is just garbage relative to the pattern.
         let garbage = "x\x00y\x01z\x02garbage";
         assert!(!match_signature(pattern, garbage));
     }
 
     // --- Crash report discovery ---
 
-    /// test_list_crash_reports_finds_txt: temp dir with .txt files finds them.
     #[test]
     fn test_list_crash_reports_finds_txt() {
         let tmp = std::env::temp_dir().join(format!(
@@ -379,7 +180,6 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
-        // Create two crash report files
         std::fs::write(tmp.join("crash-1.txt"), "crash data 1").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::write(tmp.join("crash-2.txt"), "crash data 2").unwrap();
@@ -390,11 +190,9 @@ mod tests {
         assert!(names.contains(&"crash-2.txt"));
         assert!(names.contains(&"crash-1.txt"));
 
-        // Cleanup
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// test_list_crash_reports_empty_dir: empty directory returns empty vec.
     #[test]
     fn test_list_crash_reports_empty_dir() {
         let tmp = std::env::temp_dir().join(format!(
@@ -409,7 +207,6 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// test_list_crash_reports_nonexistent_dir: missing dir returns empty.
     #[test]
     fn test_list_crash_reports_nonexistent_dir() {
         let tmp = std::env::temp_dir().join(format!(
@@ -422,14 +219,12 @@ mod tests {
 
     // --- MAX_REGEX_LEN guard ---
 
-    /// test_max_regex_len_rejects_long: pattern >256 chars is rejected.
     #[test]
     fn test_max_regex_len_rejects_long() {
         let long_pattern = "a".repeat(257);
         assert!(is_regex_too_long(&long_pattern));
     }
 
-    /// test_max_regex_len_accepts_short: normal pattern is fine.
     #[test]
     fn test_max_regex_len_accepts_short() {
         let short_pattern = "java\\.lang\\.OutOfMemoryError";
@@ -438,8 +233,6 @@ mod tests {
 
     // --- Struct serialization ---
 
-    /// test_crash_report_info_serializes: construct a CrashReportInfo, serialize,
-    /// verify fields round-trip.
     #[test]
     fn test_crash_report_info_serializes() {
         let info = CrashReportInfo {

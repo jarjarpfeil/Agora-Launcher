@@ -216,7 +216,7 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
     <div className="space-y-6">
       <section>
         <h2 className="text-2xl font-bold mb-2">Modrinth</h2>
-        <p className="text-[rgb(var(--muted))]">
+        <p className="text-muted-foreground">
           Search all of Modrinth directly. Files are SHA-1 verified before install.
         </p>
       </section>
@@ -229,21 +229,22 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search mods on Modrinth…"
-          className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+          className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
         />
         <button
           type="submit"
           disabled={loading}
-          className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           {loading ? 'Searching…' : 'Search'}
         </button>
         <select
           value={projectType}
           onChange={(e) => setProjectType(e.target.value)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+          className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
         >
           <option value="mod">Mods</option>
+
           <option value="shader">Shaders</option>
           <option value="resourcepack">Resource Packs</option>
           <option value="datapack">Datapacks</option>
@@ -252,20 +253,22 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
         <select
           value={sort}
           onChange={(e) => setSort(e.target.value as ModrinthSort)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+          className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
         >
           {SORTS.map((s) => (
+
             <option key={s.value} value={s.value}>{s.label}</option>
           ))}
         </select>
         <button
           type="button"
           onClick={() => setFiltersOpen((v) => !v)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-2 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+          className="rounded-lg border border-border px-3 py-2 text-sm font-medium hover:bg-accent"
         >
           {filtersOpen ? 'Hide filters' : 'Filters'}
           {activeFilterCount > 0 && (
-            <span className="ml-2 inline-flex items-center justify-center rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] text-white">
+            <span className="ml-2 inline-flex items-center justify-center rounded-full bg-primary px-1.5 py-0.5 text-[10px] text-primary-foreground">
+
               {activeFilterCount}
             </span>
           )}
@@ -278,7 +281,7 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
             {activeFilterCount > 0 && (
               <button
                 onClick={clearFilters}
-                className="text-xs font-medium text-brand-600 hover:underline dark:text-brand-400"
+                className="text-xs font-medium text-primary hover:underline dark:text-primary"
               >
                 Clear all filters ({activeFilterCount})
               </button>
@@ -319,12 +322,14 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
 
         <div className="flex-1 min-w-0 space-y-4">
           {error && (
-            <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+            <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+
               {error}
             </div>
           )}
 
-          <div className="flex items-center justify-between text-xs text-[rgb(var(--muted))]">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+
             <span>
               {loading
                 ? 'Searching…'
@@ -333,13 +338,15 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
           </div>
 
           {loading && results.length === 0 ? (
-            <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center text-[rgb(var(--muted))]">
+            <div className="rounded-xl p-6 border border-dashed border-border text-center text-muted-foreground">
+
               Searching Modrinth…
             </div>
           ) : results.length === 0 ? (
-            <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center">
-              <p className="text-[rgb(var(--muted))]">
+            <div className="rounded-xl p-6 border border-dashed border-border text-center">
+              <p className="text-muted-foreground">
                 No results. Try a different query or relax your filters.
+
               </p>
             </div>
           ) : (
@@ -355,14 +362,14 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
                   <button
                     onClick={loadMore}
                     disabled={loadingMore || !hasMore}
-                    className="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+                    className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
                   >
                     {loadingMore ? 'Loading more…' : 'Load more'}
                   </button>
                 </div>
               )}
               {!hasMore && results.length > 0 && (
-                <p className="text-center text-xs text-[rgb(var(--muted))]">
+                <p className="text-center text-xs text-muted-foreground">
                   End of results.
                 </p>
               )}
@@ -376,32 +383,32 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
 
 function ModrinthCard({ result, onView }: { result: ModrinthSearchResult; onView: () => void }) {
   return (
-    <li className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 flex flex-col">
+    <li className="rounded-xl border border-border surface p-4 flex flex-col">
       <div className="flex items-start gap-3">
         {result.icon_url ? (
           <img
             src={result.icon_url}
             alt={result.title}
-            className="h-12 w-12 rounded-lg border object-contain dark:border-gray-600"
+            className="h-12 w-12 rounded-lg border object-contain dark:border-border"
           />
         ) : (
-          <div className="h-12 w-12 rounded-lg border border-dashed border-gray-300 dark:border-gray-600 flex items-center justify-center text-xs text-[rgb(var(--muted))]">
+          <div className="h-12 w-12 rounded-lg border border-dashed border-border flex items-center justify-center text-xs text-muted-foreground">
             ?
           </div>
         )}
         <div className="flex-1 min-w-0">
           <h3 className="font-semibold truncate">{result.title}</h3>
-          <p className="text-xs text-[rgb(var(--muted))] truncate">by {result.author}</p>
-          <p className="text-xs text-[rgb(var(--muted))] mt-1">
+          <p className="text-xs text-muted-foreground truncate">by {result.author}</p>
+          <p className="text-xs text-muted-foreground mt-1">
             ↓ {result.downloads.toLocaleString()} · ★ {result.follows.toLocaleString()}
           </p>
         </div>
       </div>
       {result.description && (
-        <p className="text-xs text-[rgb(var(--muted))] mt-2 line-clamp-2">{result.description}</p>
+        <p className="text-xs text-muted-foreground mt-2 line-clamp-2">{result.description}</p>
       )}
       {result.versions.length > 0 && (
-        <p className="text-[10px] text-[rgb(var(--muted))] mt-2">
+        <p className="text-[10px] text-muted-foreground mt-2">
           MC: {result.versions.slice(0, 4).join(', ')}
           {result.versions.length > 4 ? ` +${result.versions.length - 4}` : ''}
         </p>
@@ -411,17 +418,17 @@ function ModrinthCard({ result, onView }: { result: ModrinthSearchResult; onView
           {result.categories.slice(0, 5).map((c) => (
             <span
               key={c}
-              className="rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 text-[10px] text-[rgb(var(--muted))]"
+              className="rounded-full border border-border px-2 py-0.5 text-[10px] text-muted-foreground"
             >
               {c}
             </span>
           ))}
         </div>
       )}
-      <div className="mt-3 pt-3 border-t border-gray-100 dark:border-gray-800">
+      <div className="mt-3 pt-3 border-t border-border">
         <button
           onClick={onView}
-          className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+          className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           View Versions
         </button>
@@ -473,12 +480,12 @@ function LoadersFilter({
         />
       ))}
       {displayed.length === 0 && (
-        <p className="text-xs text-[rgb(var(--muted))]">No loaders.</p>
+        <p className="text-xs text-muted-foreground">No loaders.</p>
       )}
       {hiddenCount > 0 && (
         <button
           onClick={onToggleShowAll}
-          className="text-xs font-medium text-brand-600 hover:underline dark:text-brand-400"
+          className="text-xs font-medium text-primary hover:underline dark:text-primary"
         >
           {expanded ? 'Show main loaders only' : `Show all (${hiddenCount} more)`}
         </button>
@@ -491,7 +498,7 @@ function LoadersFilter({
 function FilterGroup({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <h4 className="text-xs font-semibold uppercase tracking-wide text-[rgb(var(--muted))] mb-2">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
         {title}
       </h4>
       <div className="space-y-1.5">{children}</div>
@@ -514,7 +521,7 @@ function FilterCheckbox({
         type="checkbox"
         checked={checked}
         onChange={onChange}
-        className="h-4 w-4 accent-brand-600"
+        className="h-4 w-4 accent-primary"
       />
       <span className="truncate">{label}</span>
     </label>
@@ -542,7 +549,7 @@ function GameVersionFilter({
       <select
         value={typeFilter}
         onChange={(e) => setTypeFilter(e.target.value as typeof typeFilter)}
-        className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-2 py-1 text-xs"
+        className="w-full rounded-lg border border-border bg-transparent px-2 py-1 text-xs"
       >
         <option value="all">All types</option>
         <option value="release">Releases</option>
@@ -560,13 +567,13 @@ function GameVersionFilter({
           />
         ))}
         {displayed.length === 0 && (
-          <p className="text-xs text-[rgb(var(--muted))]">No versions.</p>
+          <p className="text-xs text-muted-foreground">No versions.</p>
         )}
       </div>
       {filtered.length > displayed.length || !showAll ? (
         <button
           onClick={() => setShowAll((v) => !v)}
-          className="text-xs font-medium text-brand-600 hover:underline dark:text-brand-400"
+          className="text-xs font-medium text-primary hover:underline dark:text-primary"
         >
           {showAll ? 'Show major only' : `Show all (${filtered.length})`}
         </button>
@@ -592,9 +599,9 @@ function RawModrinthBanner() {
     <div
       className="rounded-lg border px-4 py-3 text-sm"
       style={{
-        backgroundColor: 'rgba(217, 119, 6, 0.12)',
-        borderColor: 'rgba(217, 119, 6, 0.6)',
-        color: 'rgb(217, 119, 6)',
+        backgroundColor: 'var(--brand)/12',
+        borderColor: 'var(--brand)/60',
+        color: 'var(--brand)',
       }}
     >
       <div className="flex items-center gap-2 font-semibold">
@@ -902,37 +909,37 @@ function ModrinthProjectDetail({
     <div className="space-y-6">
       <button
         onClick={onBack}
-        className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+        className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent"
       >
         ← Back to search
       </button>
 
       <RawModrinthBanner />
 
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-6">
+      <section className="rounded-xl border border-border surface p-6">
         <div className="flex items-start gap-4">
           {project.icon_url && (
             <img
               src={project.icon_url}
               alt={project.title}
-              className="h-16 w-16 rounded-lg border object-contain dark:border-gray-600"
+              className="h-16 w-16 rounded-lg border object-contain dark:border-border"
             />
           )}
           <div className="flex-1 min-w-0">
             <h2 className="text-2xl font-bold break-words">{project.title}</h2>
-            <p className="text-xs text-[rgb(var(--muted))] mt-1">by {project.author || 'unknown'}</p>
-            <p className="text-xs text-[rgb(var(--muted))] mt-2">
+            <p className="text-xs text-muted-foreground mt-1">by {project.author || 'unknown'}</p>
+            <p className="text-xs text-muted-foreground mt-2">
               ↓ {project.downloads.toLocaleString()} downloads · ★ {project.follows.toLocaleString()} followers
             </p>
             {project.description && (
-              <p className="text-sm text-[rgb(var(--muted))] mt-3">{project.description}</p>
+              <p className="text-sm text-muted-foreground mt-3">{project.description}</p>
             )}
             {project.categories.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-1">
                 {project.categories.map((c) => (
                   <span
                     key={c}
-                    className="rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 text-xs text-[rgb(var(--muted))]"
+                    className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground"
                   >
                     {c}
                   </span>
@@ -944,11 +951,11 @@ function ModrinthProjectDetail({
       </section>
 
       {projectFullLoading && !projectFull ? (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-6">
-          <p className="text-sm text-[rgb(var(--muted))]">Loading details…</p>
+        <section className="rounded-xl border border-border surface p-6">
+          <p className="text-sm text-muted-foreground">Loading details…</p>
         </section>
       ) : projectFull?.body ? (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-6">
+        <section className="rounded-xl border border-border surface p-6">
           <h3 className="text-lg font-semibold mb-3">About</h3>
           <div className="prose prose-sm dark:prose-invert max-w-none">
             <ReactMarkdown
@@ -958,19 +965,19 @@ function ModrinthProjectDetail({
         </section>
       ) : null}
 
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-4">
+      <section className="rounded-xl border border-border surface p-4 space-y-4">
         <h3 className="font-semibold text-sm">Install to Instance</h3>
 
         {phase === 'error' && statusMsg && (
-          <p className="text-sm text-red-600 dark:text-red-300">{statusMsg}</p>
+          <p className="text-sm text-destructive">{statusMsg}</p>
         )}
 
         {instancesLoading ? (
-          <p className="text-sm text-[rgb(var(--muted))]">Loading instances…</p>
+          <p className="text-sm text-muted-foreground">Loading instances…</p>
         ) : (
           <>
             {instances.length === 0 ? (
-              <p className="text-sm text-[rgb(var(--muted))]">
+              <p className="text-sm text-muted-foreground">
                 You don't have any instances yet. Create one below to install this {projectType}.
               </p>
             ) : (
@@ -979,7 +986,7 @@ function ModrinthProjectDetail({
                 <select
                   value={selectedInstanceId ?? ''}
                   onChange={(e) => setSelectedInstanceId(e.target.value || null)}
-                  className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                  className="mt-1 w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm"
                 >
                   <option value="">Choose an instance…</option>
                   {instances.map((inst) => (
@@ -992,12 +999,12 @@ function ModrinthProjectDetail({
             )}
             <button
               onClick={() => setShowCreateInline((v) => !v)}
-              className="mt-3 block text-xs text-brand-600 hover:underline dark:text-brand-400"
+              className="mt-3 block text-xs text-primary hover:underline dark:text-primary"
             >
               + Create new instance
             </button>
             {(showCreateInline || instances.length === 0) && (
-              <div className="mt-3 space-y-3 rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+              <div className="mt-3 space-y-3 rounded-lg border border-border p-3">
                 <p className="text-xs font-medium">Create new instance</p>
                 <label className="block">
                   <span className="text-xs">Instance name</span>
@@ -1005,7 +1012,7 @@ function ModrinthProjectDetail({
                     value={createName}
                     onChange={(e) => setCreateName(e.target.value)}
                     placeholder="My Instance"
-                    className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                    className="mt-1 w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm"
                   />
                 </label>
                 <div className="grid grid-cols-2 gap-3">
@@ -1014,7 +1021,7 @@ function ModrinthProjectDetail({
                     <select
                       value={createMcVersion}
                       onChange={(e) => setCreateMcVersion(e.target.value)}
-                      className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                      className="mt-1 w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm"
                     >
                       {createMcVersions.map((v) => (
                         <option key={v} value={v}>{v}</option>
@@ -1026,7 +1033,7 @@ function ModrinthProjectDetail({
                     <select
                       value={createLoader}
                       onChange={(e) => setCreateLoader(e.target.value)}
-                      className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                      className="mt-1 w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm"
                     >
                       {createLoaders.map((l) => (
                         <option key={l} value={l}>{l}</option>
@@ -1039,7 +1046,7 @@ function ModrinthProjectDetail({
                   <select
                     value={createLoaderVersion}
                     onChange={(e) => setCreateLoaderVersion(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                    className="mt-1 w-full rounded-lg border border-border bg-transparent px-3 py-2 text-sm"
                   >
                     {createLoaderVersions.length === 0 && <option value="">Loading…</option>}
                     {createLoaderVersions.map((v) => (
@@ -1050,7 +1057,7 @@ function ModrinthProjectDetail({
                   </select>
                 </label>
                 {createError && (
-                  <p className="text-xs text-red-600 dark:text-red-300">{createError}</p>
+                  <p className="text-xs text-destructive">{createError}</p>
                 )}
                 <div className="flex gap-2">
                   <button
@@ -1059,14 +1066,14 @@ function ModrinthProjectDetail({
                       setCreateError(null);
                     }}
                     disabled={createBusy}
-                    className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+                    className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={handleCreateInstance}
                     disabled={createBusy}
-                    className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                    className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                   >
                     {createBusy ? 'Creating…' : 'Create'}
                   </button>
@@ -1077,14 +1084,14 @@ function ModrinthProjectDetail({
             {selectedInstanceId && (
               versionsLoading ? (
                 <div className="text-center py-4">
-                  <svg className="animate-spin h-5 w-5 mx-auto text-[rgb(var(--muted))]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <svg className="animate-spin h-5 w-5 mx-auto text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                   </svg>
-                  <p className="text-xs text-[rgb(var(--muted))] mt-2">Loading versions from Modrinth…</p>
+                  <p className="text-xs text-muted-foreground mt-2">Loading versions from Modrinth…</p>
                 </div>
               ) : candidates.length === 0 ? (
-                <p className="text-sm text-[rgb(var(--muted))]">
+                <p className="text-sm text-muted-foreground">
                   No versions compatible with this instance&apos;s Minecraft version and loader.
                 </p>
               ) : (
@@ -1098,19 +1105,19 @@ function ModrinthProjectDetail({
                           key={cand.version_id}
                           className={`rounded-lg border px-3 py-2 text-sm cursor-pointer transition-colors ${
                             isSelected
-                              ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/20'
-                              : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                              ? 'border-primary bg-primary/10 dark:bg-primary/10'
+                              : 'border-border hover:bg-accent'
                           }`}
                           onClick={() => setSelectedCandidate(cand)}
                         >
                           <div className="flex items-center justify-between gap-2">
                             <span className="font-medium truncate">{cand.version}</span>
                             {cand.primary && (
-                              <span className="text-[10px] uppercase tracking-wide text-[rgb(var(--muted))]">primary</span>
+                              <span className="text-[10px] uppercase tracking-wide text-muted-foreground">primary</span>
                             )}
                           </div>
-                          <p className="text-xs text-[rgb(var(--muted))] mt-0.5 truncate">{cand.filename}</p>
-                          <p className="text-xs text-[rgb(var(--muted))] mt-0.5">
+                          <p className="text-xs text-muted-foreground mt-0.5 truncate">{cand.filename}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
                             {cand.mc_versions.join(', ') || '—'}
                             {' · '}
                             {cand.loaders.join(', ') || '—'}
@@ -1121,7 +1128,7 @@ function ModrinthProjectDetail({
                               SHA-1: {cand.sha1.slice(0, 12)}…
                             </p>
                           ) : (
-                            <p className="text-[10px] text-red-600 dark:text-red-400 mt-0.5">
+                            <p className="text-[10px] text-destructive mt-0.5">
                               No SHA-1 published — install refused
                             </p>
                           )}
@@ -1133,7 +1140,7 @@ function ModrinthProjectDetail({
                     <button
                       onClick={confirmInstall}
                       disabled={phase === 'installing' || !selectedCandidate.sha1}
-                      className="mt-3 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                      className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                     >
                       {phase === 'installing'
                         ? 'Installing…'
@@ -1148,11 +1155,11 @@ function ModrinthProjectDetail({
 
             {phase === 'installing' && (
               <div className="text-center py-4">
-                <svg className="animate-spin h-5 w-5 mx-auto text-[rgb(var(--muted))]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <svg className="animate-spin h-5 w-5 mx-auto text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
-                <p className="text-xs text-[rgb(var(--muted))] mt-2">Downloading &amp; SHA-1 verifying…</p>
+                <p className="text-xs text-muted-foreground mt-2">Downloading &amp; SHA-1 verifying…</p>
               </div>
             )}
 
@@ -1162,7 +1169,7 @@ function ModrinthProjectDetail({
                 {selectedInstanceId && onOpenInstanceEditor && (
                   <button
                     onClick={() => onOpenInstanceEditor(selectedInstanceId)}
-                    className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+                    className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
                   >
                     Open instance editor
                   </button>

@@ -35,21 +35,21 @@ export function Home() {
     <div className="space-y-6">
       <section>
         <h2 className="text-2xl font-bold mb-2">Home</h2>
-        <p className="text-[rgb(var(--muted))]">
+        <p className="text-muted-foreground">
           Featured & trending curated packs and mods.
         </p>
       </section>
 
       {/* Registry status card */}
-      <div className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+      <div className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h3 className="font-semibold text-sm">Registry Status</h3>
-            <p className="text-xs text-[rgb(var(--muted))] mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               {status?.message ?? 'Loading…'}
             </p>
             {status?.cached_tag && (
-              <p className="text-xs text-[rgb(var(--muted))]">
+              <p className="text-xs text-muted-foreground">
                 Cached: {status.cached_tag}
                 {status.cached_schema_version != null && ` · schema v${status.cached_schema_version}`}
               </p>
@@ -63,7 +63,7 @@ export function Home() {
           <button
             onClick={checkForUpdates}
             disabled={checking || !status?.has_cached_db}
-            className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50 whitespace-nowrap"
+            className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 whitespace-nowrap"
           >
             {checking
               ? 'Checking…'
@@ -78,13 +78,13 @@ export function Home() {
           </div>
         )}
         {error && (
-          <p className="mt-2 text-xs text-red-600 dark:text-red-300">{error}</p>
+          <p className="mt-2 text-xs text-destructive">{error}</p>
         )}
       </div>
 
-      <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center">
-        <p className="text-[rgb(var(--muted))]">No featured items yet.</p>
-        <p className="text-sm text-[rgb(var(--muted))] mt-2">
+      <div className="rounded-xl p-6 border border-dashed border-border text-center">
+        <p className="text-muted-foreground">No featured items yet.</p>
+        <p className="text-sm text-muted-foreground mt-2">
           {status?.has_cached_db
             ? 'Browse the catalog to discover curated mods and packs.'
             : 'Download the registry to browse curated content.'}

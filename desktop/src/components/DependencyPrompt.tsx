@@ -49,10 +49,10 @@ export function DependencyPrompt({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 surface p-6 shadow-xl">
+      <div className="w-full max-w-lg rounded-2xl border border-border p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-1">{title}</h3>
         {description && (
-          <p className="text-xs text-[rgb(var(--muted))] mb-4">{description}</p>
+          <p className="text-xs text-muted-foreground mb-4">{description}</p>
         )}
 
         <div className="max-h-72 overflow-y-auto space-y-2 mb-4">
@@ -65,7 +65,7 @@ export function DependencyPrompt({
                   'rounded-lg border px-3 py-2 text-sm transition-colors',
                   cand.isConflict
                     ? 'border-amber-300 dark:border-amber-700 bg-amber-50/50 dark:bg-amber-900/10'
-                    : 'border-gray-200 dark:border-gray-700',
+                    : 'border-border',
                 ].join(' ')}
               >
                 <div className="flex items-start gap-2">
@@ -73,7 +73,7 @@ export function DependencyPrompt({
                     type="checkbox"
                     checked={isChecked}
                     onChange={() => toggle(cand.key)}
-                    className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-600 focus:ring-brand-500"
+                    className="mt-1 h-4 w-4 rounded border-input text-primary focus:ring-primary"
                   />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -82,8 +82,8 @@ export function DependencyPrompt({
                         className={[
                           'rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide',
                           cand.requirement === 'Required'
-                            ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
-                            : 'bg-gray-200 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
+                            ? 'bg-destructive/10 text-destructive dark:bg-destructive/20 dark:text-destructive'
+                            : 'bg-muted text-muted-foreground',
                         ].join(' ')}
                       >
                         {cand.requirement}
@@ -93,13 +93,13 @@ export function DependencyPrompt({
                           'rounded-full px-1.5 py-0.5 text-[10px] font-medium',
                           cand.source === 'Jar'
                             ? 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300'
-                            : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400',
+                            : 'bg-muted text-muted-foreground',
                         ].join(' ')}
                       >
                         {cand.source === 'Jar' ? 'from jar' : 'from manifest'}
                       </span>
                       {cand.source === 'Jar' && (
-                        <span className="rounded-full bg-green-600 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                        <span className="rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-medium text-primary-foreground">
                           Recommended
                         </span>
                       )}
@@ -124,14 +124,14 @@ export function DependencyPrompt({
         <div className="flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+            className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent"
           >
             Cancel
           </button>
           <button
             onClick={() => onConfirm(Array.from(selected))}
             disabled={!hasAny}
-            className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {actionLabel}
           </button>

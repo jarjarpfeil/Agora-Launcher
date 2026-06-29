@@ -1,40 +1,18 @@
 //! Governance network actions: live triage-poll fetching and comment-flag
 //! submission with rate limiting (§5.5 / §5.6).
+//!
+//! Pure logic is in `agora_core::governance`. This module provides Tauri-coupled
+//! wrappers that resolve `AppHandle` to connections / auth tokens.
 
 use crate::auth;
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 
-use serde::Serialize;
+pub use agora_core::governance::{
+    AGORA_ADMIN_ALERTS_REPO, AGORA_GOVERNANCE_REPO, TriagePoll,
+};
+
 use tauri::AppHandle;
-
-// --- Constants ---
-
-/// The governance repo (where mod review issues, triage discussions, and
-/// reactions live) IS the registry repo itself. Configurable at build time
-/// via AGORA_REGISTRY_REPO; defaults to the real repo.
-pub const AGORA_GOVERNANCE_REPO: &str = match option_env!("AGORA_REGISTRY_REPO") {
-    Some(v) => v,
-    None => "jarjarpfeil/Agora-Minecraft-Mod-Loader",
-};
-
-/// Admin-alerts repo is where curator flag issues are filed. Configurable at
-/// build time via AGORA_ADMIN_ALERTS_REPO; defaults to the same owner as the
-/// governance/registry repo.
-pub const AGORA_ADMIN_ALERTS_REPO: &str = match option_env!("AGORA_ADMIN_ALERTS_REPO") {
-    Some(v) => v,
-    None => "jarjarpfeil/admin-alerts",
-};
-
-// --- Types ---
-
-/// A live triage poll for a given mod, fetched from GitHub Discussions.
-#[derive(Debug, Serialize, Clone)]
-pub struct TriagePoll {
-    pub discussion_url: Option<String>,
-    pub keep_votes: i64,
-    pub remove_votes: i64,
-}
 
 // --- Triage poll ---
 
@@ -375,7 +353,5 @@ pub async fn flag_review(
 /// Return the current flag rate-limit status for the local state database.
 pub fn get_flag_rate_limit(app: &AppHandle) -> LauncherResult<db::FlagRateLimit> {
     let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
-    let now_unix = chrono::Utc::now().timestamp();
-    db::get_flag_rate_limit_status(&conn, now_unix)
-        .map_err(|_| LauncherError::LocalStateFailed)
+    agora_core::governance::get_flag_rate_limit(&conn)
 }

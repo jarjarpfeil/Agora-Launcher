@@ -1,0 +1,49 @@
+# Agora workspace.
+#
+# Multi-crate layout introduced in the v1 launcher refactor (see
+# `.kilo/plans/1782611768583-agora-v1-launcher-refactor.md`, Phase 1).
+#
+# Members:
+#   - crates/agora-core : shared library, all business logic, no tauri/clap/MCP types
+#   - desktop           : the Tauri GUI binary (`agora-tauri`), thin facades over agora-core
+#
+# Future members (Phase 9 of the plan): crates/agora-cli (standalone `agora` binary).
+#
+# `desktop` is kept at its existing path rather than moved under crates/ so the
+# React frontend (desktop/src) and existing tooling keep working unchanged.
+
+[workspace]
+resolver = "2"
+members = ["crates/agora-core", "desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Agora Contributors"]
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+# Shared versions pinned here so all members stay in sync. Crates pull a
+# specific version via `workspace = true` in their own Cargo.toml.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+sha1 = "0.10"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["full"] }
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+anyhow = "1"
+dirs = "5"
+ed25519-dalek = { version = "2", features = ["alloc"] }
+async-trait = "0.1"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

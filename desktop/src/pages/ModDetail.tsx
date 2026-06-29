@@ -385,7 +385,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     return (
       <div className="space-y-6">
         <BackButton onBack={onBack} />
-        <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center text-[rgb(var(--muted))]">
+        <div className="rounded-xl p-6 border border-dashed border-border text-center text-muted-foreground">
           Loading mod…
         </div>
       </div>
@@ -396,7 +396,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     return (
       <div className="space-y-6">
         <BackButton onBack={onBack} />
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+        <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-sm dark:text-destructive">
           {error ?? 'Mod not found.'}
         </div>
       </div>
@@ -618,46 +618,46 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
         </div>
       )}
 
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-6">
+      <section className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start gap-4">
           {showIcon && (
             <img
               src={item.icon_url as string}
               alt={item.name}
-              className="h-16 w-16 rounded-lg border object-contain dark:border-gray-600"
+              className="h-16 w-16 rounded-lg border object-contain dark:border-border"
             />
           )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <h2 className="text-2xl font-bold break-words">{item.name}</h2>
-              <span className="rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-white">
+              <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-primary-foreground">
                 {item.content_type}
               </span>
-              <span className="rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 text-xs text-[rgb(var(--muted))]">
+              <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
                 {item.download_strategy}
               </span>
               {item.status && item.status !== 'active' && (
-                <span className="rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 text-xs text-[rgb(var(--muted))]">
+                <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
                   {item.status}
                 </span>
               )}
             </div>
-            <p className="text-xs text-[rgb(var(--muted))] mt-1 break-all">
+            <p className="text-xs text-muted-foreground mt-1 break-all">
               {item.source_identifier}
             </p>
-            <p className="text-xs text-[rgb(var(--muted))] mt-2">
+            <p className="text-xs text-muted-foreground mt-2">
               ↑ {item.upvotes} · ↓ {item.downvotes} · net {item.net_score} · velocity {velocityLabel}
             </p>
             {item.date_added && (
-              <p className="text-xs text-[rgb(var(--muted))] mt-1">
+              <p className="text-xs text-muted-foreground mt-1">
                 Added {item.date_added}
               </p>
             )}
             {item.description && (
-              <p className="text-sm text-[rgb(var(--foreground))] mt-3">{item.description}</p>
+              <p className="text-sm text-foreground mt-3">{item.description}</p>
             )}
             {(item.license_id || item.source_updated_at || item.page_url) && (
-              <p className="text-xs text-[rgb(var(--muted))] mt-2 flex flex-wrap gap-x-3 gap-y-1">
+              <p className="text-xs text-muted-foreground mt-2 flex flex-wrap gap-x-3 gap-y-1">
                 {item.license_id && <span>License: {item.license_id}</span>}
                 {item.source_updated_at && <span>Source updated {item.source_updated_at.slice(0, 10)}</span>}
                 {item.page_url && (
@@ -665,7 +665,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     href={item.page_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-brand-600 hover:underline dark:text-brand-400"
+                    className="text-primary hover:underline dark:text-primary"
                   >
                     View on Modrinth ↗
                   </a>
@@ -679,40 +679,40 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
           {item.content_type === 'pack' ? (
             <button
               onClick={() => setShowPackCreate(true)}
-              className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               Create Instance from Pack
             </button>
           ) : (
             <button
               onClick={handleInstall}
-              className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               Install to Instance
             </button>
           )}
         </div>
         {showInstallFlow && (
-          <section className="mt-4 rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-4">
+          <section className="mt-4 rounded-xl border border-border bg-card p-4 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm">Install to Instance</h3>
               <button
                 onClick={handleCloseInstallFlow}
-                className="text-xs text-[rgb(var(--muted))] hover:text-[rgb(var(--foreground))]"
+                className="text-xs text-muted-foreground hover:text-foreground"
               >
                 Close
               </button>
             </div>
 
             {phase === 'error' && installMsg && (
-              <p className="text-sm text-red-600 dark:text-red-300">{installMsg}</p>
+              <p className="text-sm text-destructive">{installMsg}</p>
             )}
 
             {/* Step 1: Instance picker */}
             {phase === 'idle' && (
               instancesLoading ? (
                 <div className="text-center py-2">
-                  <p className="text-sm text-[rgb(var(--muted))]">Loading instances…</p>
+                  <p className="text-sm text-muted-foreground">Loading instances…</p>
                 </div>
               ) : (
                 <div>
@@ -720,7 +720,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                   <select
                     value={selectedInstanceId ?? ''}
                     onChange={(e) => setSelectedInstanceId(e.target.value || null)}
-                    className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                    className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
                   >
                     <option value="">Choose an instance…</option>
                     {instances.map((inst) => (
@@ -732,18 +732,18 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                   <button
                     onClick={handlePickVersion}
                     disabled={!selectedInstanceId}
-                    className="mt-3 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                    className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                   >
                     Next: Choose Version
                   </button>
                   <button
                     onClick={() => setShowCreateInline(true)}
-                    className="mt-2 block text-xs text-brand-600 hover:underline dark:text-brand-400"
+                    className="mt-2 block text-xs text-primary hover:underline dark:text-primary"
                   >
                     + Create new instance
                   </button>
                   {showCreateInline && (
-                    <div className="mt-3 space-y-3 rounded-lg border border-gray-200 dark:border-gray-700 p-3">
+                    <div className="mt-3 space-y-3 rounded-lg border border-border p-3">
                       <p className="text-xs font-medium">Create new instance</p>
                       <label className="block">
                         <span className="text-xs">Instance name</span>
@@ -751,7 +751,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                           value={createName}
                           onChange={(e) => setCreateName(e.target.value)}
                           placeholder="My Instance"
-                          className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                          className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
                         />
                       </label>
                       <div className="grid grid-cols-2 gap-3">
@@ -760,7 +760,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                           <select
                             value={createMcVersion}
                             onChange={(e) => setCreateMcVersion(e.target.value)}
-                            className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                            className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
                           >
                             {createAvailableMcVersions.map((v) => (
                               <option key={v} value={v}>{v}</option>
@@ -772,7 +772,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                           <select
                             value={createLoader}
                             onChange={(e) => setCreateLoader(e.target.value)}
-                            className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                            className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
                           >
                             {createAvailableLoaders.map((l) => (
                               <option key={l} value={l}>{l}</option>
@@ -785,7 +785,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                         <select
                           value={createLoaderVersion}
                           onChange={(e) => setCreateLoaderVersion(e.target.value)}
-                          className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                          className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
                         >
                           {createLoaderVersions.length === 0 && <option value="">Loading…</option>}
                           {createLoaderVersions.map((v) => (
@@ -796,7 +796,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                         </select>
                       </label>
                       {createError && (
-                        <p className="text-xs text-red-600 dark:text-red-300">{createError}</p>
+                        <p className="text-xs text-destructive">{createError}</p>
                       )}
                       <div className="flex gap-2">
                         <button
@@ -805,14 +805,14 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                             setCreateError(null);
                           }}
                           disabled={createBusy}
-                          className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+                          className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
                         >
                           Cancel
                         </button>
                         <button
                           onClick={handleCreateInstance}
                           disabled={createBusy}
-                          className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                          className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                         >
                           {createBusy ? 'Creating…' : 'Create'}
                         </button>
@@ -860,7 +860,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                       setShowDepPrompt(false);
                       setDepPlan(null);
                     }}
-                    className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-xs font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+                    className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
                   >
                     Cancel
                   </button>
@@ -872,7 +872,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                         proceedWithInstall(selectedInstanceId, selectedCandidate);
                       }
                     }}
-                    className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700"
+                    className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
                   >
                     Continue anyway
                   </button>
@@ -886,11 +886,11 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                 <p className="text-xs font-medium mb-2">Available versions</p>
                 {phase === 'loadingVersions' ? (
                   <div className="text-center py-4">
-                    <svg className="animate-spin h-5 w-5 mx-auto text-[rgb(var(--muted))]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <svg className="animate-spin h-5 w-5 mx-auto text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                       <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                       <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                     </svg>
-                    <p className="text-xs text-[rgb(var(--muted))] mt-2">Loading versions…</p>
+                    <p className="text-xs text-muted-foreground mt-2">Loading versions…</p>
                   </div>
                 ) : (
                   <ul className="space-y-2 max-h-48 overflow-y-auto">
@@ -899,8 +899,8 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                         key={idx}
                         className={`rounded-lg border px-3 py-2 text-sm cursor-pointer transition-colors ${
                           selectedCandidate?.filename === cand.filename
-                            ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/20'
-                            : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                            ? 'border-brand-600 bg-card/50 dark:bg-card/20'
+                            : 'border-border hover:bg-accent'
                         }`}
                         onClick={() => setSelectedCandidate(cand)}
                       >
@@ -909,11 +909,11 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                           {cand.is_compatible ? (
                             <span className="text-xs text-green-600 dark:text-green-400">✓ compatible</span>
                           ) : (
-                            <span className="text-xs text-[rgb(var(--muted))]">may not match your instance</span>
+                            <span className="text-xs text-muted-foreground">may not match your instance</span>
                           )}
                         </div>
-                        <p className="text-xs text-[rgb(var(--muted))] mt-0.5 truncate">{cand.filename}</p>
-                        <p className="text-xs text-[rgb(var(--muted))] mt-0.5">
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{cand.filename}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
                           {[cand.mc_version, cand.loader].filter(Boolean).join(' · ')}
                           {cand.release_date ? ` · ${cand.release_date}` : ''}
                         </p>
@@ -924,7 +924,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                 {selectedCandidate && (
                   <button
                     onClick={handleConfirmInstall}
-                    className="mt-3 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+                    className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                   >
                     Install {selectedCandidate.filename}
                   </button>
@@ -934,17 +934,17 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
 
             {/* Empty versions */}
             {selectedInstanceId && candidates.length === 0 && phase === 'pickingVersion' && (
-              <p className="text-sm text-[rgb(var(--muted))]">No compatible versions found.</p>
+              <p className="text-sm text-muted-foreground">No compatible versions found.</p>
             )}
 
             {/* Step 3: Installing */}
             {phase === 'installing' && (
               <div className="text-center py-4">
-                <svg className="animate-spin h-5 w-5 mx-auto text-[rgb(var(--muted))]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <svg className="animate-spin h-5 w-5 mx-auto text-muted-foreground" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
                 </svg>
-                <p className="text-xs text-[rgb(var(--muted))] mt-2">Downloading &amp; verifying…</p>
+                <p className="text-xs text-muted-foreground mt-2">Downloading &amp; verifying…</p>
               </div>
             )}
 
@@ -969,7 +969,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
       </section>
 
       {/* Tab bar */}
-      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700">
+      <div className="flex gap-1 border-b border-border">
         {([
           { key: 'about' as const, label: 'About' },
           { key: 'versions' as const, label: 'Versions' },
@@ -982,8 +982,8 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
             onClick={() => setActiveTab(tab.key)}
             className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.key
-                ? 'border-brand-600 text-brand-600 dark:border-brand-400 dark:text-brand-400'
-                : 'border-transparent text-[rgb(var(--muted))] hover:text-[rgb(var(--foreground))] hover:border-gray-300 dark:hover:border-gray-600'
+                ? 'border-brand-600 text-primary dark:border-primary dark:text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
             }`}
           >
             {tab.label}
@@ -993,18 +993,18 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
 
       {/* Tab content */}
       {activeTab === 'about' && (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-4">
+        <section className="rounded-xl border border-border bg-card p-4 space-y-4">
           {curatorNotes && (
             <div>
               <h3 className="font-semibold text-sm mb-2">Curator Notes</h3>
-              <p className="text-sm whitespace-pre-wrap text-[rgb(var(--muted))]">{curatorNotes}</p>
+              <p className="text-sm whitespace-pre-wrap text-muted-foreground">{curatorNotes}</p>
             </div>
           )}
           {item.body_markdown && (
             <div>
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-semibold text-sm">About</h3>
-                <span className="text-[10px] uppercase tracking-wide text-[rgb(var(--muted))]">
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
                   Source: upstream
                 </span>
               </div>
@@ -1020,7 +1020,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                 dangerouslySetInnerHTML for community content. Links open in a new
                 tab with safe rel attributes.
               */}
-              <div className="prose prose-sm dark:prose-invert max-w-none text-[rgb(var(--foreground))]">
+              <div className="prose prose-sm dark:prose-invert max-w-none text-foreground">
                 <ReactMarkdown
                   rehypePlugins={[[rehypeRaw, { passThrough: ['html'] }], [rehypeSanitize, SANITIZE_SCHEMA]]}
                   components={{
@@ -1038,29 +1038,29 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
             </div>
           )}
           {!curatorNotes && !item.body_markdown && (
-            <p className="text-sm text-[rgb(var(--muted))]">No information available.</p>
+            <p className="text-sm text-muted-foreground">No information available.</p>
           )}
         </section>
       )}
 
       {activeTab === 'versions' && (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+        <section className="rounded-xl border border-border bg-card p-4">
           <h3 className="font-semibold text-sm mb-3">Versions</h3>
 
           {item.modrinth_id ? (
             versionsLoading ? (
-              <p className="text-sm text-[rgb(var(--muted))]">Loading versions…</p>
+              <p className="text-sm text-muted-foreground">Loading versions…</p>
             ) : versionsError ? (
-              <p className="text-sm text-[rgb(var(--muted))]">{versionsError}</p>
+              <p className="text-sm text-muted-foreground">{versionsError}</p>
             ) : modrinthVersions.length === 0 ? (
-              <p className="text-sm text-[rgb(var(--muted))]">No versions published.</p>
+              <p className="text-sm text-muted-foreground">No versions published.</p>
             ) : (
               <div className="flex flex-col lg:flex-row gap-4">
                 {/* Versions table */}
                 <div className="flex-1 overflow-x-auto">
                   <table className="w-full text-sm border-collapse">
                     <thead>
-                      <tr className="border-b border-gray-200 dark:border-gray-700 text-left text-xs text-[rgb(var(--muted))]">
+                      <tr className="border-b border-border text-left text-xs text-muted-foreground">
                         <th className="py-2 pr-3 font-medium">Version</th>
                         <th className="py-2 pr-3 font-medium">MC Versions</th>
                         <th className="py-2 pr-3 font-medium">Loaders</th>
@@ -1074,16 +1074,16 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                           <tr
                             key={v.version_id}
                             onClick={() => setSelectedVersion(v)}
-                            className={`cursor-pointer border-b border-gray-100 dark:border-gray-800 transition-colors ${
+                            className={`cursor-pointer border-b border-border/50 transition-colors ${
                               isSelected
                                 ? 'bg-brand-50 dark:bg-brand-900/20'
-                                : 'hover:bg-gray-50 dark:hover:bg-gray-800'
+                                : 'hover:bg-accent'
                             }`}
                           >
                             <td className="py-2 pr-3 font-medium break-all">{v.name || v.version}</td>
-                            <td className="py-2 pr-3 text-xs text-[rgb(var(--muted))]">{v.mc_versions.join(', ') || '—'}</td>
-                            <td className="py-2 pr-3 text-xs text-[rgb(var(--muted))]">{v.loaders.join(', ') || '—'}</td>
-                            <td className="py-2 pr-3 text-xs text-[rgb(var(--muted))]">{v.release_date ? v.release_date.slice(0, 10) : '—'}</td>
+                            <td className="py-2 pr-3 text-xs text-muted-foreground">{v.mc_versions.join(', ') || '—'}</td>
+                            <td className="py-2 pr-3 text-xs text-muted-foreground">{v.loaders.join(', ') || '—'}</td>
+                            <td className="py-2 pr-3 text-xs text-muted-foreground">{v.release_date ? v.release_date.slice(0, 10) : '—'}</td>
                           </tr>
                         );
                       })}
@@ -1093,12 +1093,12 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
 
                 {/* Selected version detail panel */}
                 {selectedVersion && (
-                  <div className="lg:w-80 lg:flex-shrink-0 rounded-lg border border-gray-200 dark:border-gray-700 p-3 space-y-3">
+                  <div className="lg:w-80 lg:flex-shrink-0 rounded-lg border border-border p-3 space-y-3">
                     <div>
-                      <p className="text-xs text-[rgb(var(--muted))]">Selected version</p>
+                      <p className="text-xs text-muted-foreground">Selected version</p>
                       <p className="font-semibold text-sm break-all">{selectedVersion.name || selectedVersion.version}</p>
                     </div>
-                    <div className="text-xs text-[rgb(var(--muted))] space-y-1">
+                    <div className="text-xs text-muted-foreground space-y-1">
                       <p>Version: {selectedVersion.version}</p>
                       <p className="break-all">File: {selectedVersion.filename}</p>
                       <p>MC: {selectedVersion.mc_versions.join(', ') || '—'}</p>
@@ -1110,7 +1110,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     {selectedVersion.changelog && (
                       <div>
                         <p className="text-xs font-medium mb-1">Changelog</p>
-                        <div className="prose prose-sm dark:prose-invert max-w-none max-h-48 overflow-y-auto text-[rgb(var(--foreground))] text-xs">
+                        <div className="prose prose-sm dark:prose-invert max-w-none max-h-48 overflow-y-auto text-foreground text-xs">
                           <ReactMarkdown
                             rehypePlugins={[[rehypeRaw, { passThrough: ['html'] }], [rehypeSanitize, SANITIZE_SCHEMA]]}
                             components={{
@@ -1126,12 +1126,12 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     )}
 
                     {/* Install controls */}
-                    <div className="pt-2 border-t border-gray-200 dark:border-gray-700">
+                    <div className="pt-2 border-t border-border">
                       <label className="block text-xs font-medium mb-1">Install to instance</label>
                       <select
                         value={versionsTabInstanceId ?? ''}
                         onChange={(e) => setVersionsTabInstanceId(e.target.value || null)}
-                        className="w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-2 py-1.5 text-xs mb-2"
+                        className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs mb-2"
                       >
                         <option value="">Choose an instance…</option>
                         {versionsTabInstances.map((inst) => (
@@ -1143,7 +1143,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                       <button
                         onClick={handleInstallVersionFromTab}
                         disabled={!versionsTabInstanceId || versionInstallPhase === 'installing'}
-                        className="w-full rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                        className="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                       >
                         {versionInstallPhase === 'installing' ? 'Installing…' : 'Install this version'}
                       </button>
@@ -1151,7 +1151,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                         <p className="mt-2 text-xs text-green-600 dark:text-green-400">{versionInstallMsg}</p>
                       )}
                       {versionInstallPhase === 'error' && versionInstallMsg && (
-                        <p className="mt-2 text-xs text-red-600 dark:text-red-300">{versionInstallMsg}</p>
+                        <p className="mt-2 text-xs text-destructive">{versionInstallMsg}</p>
                       )}
                     </div>
                   </div>
@@ -1161,13 +1161,13 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
           ) : (
             // Fallback: no modrinth_id; show the curated compatible_versions_json list
             compatibleVersions.length === 0 ? (
-              <p className="text-sm text-[rgb(var(--muted))]">No version information available.</p>
+              <p className="text-sm text-muted-foreground">No version information available.</p>
             ) : (
               <ul className="space-y-1.5 text-sm">
                 {compatibleVersions.map((entry, index) => (
                   <li
                     key={index}
-                    className="rounded-md border border-gray-200 dark:border-gray-700 px-3 py-1.5 break-words"
+                    className="rounded-md border border-border px-3 py-1.5 break-words"
                   >
                     {renderVersionEntry(entry)}
                   </li>
@@ -1179,15 +1179,15 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
       )}
 
       {activeTab === 'gallery' && (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+        <section className="rounded-xl border border-border bg-card p-4">
           <h3 className="font-semibold text-sm mb-3">Gallery</h3>
           {(() => {
             const urls = galleryUrls.length > 0 ? galleryUrls : runtimeGallery;
             if (urls.length === 0) {
               return galleryLoading ? (
-                <p className="text-sm text-[rgb(var(--muted))]">Loading gallery…</p>
+                <p className="text-sm text-muted-foreground">Loading gallery…</p>
               ) : (
-                <p className="text-sm text-[rgb(var(--muted))]">No gallery images available.</p>
+                <p className="text-sm text-muted-foreground">No gallery images available.</p>
               );
             }
             return (
@@ -1197,7 +1197,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     key={index}
                     src={url}
                     alt={`${item.name} screenshot ${index + 1}`}
-                    className="rounded-lg border border-gray-200 dark:border-gray-700 w-full h-40 object-cover"
+                    className="rounded-lg border border-border w-full h-40 object-cover"
                     loading="lazy"
                   />
                 ))}
@@ -1208,7 +1208,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
       )}
 
       {activeTab === 'links' && (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+        <section className="rounded-xl border border-border bg-card p-4">
           <h3 className="font-semibold text-sm mb-3">External Links</h3>
           <ul className="space-y-2 text-sm">
             {(item.page_url || item.modrinth_id) && (
@@ -1217,7 +1217,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                   href={item.page_url || `https://modrinth.com/${item.content_type === 'pack' ? 'project' : 'mod'}/${item.modrinth_id}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-brand-600 hover:underline dark:text-brand-400 flex items-center gap-1"
+                  className="text-primary hover:underline dark:text-primary flex items-center gap-1"
                 >
                   View on Modrinth ↗
                 </a>
@@ -1229,38 +1229,38 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                   href={`https://github.com/${item.source_identifier}`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-brand-600 hover:underline dark:text-brand-400 flex items-center gap-1"
+                  className="text-primary hover:underline dark:text-primary flex items-center gap-1"
                 >
                   View on GitHub ↗
                 </a>
               </li>
             )}
             {!item.page_url && !item.modrinth_id && !(item.download_strategy === 'github_release' && item.source_identifier && !item.source_identifier.includes('://') && item.source_identifier.includes('/')) && (
-              <p className="text-sm text-[rgb(var(--muted))]">No external links available.</p>
+              <p className="text-sm text-muted-foreground">No external links available.</p>
             )}
           </ul>
         </section>
       )}
 
       {activeTab === 'reviews' && (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+        <section className="rounded-xl border border-border bg-card p-4">
           <h3 className="font-semibold text-sm mb-3">Reviews</h3>
           {item.allow_comments ? (
             !authed ? (
               <>
-                <p className="text-sm text-[rgb(var(--muted))] mb-2">
+                <p className="text-sm text-muted-foreground mb-2">
                   Reviews are disabled for this mod.
                 </p>
-                <p className="text-xs text-[rgb(var(--muted))]">
+                <p className="text-xs text-muted-foreground">
                   Sign in to flag reviews.
                 </p>
               </>
             ) : reviewsLoading ? (
               <div className="text-center py-2">
-                <p className="text-sm text-[rgb(var(--muted))]">Loading reviews…</p>
+                <p className="text-sm text-muted-foreground">Loading reviews…</p>
               </div>
             ) : reviews.length === 0 ? (
-              <p className="text-sm text-[rgb(var(--muted))]">
+              <p className="text-sm text-muted-foreground">
                 No community reviews yet.
               </p>
             ) : (
@@ -1284,7 +1284,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                   </p>
                 )}
                 {flagError && (
-                  <p className="text-sm text-red-600 dark:text-red-300 mb-3">
+                  <p className="text-sm text-destructive mb-3">
                     {flagError}
                   </p>
                 )}
@@ -1300,14 +1300,14 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     return (
                       <li
                         key={review.issue_number}
-                        className="rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2"
+                        className="rounded-lg border border-border px-3 py-2"
                       >
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-medium text-[rgb(var(--muted))]">
+                          <span className="text-xs font-medium text-muted-foreground">
                             {review.author ?? 'Anonymous'}
                           </span>
                           {review.created_at && (
-                            <span className="text-xs text-[rgb(var(--muted))]">
+                            <span className="text-xs text-muted-foreground">
                               {new Date(review.created_at).toLocaleString()}
                             </span>
                           )}
@@ -1315,12 +1315,12 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                             onClick={() => handleFlagReview(review)}
                             disabled={disabledFlag || flaggingId === review.issue_number}
                             title={disabledFlag ? `Flag limit reached — resets at ${resetTime}` : ''}
-                            className="text-xs text-[rgb(var(--muted))] hover:text-red-500 disabled:opacity-40 disabled:cursor-not-allowed"
+                            className="text-xs text-muted-foreground hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             🚩 Flag
                           </button>
                         </div>
-                        <p className="text-sm mt-1 whitespace-pre-wrap text-[rgb(var(--foreground))]">
+                        <p className="text-sm mt-1 whitespace-pre-wrap text-foreground">
                           {review.text}
                         </p>
                       </li>
@@ -1330,7 +1330,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
               </>
             )
           ) : (
-            <p className="text-sm text-[rgb(var(--muted))]">
+            <p className="text-sm text-muted-foreground">
               Reviews are disabled for this mod.
             </p>
           )}
@@ -1344,7 +1344,7 @@ function BackButton({ onBack }: { onBack: () => void }) {
   return (
     <button
       onClick={onBack}
-      className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+      className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent"
     >
       ← Back
     </button>
@@ -1450,7 +1450,7 @@ function PackCreateDialog({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 surface p-6 shadow-xl">
+      <div className="w-full max-w-lg rounded-2xl border border-border bg-card p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4">Create Instance from Pack: {packName}</h3>
 
         <div className="space-y-4">
@@ -1459,7 +1459,7 @@ function PackCreateDialog({
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
             />
           </label>
 
@@ -1469,7 +1469,7 @@ function PackCreateDialog({
               <select
                 value={mcVersion}
                 onChange={(e) => setMcVersion(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
               >
                 {availableMcVersions.map((v) => (
                   <option key={v} value={v}>{v}</option>
@@ -1482,7 +1482,7 @@ function PackCreateDialog({
               <select
                 value={loader}
                 onChange={(e) => setLoader(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
               >
                 {availableLoaders.map((l) => (
                   <option key={l} value={l}>{l}</option>
@@ -1496,7 +1496,7 @@ function PackCreateDialog({
             <select
               value={loaderVersion}
               onChange={(e) => setLoaderVersion(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
             >
               {loaderVersions.length === 0 && <option value="">No pinned versions</option>}
               {loaderVersions.map((v) => (
@@ -1507,27 +1507,27 @@ function PackCreateDialog({
             </select>
           </label>
 
-          <p className="text-xs text-[rgb(var(--muted))]">
+          <p className="text-xs text-muted-foreground">
             The pack's mods will not auto-install. Open the instance editor to install them individually.
           </p>
         </div>
 
         {error && (
-          <p className="mt-4 text-sm text-red-600 dark:text-red-300">{error}</p>
+          <p className="mt-4 text-sm text-destructive">{error}</p>
         )}
 
         <div className="mt-6 flex justify-end gap-2">
           <button
             onClick={onCancel}
             disabled={busy}
-            className="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+            className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent"
           >
             Cancel
           </button>
           <button
             onClick={submit}
             disabled={busy}
-            className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
             {busy ? 'Creating…' : 'Create'}
           </button>

@@ -158,23 +158,23 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
       <section>
         <div className="flex items-center gap-3 mb-2">
           <h2 className="text-2xl font-bold">Browse</h2>
-          <span className="rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200 px-2 py-0.5 text-xs font-medium uppercase tracking-wide">
+          <span className="rounded-full bg-muted text-muted-foreground px-2 py-0.5 text-xs font-medium uppercase tracking-wide">
             Preview
           </span>
         </div>
-        <p className="text-[rgb(var(--muted))]">
+        <p className="text-muted-foreground">
           Curated mods, packs, shaders, resource packs, and more.
         </p>
       </section>
 
-      <section className="rounded-xl border border-blue-300 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/20 p-4">
+      <section className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-start gap-3">
           <span aria-hidden className="text-xl mt-0.5">🌱</span>
           <div className="flex-1">
-            <p className="text-sm font-semibold text-blue-800 dark:text-blue-200">
+            <p className="text-sm font-semibold text-foreground">
               Help grow the community registry
             </p>
-            <p className="text-xs text-blue-700 dark:text-blue-300 mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               Agora's curated catalog is built by the community, for the community.
               We're assembling links to our favorite mods — ideally through
               alternative hosting options like GitHub Releases rather than
@@ -184,7 +184,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
               href="https://github.com/jarjarpfeil/Agora-Minecraft-Mod-Loader"
               target="_blank"
               rel="noopener noreferrer"
-              className="mt-2 inline-block text-xs font-medium text-blue-700 dark:text-blue-200 hover:underline"
+              className="mt-2 inline-block text-xs font-medium text-primary hover:underline"
             >
               Contribute on GitHub ↗
             </a>
@@ -198,13 +198,13 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search items..."
-          className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+          className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
         />
         <select
           value={contentType ?? ''}
           onChange={(e) => setContentType(e.target.value || null)}
           disabled={sort === 'for_you'}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+          className="rounded-lg border border-input bg-background px-3 py-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <option value="">All types</option>
           {CONTENT_TYPES.map((ct) => (
@@ -214,7 +214,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={mcVersion ?? ''}
           onChange={(e) => setMcVersion(e.target.value || null)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
+          className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
           title="Filter by Minecraft version"
         >
           <option value="">Any MC version</option>
@@ -225,7 +225,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={loader ?? ''}
           onChange={(e) => setLoader(e.target.value || null)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
+          className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
           title="Filter by modloader"
         >
           <option value="">Any loader</option>
@@ -236,7 +236,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         <select
           value={sort}
           onChange={(e) => handleSortChange(e.target.value as SortOption)}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
+          className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
         >
           {SORTS.map((s) => (
             <option key={s.value} value={s.value}>{s.label}</option>
@@ -245,12 +245,12 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
       </div>
 
       {(mcVersion || loader) && (
-        <div className="flex flex-wrap items-center gap-2 text-xs text-[rgb(var(--muted))]">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>Active filters:</span>
           {mcVersion && (
             <button
               onClick={() => setMcVersion(null)}
-              className="rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800"
+              className="rounded-full border border-border px-2 py-0.5 hover:bg-accent"
             >
               MC {mcVersion} ✕
             </button>
@@ -258,7 +258,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
           {loader && (
             <button
               onClick={() => setLoader(null)}
-              className="rounded-full border border-gray-300 dark:border-gray-600 px-2 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800"
+              className="rounded-full border border-border px-2 py-0.5 hover:bg-accent"
             >
               {loader} ✕
             </button>
@@ -273,8 +273,8 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
             className={[
               'px-3 py-1 rounded-full text-sm border transition-colors',
               category === null
-                ? 'bg-brand-600 text-white border-brand-600'
-                : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800',
+                ? 'bg-primary text-primary-foreground border-primary'
+                : 'border-border hover:bg-accent',
             ].join(' ')}
           >
             All
@@ -286,8 +286,8 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
               className={[
                 'px-3 py-1 rounded-full text-sm border transition-colors',
                 category === c.id
-                  ? 'bg-brand-600 text-white border-brand-600'
-                  : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800',
+                  ? 'bg-primary text-primary-foreground border-primary'
+                  : 'border-border hover:bg-accent',
               ].join(' ')}
             >
               {c.display_name}
@@ -297,22 +297,22 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
       )}
 
       {error && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+        <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
           {error}
         </div>
       )}
 
       {loading ? (
-        <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center text-[rgb(var(--muted))]">
+        <div className="rounded-xl p-6 border border-dashed border-border text-center text-muted-foreground">
           Loading items…
         </div>
       ) : filtered.length === 0 ? (
-        <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center">
-          <p className="text-[rgb(var(--muted))]">No curated items to display.</p>
+        <div className="rounded-xl p-6 border border-dashed border-border text-center">
+          <p className="text-muted-foreground">No curated items to display.</p>
           {onOpenModrinth && (
             <button
               onClick={onOpenModrinth}
-              className="mt-3 text-sm font-medium text-brand-600 hover:underline dark:text-brand-400"
+              className="mt-3 text-sm font-medium text-primary hover:underline"
             >
               Not finding what you need? Search all of Modrinth →
             </button>
@@ -323,22 +323,22 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
           {filtered.map((item) => (
             <li
               key={item.id}
-              className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4"
+              className="rounded-xl border border-border bg-card p-4"
             >
               <div className="flex items-start gap-3">
                 {item.icon_url && (
                   <img
                     src={item.icon_url}
                     alt={item.name}
-                    className="h-12 w-12 rounded-lg border object-contain dark:border-gray-600"
+                    className="h-12 w-12 rounded-lg border object-contain border-border"
                   />
                 )}
                 <div className="flex-1 min-w-0">
                   <h3 className="font-semibold truncate">{item.name}</h3>
-                  <p className="text-xs text-[rgb(var(--muted))]">
+                  <p className="text-xs text-muted-foreground">
                     {item.content_type} · {item.download_strategy}
                   </p>
-                  <p className="text-xs text-[rgb(var(--muted))] mt-1">
+                  <p className="text-xs text-muted-foreground mt-1">
                     ↑ {item.upvotes} · ↓ {item.downvotes} · net {item.net_score}
                   </p>
                 </div>
@@ -346,7 +346,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
               <div className="mt-3">
                 <button
                   onClick={() => onSelectMod?.(item.id)}
-                  className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+                  className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                 >
                   View Details
                 </button>

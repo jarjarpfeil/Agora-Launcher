@@ -90,32 +90,32 @@ export function Instances({ onEditInstance }: { onEditInstance: (id: string) => 
       <section className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold mb-2">My Instances</h2>
-          <p className="text-[rgb(var(--muted))]">
+          <p className="text-muted-foreground">
             Isolated modpack profiles, custom instances, and launch history.
           </p>
         </div>
         <button
           onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
         >
           + Create Instance
         </button>
       </section>
 
       {error && (
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+        <div className="rounded-lg bg-destructive p-3 text-sm text-destructive-foreground">
           {error}
         </div>
       )}
 
       {loading ? (
-        <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center text-[rgb(var(--muted))]">
+        <div className="rounded-xl p-6 border border-dashed border-border text-center text-muted-foreground">
           Loading instances…
         </div>
       ) : instances.length === 0 ? (
-        <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center">
-          <p className="text-[rgb(var(--muted))]">No instances yet.</p>
-          <p className="text-sm text-[rgb(var(--muted))] mt-2">
+        <div className="rounded-xl p-6 border border-dashed border-border text-center">
+          <p className="text-muted-foreground">No instances yet.</p>
+          <p className="text-sm text-muted-foreground mt-2">
             Create a custom instance to install a verified modloader and launch via the official Mojang launcher.
           </p>
         </div>
@@ -202,54 +202,54 @@ function InstanceCard({
   };
 
   return (
-    <li className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4">
+    <li className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="font-semibold">{instance.name}</h3>
-          <p className="text-xs text-[rgb(var(--muted))]">
+          <p className="text-xs text-muted-foreground">
             {instance.loader} {instance.loader_version} · MC {instance.minecraft_version}
           </p>
-          <p className="text-xs text-[rgb(var(--muted))] mt-1">
+          <p className="text-xs text-muted-foreground mt-1">
             {instance.last_launched_at
               ? `Last launched ${instance.last_launched_at}`
               : 'Never launched'}
           </p>
         </div>
-        <span className="text-xs uppercase tracking-wide text-[rgb(var(--muted))]">
+        <span className="text-xs uppercase tracking-wide text-muted-foreground">
           {instance.is_locked ? 'Locked' : 'Unlocked'}
         </span>
       </div>
 
       {error && (
-        <p className="mt-2 text-xs text-red-600 dark:text-red-300">{error}</p>
+        <p className="mt-2 text-xs text-destructive">{error}</p>
       )}
 
       <div className="mt-4 flex gap-2">
         <button
           onClick={launch}
           disabled={busy}
-          className="rounded-lg bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           ▶ Launch
         </button>
         <button
           onClick={() => onOpenCrashInvestigator(instance.instance_id)}
           disabled={busy}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
         >
           Troubleshoot Crash
         </button>
         <button
           onClick={onEdit}
           disabled={busy}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
         >
           Edit
         </button>
         <button
           onClick={remove}
           disabled={busy}
-          className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-50"
+          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
         >
           Delete
         </button>
@@ -378,7 +378,7 @@ function CreateInstanceDialog({
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 surface p-6 shadow-xl">
+      <div className="w-full max-w-lg rounded-2xl border border-border bg-background p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4">Create Custom Instance</h3>
 
         <div className="space-y-4">
@@ -388,7 +388,7 @@ function CreateInstanceDialog({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="Optimized Survival"
-              className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
             />
           </label>
 
@@ -398,7 +398,7 @@ function CreateInstanceDialog({
               <select
                 value={mcVersion}
                 onChange={(e) => setMcVersion(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
               >
                 {mcVersions.map((v) => (
                   <option key={v} value={v}>
@@ -413,7 +413,7 @@ function CreateInstanceDialog({
               <select
                 value={loader}
                 onChange={(e) => setLoader(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
               >
                 {loaders.map((l) => (
                   <option key={l} value={l}>
@@ -429,7 +429,7 @@ function CreateInstanceDialog({
             <select
               value={loaderVersion}
               onChange={(e) => setLoaderVersion(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="mt-1 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
             >
               {loaderVersions.length === 0 && <option value="">No pinned versions</option>}
               {loaderVersions.map((v) => (
@@ -455,25 +455,25 @@ function CreateInstanceDialog({
         </div>
 
         {progressMessage && (
-          <p className="mt-4 text-sm text-[rgb(var(--muted))]">{progressMessage}</p>
+          <p className="mt-4 text-sm text-muted-foreground">{progressMessage}</p>
         )}
 
         {error && (
-          <p className="mt-4 text-sm text-red-600 dark:text-red-300">{error}</p>
+          <p className="mt-4 text-sm text-destructive">{error}</p>
         )}
 
         <div className="mt-6 flex justify-end gap-2">
           <button
             onClick={onClose}
             disabled={busy}
-            className="rounded-lg border border-gray-300 dark:border-gray-600 px-4 py-2 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+            className="rounded-lg border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-accent"
           >
             Cancel
           </button>
           <button
             onClick={submit}
             disabled={busy}
-            className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
             {busy ? 'Creating…' : 'Create'}
           </button>

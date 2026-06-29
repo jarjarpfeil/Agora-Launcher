@@ -413,7 +413,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     return (
       <div className="space-y-6">
         <BackButton onBack={onBack} />
-        <div className="rounded-xl p-6 border border-dashed border-gray-300 dark:border-gray-600 text-center text-[rgb(var(--muted))]">
+        <div className="rounded-xl p-6 border border-dashed border-border text-center text-muted-foreground">
           Loading instance…
         </div>
       </div>
@@ -424,7 +424,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     return (
       <div className="space-y-6">
         <BackButton onBack={onBack} />
-        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+        <div className="rounded-lg bg-destructive p-3 text-sm text-destructive-foreground">
           {error}
         </div>
       </div>
@@ -436,14 +436,14 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
       <BackButton onBack={onBack} />
 
       {/* Header */}
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-6">
+      <section className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 className="text-2xl font-bold">{row?.name}</h2>
-            <p className="text-xs text-[rgb(var(--muted))] mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               MC {row?.minecraft_version} · {manifest?.loader} {manifest?.loader_version}
             </p>
-            <p className="text-xs text-[rgb(var(--muted))] mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               {manifest?.is_locked ? '🔒 Locked' : '🔓 Unlocked'}
               {row?.last_launched_at && (
                 <span className="ml-2">· Last launched {row.last_launched_at}</span>
@@ -458,34 +458,34 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 setPackProgress(null);
                 setError(null);
               }}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800"
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
             >
               📦 Install all mods from pack
             </button>
             <button
               disabled
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] cursor-not-allowed"
+              className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium cursor-not-allowed text-muted-foreground"
               title="JVM settings edit — backend command not yet implemented"
             >
               ⚙️ Edit Settings (TODO)
             </button>
             <button
               onClick={handleImportPack}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800"
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
             >
               📥 Import Pack
             </button>
             <button
               onClick={() => handleExportPack('json')}
               disabled={exportBusy}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
             >
               {exportBusy ? 'Exporting…' : 'Export as JSON'}
             </button>
             <button
               onClick={() => handleExportPack('mrpack')}
               disabled={exportBusy}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800 disabled:opacity-50"
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
             >
               {exportBusy ? 'Exporting…' : 'Export as .mrpack'}
             </button>
@@ -494,13 +494,13 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
         {/* Lock / Unlock / Revert controls (§6.5) */}
         <div className="mt-3 flex items-center gap-3 text-sm">
-          <span className="text-[rgb(var(--muted))]">
+          <span className="text-muted-foreground">
             {manifest?.is_locked ? '🔒 Locked' : '🔓 Unlocked'}
           </span>
           {manifest?.is_locked ? (
             <button
               onClick={handleUnlock}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800"
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
             >
               🔓 Unlock
             </button>
@@ -508,13 +508,13 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
             <>
               <button
                 onClick={handleLock}
-                className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800"
+                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
               >
                 🔒 Lock
               </button>
               <button
                 onClick={handleRevert}
-                className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800"
+                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
               >
                 ↩ Revert
               </button>
@@ -523,7 +523,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         </div>
 
         {error && (
-          <div className="mt-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700 dark:border-red-700 dark:bg-red-900/30 dark:text-red-200">
+          <div className="mt-4 rounded-lg bg-destructive p-3 text-sm text-destructive-foreground">
             {error}
           </div>
         )}
@@ -531,7 +531,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
       {/* Pack install progress */}
       {packInstallOpen && (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-3">
+        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold text-sm">Install mods from pack</h3>
             {!packProgress && (
@@ -541,7 +541,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   setPackIdInput('');
                   setError(null);
                 }}
-                className="text-xs text-[rgb(var(--muted))] hover:text-[rgb(var(--foreground))]"
+                className="text-xs text-muted-foreground hover:text-foreground"
               >
                 Close
               </button>
@@ -558,19 +558,19 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   if (e.key === 'Enter') handleInstallPackMods();
                 }}
                 placeholder="e.g. optimized-survival"
-                className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+                className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-sm"
               />
               <button
                 onClick={handleInstallPackMods}
                 disabled={!packIdInput.trim()}
-                className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
                 Start
               </button>
             </div>
           ) : (
             <>
-              <p className="text-xs text-[rgb(var(--muted))]">
+              <p className="text-xs text-muted-foreground">
                 Installing pack: {packIdInput} ({packProgress.length} mods)
               </p>
               <div className="space-y-1">
@@ -595,10 +595,10 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                     p.status === 'done'
                       ? 'text-green-600 dark:text-green-400'
                       : p.status === 'failed'
-                        ? 'text-red-600 dark:text-red-400'
+                        ? 'text-destructive'
                         : p.status === 'installing'
                           ? 'text-yellow-600 dark:text-yellow-400'
-                          : 'text-[rgb(var(--muted))]';
+                          : 'text-muted-foreground';
                   return (
                     <div key={idx} className={`text-sm ${lineColor}`}>
                       <span className="inline-block w-5 text-center">{icon}</span>{' '}
@@ -610,7 +610,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
               {/* Summary + Done */}
               {packProgress.every((p) => p.status === 'done' || p.status === 'failed') && (
-                <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
+                <div className="border-t border-border pt-3">
                   {(() => {
                     const done = packProgress.filter((p) => p.status === 'done').length;
                     const failed = packProgress.filter((p) => p.status === 'failed');
@@ -622,7 +622,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                         <p className="text-sm text-yellow-600 dark:text-yellow-400">
                           Installed {done} of {packProgress.length} mods. {failed.length} failed:
                         </p>
-                        <ul className="mt-1 text-xs text-red-600 dark:text-red-400 space-y-0.5">
+                        <ul className="mt-1 text-xs text-destructive space-y-0.5">
                           {failed.map((f, idx) => (
                             <li key={idx}>• {f.modId}: {f.error}</li>
                           ))}
@@ -632,7 +632,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   })()}
                   <button
                     onClick={handleDismissPackProgress}
-                    className="mt-3 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+                    className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                   >
                     Done
                   </button>
@@ -645,14 +645,14 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
       {/* Status message */}
       {status && (
-        <div className="rounded-lg border border-green-300 bg-green-50 p-3 text-sm text-green-700 dark:border-green-700 dark:bg-green-900/30 dark:text-green-200">
+        <div className="rounded-lg bg-accent text-accent-foreground p-3 text-sm">
           {status}
         </div>
       )}
 
       {/* Mods list */}
       <section
-        className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4"
+        className="rounded-xl border border-border bg-card p-4"
         onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
         onDrop={handleDrop}
       >
@@ -661,24 +661,24 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
           <div className="flex gap-2">
             <button
               onClick={handleImportMod}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800"
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
             >
               📥 Import Mod
             </button>
           </div>
         </div>
-        <p className="text-xs text-[rgb(var(--muted))] mb-3">
+        <p className="text-xs text-muted-foreground mb-3">
           Drag and drop a .jar mod, or a .mrpack / .agora-pack.json pack file, here to install it.
         </p>
         {mods.length === 0 ? (
-          <p className="text-sm text-[rgb(var(--muted))]">No mods installed.</p>
+          <p className="text-sm text-muted-foreground">No mods installed.</p>
         ) : (
           <div className="space-y-2">
             {mods.map((mod) => (
-              <div key={mod.filename} className="flex items-center justify-between rounded-lg border border-gray-200 dark:border-gray-700 px-3 py-2 text-sm">
+              <div key={mod.filename} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm">
                 <div className="min-w-0 flex-1">
                   <span className="font-medium truncate block">{mod.filename}</span>
-                  <div className="text-xs text-[rgb(var(--muted))] flex gap-2 mt-0.5">
+                  <div className="text-xs text-muted-foreground flex gap-2 mt-0.5">
                     {mod.version && <span>v{mod.version}</span>}
                     <span className="rounded-full bg-brand-600/10 text-brand-600 dark:text-brand-400 px-1.5 py-0.5 text-[10px] uppercase">{mod.source}</span>
                     <span>Installed {mod.installed_at}</span>
@@ -687,7 +687,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 <button
                   onClick={() => handleRemove(mod.filename)}
                   disabled={removeBusy === mod.filename}
-                  className="ml-3 text-xs text-red-600 dark:text-red-400 hover:underline disabled:opacity-50 whitespace-nowrap"
+                  className="ml-3 text-xs text-destructive hover:underline disabled:opacity-50 whitespace-nowrap"
                 >
                   {removeBusy === mod.filename ? 'Removing…' : 'Remove'}
                 </button>
@@ -709,21 +709,21 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
             setAddError(null);
             handleBrowse();
           }}
-          className="rounded-lg border border-dashed border-gray-300 dark:border-gray-600 px-4 py-2 text-sm font-medium text-[rgb(var(--muted))] hover:bg-gray-50 dark:hover:bg-gray-800 w-full"
+          className="rounded-lg border border-dashed border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent w-full"
         >
           + Add Mod
         </button>
       ) : (
-        <section className="rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 space-y-4">
+        <section className="rounded-xl border border-border bg-card p-4 space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="font-semibold text-sm">Add Mod</h3>
-            <button onClick={() => setShowAdd(false)} className="text-xs text-[rgb(var(--muted))] hover:text-[rgb(var(--foreground))]">
+            <button onClick={() => setShowAdd(false)} className="text-xs text-muted-foreground hover:text-foreground">
               Close
             </button>
           </div>
 
           {addError && (
-            <p className="text-sm text-red-600 dark:text-red-300">{addError}</p>
+            <p className="text-sm text-destructive">{addError}</p>
           )}
 
           {/* Filters row */}
@@ -732,12 +732,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
               value={browseFilter}
               onChange={(e) => setBrowseFilter(e.target.value)}
               placeholder="Search mods…"
-              className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-sm"
             />
             <select
               value={browseContentType ?? ''}
               onChange={(e) => setBrowseContentType(e.target.value || null)}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
             >
               <option value="">All types</option>
               {CONTENT_TYPES.map((ct) => (
@@ -747,7 +747,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
             <select
               value={browseSort}
               onChange={(e) => setBrowseSort(e.target.value as SortOption)}
-              className="rounded-lg border border-gray-300 dark:border-gray-600 bg-transparent px-3 py-2 text-sm"
+              className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
             >
               {SORTS.map((s) => (
                 <option key={s.value} value={s.value}>{s.label}</option>
@@ -762,8 +762,8 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 className={[
                   'px-3 py-1 rounded-full text-sm border transition-colors',
                   browseCategory === null
-                    ? 'bg-brand-600 text-white border-brand-600'
-                    : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800',
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-border hover:bg-accent',
                 ].join(' ')}
               >
                 All
@@ -775,8 +775,8 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   className={[
                     'px-3 py-1 rounded-full text-sm border transition-colors',
                     browseCategory === c.id
-                      ? 'bg-brand-600 text-white border-brand-600'
-                      : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800',
+                      ? 'bg-primary text-primary-foreground border-primary'
+                      : 'border-border hover:bg-accent',
                   ].join(' ')}
                 >
                   {c.display_name}
@@ -786,9 +786,9 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
           )}
 
           {browseLoading ? (
-            <p className="text-xs text-[rgb(var(--muted))]">Loading mods…</p>
+            <p className="text-xs text-muted-foreground">Loading mods…</p>
           ) : filteredBrowse.length === 0 ? (
-            <p className="text-sm text-[rgb(var(--muted))]">No mods found.</p>
+            <p className="text-sm text-muted-foreground">No mods found.</p>
           ) : (
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {filteredBrowse.map((item) => (
@@ -797,8 +797,8 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   onClick={() => handleSelectAddItem(item)}
                   className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
                     selectedAddItem?.id === item.id
-                      ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/20'
-                      : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border hover:bg-accent'
                   }`}
                 >
                   <div className="flex items-start gap-2">
@@ -806,12 +806,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                       <img
                         src={item.icon_url}
                         alt={item.name}
-                        className="h-10 w-10 rounded border object-contain dark:border-gray-600"
+                        className="h-10 w-10 rounded border object-contain border-border"
                       />
                     )}
                     <div className="min-w-0">
                       <span className="font-medium block truncate">{item.name}</span>
-                      <span className="text-xs text-[rgb(var(--muted))]">
+                      <span className="text-xs text-muted-foreground">
                         {item.content_type} · {item.download_strategy}
                       </span>
                     </div>
@@ -823,12 +823,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
           {/* Version picker */}
           {selectedAddItem && (
-            <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
+            <div className="border-t border-border pt-3">
               <p className="text-xs font-medium mb-2">
                 Available versions for {selectedAddItem.name}
               </p>
               {candidates.length === 0 ? (
-                <p className="text-xs text-[rgb(var(--muted))]">No versions available.</p>
+                <p className="text-xs text-muted-foreground">No versions available.</p>
               ) : (
                 <div className="space-y-1 max-h-40 overflow-y-auto">
                   {candidates.map((cand, idx) => (
@@ -837,8 +837,8 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                       onClick={() => setSelectedCandidate(cand)}
                       className={`w-full text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
                         selectedCandidate?.filename === cand.filename
-                          ? 'border-brand-500 bg-brand-50 dark:bg-brand-900/20'
-                          : 'border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+                          ? 'border-primary bg-primary/10'
+                          : 'border-border hover:bg-accent'
                       }`}
                     >
                       <div className="flex items-center justify-between">
@@ -846,10 +846,10 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                         {cand.is_compatible ? (
                           <span className="text-xs text-green-600 dark:text-green-400">✓ compatible</span>
                         ) : (
-                          <span className="text-xs text-[rgb(var(--muted))]">may not match</span>
+                          <span className="text-xs text-muted-foreground">may not match</span>
                         )}
                       </div>
-                      <p className="text-xs text-[rgb(var(--muted))] mt-0.5 truncate">{cand.filename}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{cand.filename}</p>
                     </button>
                   ))}
                 </div>
@@ -859,7 +859,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 <button
                   onClick={handleConfirmAdd}
                   disabled={adding}
-                  className="mt-3 w-full rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+                  className="mt-3 w-full rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                 >
                   {adding ? 'Installing…' : `Install ${selectedCandidate.filename}`}
                 </button>
@@ -892,7 +892,7 @@ function BackButton({ onBack }: { onBack: () => void }) {
   return (
     <button
       onClick={onBack}
-      className="rounded-lg border border-gray-300 dark:border-gray-600 px-3 py-1.5 text-sm font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
+      className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
     >
       ← Back
     </button>

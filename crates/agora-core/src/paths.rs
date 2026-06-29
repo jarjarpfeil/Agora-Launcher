@@ -1,0 +1,141 @@
+use std::path::PathBuf;
+
+/// Resolve the official Minecraft data directory for the current OS.
+///
+/// | OS | Path |
+/// |---|---|
+/// | Windows | `%APPDATA%\.minecraft` |
+/// | macOS | `~/Library/Application Support/minecraft` |
+/// | Linux | `~/.minecraft` |
+pub fn minecraft_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_dir().map(|d| d.join(".minecraft"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        dirs::data_dir().map(|d| d.join("minecraft"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        dirs::home_dir().map(|h| h.join(".minecraft"))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Path to `launcher_profiles.json` inside the official Minecraft directory.
+pub fn launcher_profiles_path() -> Option<PathBuf> {
+    minecraft_dir().map(|d| d.join("launcher_profiles.json"))
+}
+
+/// The root directory holding all user instances.
+pub fn instances_dir(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
+    let dir = app_data_dir.join("instances");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Directory for a single instance (e.g. `instances/<instance_id>`).
+pub fn instance_dir(
+    app_data_dir: &PathBuf,
+    instance_id: &str,
+) -> anyhow::Result<PathBuf> {
+    Ok(instances_dir(app_data_dir)?.join(sanitize_id(instance_id)))
+}
+
+/// Path to an instance's `instance_manifest.json`.
+pub fn instance_manifest_path(
+    app_data_dir: &PathBuf,
+    instance_id: &str,
+) -> anyhow::Result<PathBuf> {
+    Ok(instance_dir(app_data_dir, instance_id)?.join("instance_manifest.json"))
+}
+
+/// Path to the cached read-only registry database.
+pub fn registry_db_path(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
+    Ok(app_data_dir.join("registry.db"))
+}
+
+/// Path to the cached registry.db Ed25519 signature file.
+pub fn registry_sig_path(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
+    Ok(app_data_dir.join("registry.db.sig"))
+}
+
+/// Path to the mutable local state database.
+pub fn local_state_db_path(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
+    Ok(app_data_dir.join("local_state.db"))
+}
+
+/// Normalize an instance id so it is safe to use as a directory name.
+///
+/// Allows alphanumerics, `-`, and `_`. Everything else is replaced with `-`.
+pub fn sanitize_id(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_id;
+
+    #[test]
+    fn test_sanitize_id_preserves_alphanumeric() {
+        assert_eq!(sanitize_id("my-instance-1"), "my-instance-1");
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_path_separators() {
+        let result = sanitize_id("foo/bar");
+        assert!(!result.contains('/'));
+        assert!(!result.contains('\\'));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_dot_dot() {
+        let result = sanitize_id("..");
+        assert!(!result.contains(".."));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_dot_dot_slash() {
+        let result = sanitize_id("../etc/passwd");
+        assert!(!result.contains(".."));
+        assert!(!result.contains('/'));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_special_chars() {
+        let result = sanitize_id("foo!@#bar");
+        assert!(!result.contains('!'));
+        assert!(!result.contains('@'));
+        assert!(!result.contains('#'));
+    }
+
+    #[test]
+    fn test_sanitize_id_empty() {
+        let result = sanitize_id("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_sanitize_id_unicode() {
+        let result = sanitize_id("café");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_id_null_bytes() {
+        let result = sanitize_id("foo\0bar");
+        assert!(!result.contains('\0'));
+    }
+}

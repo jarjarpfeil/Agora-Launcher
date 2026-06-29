@@ -164,7 +164,7 @@ pub fn extract_overrides(
                     "Security Violation: Pack overrides cannot contain executable files or mods. \
                      Banned file type detected: '{}'. \
                      All mods must be routed through the platform manifest.",
-                     safe_name
+                    safe_name
                 ),
             });
         }

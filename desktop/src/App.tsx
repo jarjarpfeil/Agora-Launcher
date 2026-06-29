@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
+import { CommandPalette } from './components/command-palette';
 import { Home } from './pages/Home';
 import { Browse } from './pages/Browse';
 import { ModrinthRaw } from './pages/ModrinthRaw';
@@ -11,6 +12,7 @@ import { Onboarding } from './pages/Onboarding';
 import { ModDetail } from './pages/ModDetail';
 import { InstanceEditor } from './pages/InstanceEditor';
 import { getSetting } from './lib/tauri';
+import { OfflineBanner } from './components/offline-banner';
 
 type Tab = 'home' | 'browse' | 'modrinth' | 'instances' | 'governance' | 'ai' | 'settings';
 
@@ -41,6 +43,7 @@ export default function App() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [modrinthEnabled, setModrinthEnabled] = useState<boolean>(false);
   const [aiChatEnabled, setAiChatEnabled] = useState<boolean>(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // Telemetry upload prompt disabled — no aggregation endpoint exists yet ($0/month footprint). Local crash learning runs regardless. The crash_telemetry_opt_in setting is preserved for future shared-data use.
   // const [showTelemetryPrompt, setShowTelemetryPrompt] = useState(false);
 
@@ -103,6 +106,38 @@ export default function App() {
   //   }
   // };
 
+  // Global Ctrl+K / Cmd+K shortcut to open command palette
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const handleNavigate = (tab: Tab, clearSelection = true) => {
+    if (clearSelection) {
+      setSelectedModId(null);
+      setEditingInstanceId(null);
+    }
+    setActiveTab(tab);
+  };
+
+  // Listen for cross-component navigation requests (e.g. offline banner → Settings)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as string;
+      if (detail === 'settings') {
+        handleNavigate('settings');
+      }
+    };
+    window.addEventListener('agora-navigate', handler);
+    return () => window.removeEventListener('agora-navigate', handler);
+  }, [handleNavigate]);
+
   if (onboardingComplete === null) {
     return null;
   }
@@ -140,6 +175,7 @@ export default function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
+        <OfflineBanner />
         {/* Telemetry upload prompt disabled — no aggregation endpoint exists yet ($0/month footprint). Local crash learning runs regardless. The crash_telemetry_opt_in setting is preserved for future shared-data use. */}
         {/* {showTelemetryPrompt && (
           <div className="fixed bottom-4 right-4 z-50 max-w-sm rounded-xl border border-gray-200 dark:border-gray-700 surface p-4 shadow-lg">
@@ -188,6 +224,12 @@ export default function App() {
             </>
           )}
         </main>
+
+        <CommandPalette
+          open={commandPaletteOpen}
+          onOpenChange={setCommandPaletteOpen}
+          onNavigate={handleNavigate}
+        />
     </div>
   );
 }

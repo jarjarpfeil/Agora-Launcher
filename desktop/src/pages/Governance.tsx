@@ -123,15 +123,15 @@ export function Governance() {
   const actionBadgeColor = (action: string): string => {
     switch (action) {
       case 'triage_archive':
-        return 'bg-red-200 dark:bg-red-900 text-red-800 dark:text-red-200';
+        return 'bg-destructive/20 text-destructive';
       case 'triage_keep':
         return 'bg-green-200 dark:bg-green-900 text-green-800 dark:text-green-200';
       case 'organic_under_review':
         return 'bg-orange-200 dark:bg-orange-900 text-orange-800 dark:text-orange-200';
       case 'raid_breaker_offenders':
-        return 'bg-red-200 dark:bg-red-900 text-red-800 dark:text-red-200';
+        return 'bg-destructive/20 text-destructive';
       default:
-        return 'bg-gray-200 dark:bg-gray-700 text-[rgb(var(--muted))]';
+        return 'bg-muted';
     }
   };
 
@@ -145,36 +145,36 @@ export function Governance() {
     <div className="space-y-6">
       <section>
         <h2 className="text-2xl font-bold mb-2">Community Governance</h2>
-        <p className="text-[rgb(var(--muted))]">
+        <p className="text-muted-foreground">
           Active triage polls, recent resolutions, and the transparency log.
         </p>
       </section>
 
       {/* Auth banner for unauthenticated users */}
       {authenticated === false && (
-        <div className="rounded-xl p-4 border border-dashed border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-[rgb(var(--surface))]/50 text-center">
-          <p className="text-[rgb(var(--muted))]">
+        <div className="rounded-xl p-4 border border-dashed border-border bg-muted text-center">
+          <p className="text-muted-foreground">
             Sign in with GitHub to see live triage poll results.
           </p>
         </div>
       )}
 
       {/* Active Triage Polls */}
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+      <section className="rounded-xl border border-border p-6">
         <h3 className="text-lg font-semibold mb-4">Active Triage Polls</h3>
 
         {pollsError && (
-          <div className="mb-4 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300">
+          <div className="mb-4 p-4 rounded-lg bg-destructive/10 border border-destructive text-destructive">
             {pollsError}
           </div>
         )}
 
         {pollsLoading && (
-          <p className="text-[rgb(var(--muted))]">Loading triage polls…</p>
+          <p className="text-muted-foreground">Loading triage polls…</p>
         )}
 
         {!pollsLoading && !pollsError && underReviewItems.length === 0 && (
-          <p className="text-[rgb(var(--muted))]">No items under review.</p>
+          <p className="text-muted-foreground">No items under review.</p>
         )}
 
         {!pollsLoading && !pollsError && underReviewItems.length > 0 && (
@@ -192,7 +192,7 @@ export function Governance() {
               return (
                 <div
                   key={item.id}
-                  className="p-4 rounded-lg bg-gray-50 dark:bg-[rgb(var(--surface))]/50 border border-gray-100 dark:border-gray-700"
+                  className="p-4 rounded-lg bg-muted border border-border"
                 >
                   <div className="flex items-start gap-3">
                     {item.icon_url && (
@@ -205,7 +205,7 @@ export function Governance() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-medium truncate">{item.name}</span>
-                        <span className="text-xs px-2 py-0.5 rounded-full bg-gray-200 dark:bg-gray-700 text-[rgb(var(--muted))] capitalize">
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground capitalize">
                           {item.content_type}
                         </span>
                         <span className="text-xs px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200">
@@ -216,7 +216,7 @@ export function Governance() {
                       {/* Poll bars or placeholder */}
                       {canViewPoll && totalVotes > 0 && (
                         <div className="mt-3">
-                          <div className="flex rounded-full overflow-hidden h-3 bg-gray-200 dark:bg-gray-700">
+                          <div className="flex rounded-full overflow-hidden h-3 bg-muted">
                             <div
                               className="bg-green-500"
                               style={{ width: `${keepPct}%` }}
@@ -226,7 +226,7 @@ export function Governance() {
                               style={{ width: `${removePct}%` }}
                             />
                           </div>
-                          <div className="flex justify-between text-xs text-[rgb(var(--muted))] mt-1">
+                          <div className="flex justify-between text-xs text-muted-foreground mt-1">
                             <span>Keep {keepPct}%</span>
                             <span>Remove {removePct}%</span>
                           </div>
@@ -234,13 +234,13 @@ export function Governance() {
                       )}
 
                       {canViewPoll && totalVotes === 0 && (
-                        <p className="mt-2 text-sm text-[rgb(var(--muted))]">
+                        <p className="mt-2 text-sm text-muted-foreground">
                           No votes yet.
                         </p>
                       )}
 
                       {!authenticated && (
-                        <p className="mt-2 text-sm text-[rgb(var(--muted))]">
+                        <p className="mt-2 text-sm text-muted-foreground">
                           Sign in to view live results
                         </p>
                       )}
@@ -255,7 +255,7 @@ export function Governance() {
                         </button>
                       ) : (
                         poll && (
-                          <p className="mt-2 text-sm text-[rgb(var(--muted))]">
+                          <p className="mt-2 text-sm text-muted-foreground">
                             Poll not available
                           </p>
                         )
@@ -270,21 +270,21 @@ export function Governance() {
       </section>
 
       {/* Recent Resolutions */}
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+      <section className="rounded-xl border border-border p-6">
         <h3 className="text-lg font-semibold mb-4">Recent Resolutions</h3>
 
         {resolutionsError && (
-          <div className="mb-4 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300">
+          <div className="mb-4 p-4 rounded-lg bg-destructive/10 border border-destructive text-destructive">
             {resolutionsError}
           </div>
         )}
 
         {resolutionsLoading && (
-          <p className="text-[rgb(var(--muted))]">Loading resolutions…</p>
+          <p className="text-muted-foreground">Loading resolutions…</p>
         )}
 
         {!resolutionsLoading && !resolutionsError && resolutions.length === 0 && (
-          <p className="text-[rgb(var(--muted))]">No triage resolutions yet.</p>
+          <p className="text-muted-foreground">No triage resolutions yet.</p>
         )}
 
         {!resolutionsLoading && !resolutionsError && resolutions.length > 0 && (
@@ -292,12 +292,12 @@ export function Governance() {
             {resolutions.map((entry) => (
               <div
                 key={entry.id}
-                className="p-3 rounded-lg bg-gray-50 dark:bg-[rgb(var(--surface))]/50 border border-gray-100 dark:border-gray-700"
+                className="p-3 rounded-lg bg-muted border border-border"
               >
                 <div className="flex items-center gap-2 mb-1">
                   <time
                     dateTime={entry.timestamp}
-                    className="text-sm text-[rgb(var(--muted))] font-mono"
+                    className="text-sm text-muted-foreground font-mono"
                   >
                     {entry.timestamp}
                   </time>
@@ -310,7 +310,7 @@ export function Governance() {
                   </span>
                 </div>
                 {entry.details && (
-                  <p className="text-sm text-[rgb(var(--muted))]">{entry.details}</p>
+                  <p className="text-sm text-muted-foreground">{entry.details}</p>
                 )}
               </div>
             ))}
@@ -319,21 +319,21 @@ export function Governance() {
       </section>
 
       {/* Transparency Log */}
-      <section className="rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+      <section className="rounded-xl border border-border p-6">
         <h3 className="text-lg font-semibold mb-4">Transparency Log</h3>
 
         {logError && (
-          <div className="mb-4 p-4 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300">
+          <div className="mb-4 p-4 rounded-lg bg-destructive/10 border border-destructive text-destructive">
             {logError}
           </div>
         )}
 
         {logLoading && (
-          <p className="text-[rgb(var(--muted))]">Loading transparency log…</p>
+          <p className="text-muted-foreground">Loading transparency log…</p>
         )}
 
         {!logLoading && !logError && logEntries.length === 0 && (
-          <p className="text-[rgb(var(--muted))]">No governance actions recorded yet.</p>
+          <p className="text-muted-foreground">No governance actions recorded yet.</p>
         )}
 
         {!logLoading && !logError && logEntries.length > 0 && (
@@ -341,21 +341,21 @@ export function Governance() {
             {logEntries.map((entry) => (
               <div
                 key={entry.id}
-                className="p-3 rounded-lg bg-gray-50 dark:bg-[rgb(var(--surface))]/50 border border-gray-100 dark:border-gray-700"
+                className="p-3 rounded-lg bg-muted border border-border"
               >
                 <div className="flex items-center gap-2 mb-1">
                   <time
                     dateTime={entry.timestamp}
-                    className="text-sm text-[rgb(var(--muted))] font-mono"
+                    className="text-sm text-muted-foreground font-mono"
                   >
                     {entry.timestamp}
                   </time>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-gray-200 dark:bg-gray-700 text-[rgb(var(--muted))] capitalize">
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground capitalize">
                     {entry.action}
                   </span>
                 </div>
                 {entry.details && (
-                  <p className="text-sm text-[rgb(var(--muted))]">{entry.details}</p>
+                  <p className="text-sm text-muted-foreground">{entry.details}</p>
                 )}
               </div>
             ))}
