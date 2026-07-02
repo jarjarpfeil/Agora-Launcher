@@ -18,7 +18,7 @@ pub mod mcp;
 pub mod paths;
 pub mod registry;
 pub mod registry_sync;
-pub mod state;
+pub use agora_core::state;
 
 use state::LauncherState;
 use tauri::Manager;
@@ -60,6 +60,7 @@ pub fn run() {
             commands::lock_instance,
             commands::revert_instance,
             commands::launch_instance,
+            commands::check_instance_health,
             commands::list_loader_versions,
             commands::list_manifest_loaders,
             commands::list_manifest_mc_versions,

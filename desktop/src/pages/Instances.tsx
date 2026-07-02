@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   checkInstanceCrash,
+  checkInstanceHealth,
   createInstance,
   deleteInstance,
   launchInstance,
@@ -11,10 +12,12 @@ import {
   listManifestMcVersions,
   formatError,
   type CreateInstanceRequest,
+  type HealthReport,
   type InstanceRow,
   type LoaderVersionSummary,
 } from '../lib/tauri';
 import { CrashInvestigator } from '../components/CrashInvestigator';
+import { HealthDialog } from '../components/HealthDialog';
 
 export function Instances({ onEditInstance }: { onEditInstance: (id: string) => void }) {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
@@ -175,17 +178,40 @@ function InstanceCard({
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
+  const [showHealth, setShowHealth] = useState(false);
 
   const launch = async () => {
     setBusy(true);
     setError(null);
     try {
+      // Phase 4: pre-launch health scan
+      const report = await checkInstanceHealth(instance.instance_id);
+      const hasBlockers = report.blockers.length > 0;
+      const hasWarnings = report.warnings.length > 0;
+      if (hasBlockers || hasWarnings) {
+        setHealthReport(report);
+        setShowHealth(true);
+        setBusy(false);
+        return;
+      }
+      // All clear — launch directly
       await launchInstance(instance.instance_id);
     } catch (e) {
       setError(formatError(e));
     } finally {
       setBusy(false);
     }
+  };
+
+  const handleLaunchFromHealth = () => {
+    setShowHealth(false);
+    setHealthReport(null);
+  };
+
+  const handleCloseHealth = () => {
+    setShowHealth(false);
+    setHealthReport(null);
   };
 
   const remove = async () => {
@@ -202,6 +228,15 @@ function InstanceCard({
   };
 
   return (
+    <>
+    {showHealth && healthReport && (
+      <HealthDialog
+        instanceId={instance.instance_id}
+        instanceName={instance.name}
+        onClose={handleCloseHealth}
+        onLaunch={handleLaunchFromHealth}
+      />
+    )}
     <li className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -255,6 +290,7 @@ function InstanceCard({
         </button>
       </div>
     </li>
+    </>
   );
 }
 

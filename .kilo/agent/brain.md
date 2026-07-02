@@ -1,5 +1,5 @@
 ---
-description: "Primary planner-only agent. Has no write or execute permissions of its own; decomposes work into focused, intent-level tasks and delegates every execution to 'worker' subagents. Spend costly planning tokens only on judgment; offload all mechanics to workers."
+description: "Primary agent. When in brain mode: orchestrates workers. When in code mode: writes code directly + dispatches workers for parallel disjoint work. Prefers bulk edits (write/replaceAll) over per-line edits. Verifies at batch boundaries, not per-edit."
 mode: primary
 color: "#7C3AED"
 permission:
@@ -53,6 +53,15 @@ Ground every decision in `AGENTS.md` and `.kilo/plans/MASTER_SPEC.md`. Prefer th
    - Web changes → `/web`
    Re-dispatch fix workers as needed until green. Never run these yourself — you can't.
 7. **Summarize.** Give the user a concise final report: what changed (files + intent), how it was verified, and any caveats or follow-ups. Do not commit or push unless explicitly asked.
+
+## Bulk-edit discipline (apply to both brain-direct and worker dispatches)
+
+Prefer the fewest tool calls per file:
+- Touching >3 sites in one file → `write` the whole file in one call.
+- Many identical string replacements → `edit` with `replaceAll: true`.
+- Do not issue one `edit` per occurrence — that burns the most expensive resource (step budget) on mechanical application.
+- Verify (`cargo build`/`npm run build`) once per logical batch, not after each individual edit.
+- When dispatching workers, state this explicitly: "Use bulk edits. `write` for whole-file rewrites, `replaceAll` for identical multi-site changes. Verify once at the end."
 
 ## Worker design contract (every dispatch MUST include all of these)
 

@@ -254,6 +254,33 @@ pub async fn launch_instance(
         .map_err(|_| LauncherError::LocalStateFailed)?
 }
 
+/// Run the pre-launch health scan on an instance. Returns a [`HealthReport`]
+/// with blockers (must resolve before launch) and warnings (may override).
+#[tauri::command]
+pub async fn check_instance_health(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+) -> LauncherResult<agora_core::health::HealthReport> {
+    tokio::task::spawn_blocking(move || {
+        let sanitized = paths::sanitize_id(&instance_id);
+        let instance_dir = paths::instance_dir(&app, &sanitized)
+            .map_err(|e| LauncherError::Generic { code: "ERR_INSTANCE_PATH".into(), message: e.to_string() })?;
+        let manifest = load_manifest(&app, &sanitized)?;
+
+        // Registry DB for curated known_conflicts — optional (Phase 3: never required)
+        let reg_path = paths::registry_db_path(&app).ok();
+
+        Ok(agora_core::health::health(
+            &instance_dir,
+            &manifest,
+            reg_path.as_deref(),
+        ))
+    })
+    .await
+    .map_err(|_| LauncherError::LocalStateFailed)?
+}
+
 /// List pinned loader versions for a loader + Minecraft version.
 #[tauri::command]
 pub async fn list_loader_versions(

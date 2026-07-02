@@ -23,7 +23,7 @@ pub fn local_state_connection(db_path: &std::path::Path) -> anyhow::Result<Conne
 /// Open a read-only connection to the cached registry database.
 ///
 /// Caller is responsible for ensuring the file exists.
-pub fn registry_connection(db_path: &std::path::PathBuf) -> anyhow::Result<Connection> {
+pub fn registry_connection(db_path: &std::path::Path) -> anyhow::Result<Connection> {
     let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     conn.execute_batch("PRAGMA query_only = ON;")?;
     Ok(conn)

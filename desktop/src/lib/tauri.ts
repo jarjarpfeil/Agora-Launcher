@@ -185,6 +185,31 @@ export const revertInstance = (instanceId: string) =>
   invoke<void>('revert_instance', { instanceId });
 export const launchInstance = (instanceId: string) =>
   invoke<void>('launch_instance', { instanceId });
+
+export type HealthScore = 'green' | 'yellow' | 'red';
+
+export interface HealthWarning {
+  kind: string;
+  mod_id: string | null;
+  message: string;
+  suggested_action: string | null;
+}
+
+export interface HealthBlocker {
+  kind: string;
+  mod_id: string | null;
+  message: string;
+  suggested_action: string | null;
+}
+
+export interface HealthReport {
+  score: HealthScore;
+  warnings: HealthWarning[];
+  blockers: HealthBlocker[];
+}
+
+export const checkInstanceHealth = (instanceId: string) =>
+  invoke<HealthReport>('check_instance_health', { instanceId });
 export const listLoaderVersions = (loader: string, mcVersion: string) =>
   invoke<LoaderVersionSummary[]>('list_loader_versions', {
     loader,
