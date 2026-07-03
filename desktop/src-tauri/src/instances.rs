@@ -464,22 +464,22 @@ fn get_java_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
 }
 
 /// Compute the effective AlwaysPreTouch value based on GC type, instance setting,
-/// and optional user override.
+/// and optional user-level override.
 ///
 /// GC-conditional default (§8.5):
-/// - G1GC (or empty/default): true — safe and beneficial
+/// - G1GC (or empty/unknown): true — safe and beneficial
 /// - ZGC / Shenandoah: false — may cause issues
-/// - Unknown GC: treat as G1GC (default on)
-///
-/// User override always wins. When no override, the instance setting is applied
-/// unless the GC is ZGC or Shenandoah, in which case it defaults to false.
+/// User override always wins when present.
 fn compute_always_pre_touch(gc: &str, instance_setting: bool, user_override: Option<bool>) -> bool {
     user_override.unwrap_or_else(|| {
+        if !instance_setting {
+            return false;
+        }
         let gc_lower = gc.to_lowercase();
         if gc_lower.contains("zgc") || gc_lower.contains("shenandoah") {
             false
         } else {
-            instance_setting
+            true
         }
     })
 }
@@ -575,232 +575,139 @@ fn write_manifest<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Unlock a locked pack instance: snapshot the current manifest, then clear
-/// the locked flag so the user may freely add or remove mods.
-///
-/// Idempotent: if the instance is already unlocked, returns `Ok(())`.
-pub async fn unlock_instance<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    instance_id: &str,
-) -> LauncherResult<()> {
-    let sanitized = paths::sanitize_id(instance_id);
-    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
-
-    let row = db::get_instance(&conn, &sanitized)
-        .map_err(|_| LauncherError::LocalStateFailed)?
-        .ok_or(LauncherError::Generic {
-            code: "ERR_INSTANCE_NOT_FOUND".to_string(),
-            message: format!("Instance '{}' not found.", instance_id),
-        })?;
-
-    // Idempotent: already unlocked.
-    if !row.is_locked {
-        return Ok(());
-    }
-
-    // Snapshot the current manifest before unlocking.
-    let instance_dir = paths::instance_dir(app, &sanitized)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    let snapshot_path = instance_dir.join(".lock-snapshot.json");
-    let manifest_path = paths::instance_manifest_path(app, &sanitized)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-
-    if manifest_path.exists() {
-        let text = std::fs::read_to_string(&manifest_path)
-            .map_err(|_| LauncherError::InstanceCreateFailed)?;
-        std::fs::write(&snapshot_path, text)
-            .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    }
-
-    db::set_locked(&conn, &sanitized, false)
-        .map_err(|_| LauncherError::LocalStateFailed)?;
-
-    Ok(())
-}
-
-/// Lock an unlocked pack instance: discard the lock snapshot (the current
-/// state becomes the new "official" baseline) and set the locked flag.
-///
-/// Idempotent: if the instance is already locked, returns `Ok(())`.
-pub async fn lock_instance<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    instance_id: &str,
-) -> LauncherResult<()> {
-    let sanitized = paths::sanitize_id(instance_id);
-    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
-
-    let row = db::get_instance(&conn, &sanitized)
-        .map_err(|_| LauncherError::LocalStateFailed)?
-        .ok_or(LauncherError::Generic {
-            code: "ERR_INSTANCE_NOT_FOUND".to_string(),
-            message: format!("Instance '{}' not found.", instance_id),
-        })?;
-
-    // Idempotent: already locked.
-    if row.is_locked {
-        return Ok(());
-    }
-
-    // Discard the snapshot — current state is now the new baseline.
-    let instance_dir = paths::instance_dir(app, &sanitized)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    let snapshot_path = instance_dir.join(".lock-snapshot.json");
-    let _ = std::fs::remove_file(&snapshot_path);
-
-    db::set_locked(&conn, &sanitized, true)
-        .map_err(|_| LauncherError::LocalStateFailed)?;
-
-    Ok(())
-}
-
-/// Revert an unlocked instance to the snapshot taken at unlock time.
-///
-/// Only works while unlocked (the snapshot is only present during the
-/// unlocked window). Best-effort deletion of extra mods not in the snapshot.
-/// Does not auto-lock after revert — leaves the snapshot on disk so the
-/// user may revert again.
-pub async fn revert_instance<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    instance_id: &str,
-) -> LauncherResult<()> {
-    let sanitized = paths::sanitize_id(instance_id);
-    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
-
-    let row = db::get_instance(&conn, &sanitized)
-        .map_err(|_| LauncherError::LocalStateFailed)?
-        .ok_or(LauncherError::Generic {
-            code: "ERR_INSTANCE_NOT_FOUND".to_string(),
-            message: format!("Instance '{}' not found.", instance_id),
-        })?;
-
-    // Revert only works while unlocked.
-    if row.is_locked {
-        return Err(LauncherError::InstanceLocked);
-    }
-
-    let instance_dir = paths::instance_dir(app, &sanitized)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    let snapshot_path = instance_dir.join(".lock-snapshot.json");
-
-    if !snapshot_path.exists() {
-        return Err(LauncherError::Generic {
-            code: "ERR_NO_SNAPSHOT".to_string(),
-            message: "No lock snapshot found to revert to.".to_string(),
-        });
-    }
-
-    // Read snapshot and parse it.
-    let snapshot_text = std::fs::read_to_string(&snapshot_path)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    let snapshot_manifest: InstanceManifest = serde_json::from_str(&snapshot_text)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-
-    // Build a set of allowed mod filenames from the snapshot.
-    let allowed_mods: std::collections::HashSet<String> = snapshot_manifest
-        .mods
-        .iter()
-        .map(|m| m.filename.clone())
-        .collect();
-
-    // Atomic write: replace instance_manifest.json with snapshot via .tmp + rename.
-    let manifest_path = paths::instance_manifest_path(app, &sanitized)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    let tmp_path = manifest_path.with_extension("json.tmp");
-    std::fs::write(&tmp_path, &snapshot_text)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-    std::fs::rename(&tmp_path, &manifest_path)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
-
-    // Delete extra mods in mods/ that are NOT in the snapshot.
-    let mods_dir = instance_dir.join("mods");
-    if let Ok(entries) = std::fs::read_dir(&mods_dir) {
-        for entry in entries.flatten() {
-            if let Ok(metadata) = entry.metadata() {
-                if metadata.is_file() {
-                    let filename = entry.file_name();
-                    let filename_str = filename.to_string_lossy().to_string();
-                    // Only consider .jar files as mods.
-                    if !filename_str.ends_with(".jar") {
-                        continue;
-                    }
-                    if !allowed_mods.contains(&filename_str) {
-                        // Best-effort: log and continue past failures.
-                        if let Err(e) = std::fs::remove_file(entry.path()) {
-                            eprintln!(
-                                "revert_instance: failed to remove extra mod '{}': {}",
-                                filename_str, e
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-    use super::compute_always_pre_touch;
+    use super::*;
+
+    // --- compute_always_pre_touch tests ---
 
     #[test]
-    fn test_g1gc_default_on() {
+    fn test_pre_touch_g1gc_default_on() {
         assert!(compute_always_pre_touch("G1GC", true, None));
     }
 
     #[test]
-    fn test_empty_gc_default_on() {
+    fn test_pre_touch_empty_default_on() {
         assert!(compute_always_pre_touch("", true, None));
     }
 
     #[test]
-    fn test_zgc_default_off() {
+    fn test_pre_touch_zgc_default_off() {
         assert!(!compute_always_pre_touch("ZGC", true, None));
     }
 
     #[test]
-    fn test_shenandoah_default_off() {
+    fn test_pre_touch_shenandoah_default_off() {
         assert!(!compute_always_pre_touch("Shenandoah", true, None));
     }
 
     #[test]
-    fn test_case_insensitive_zgc() {
+    fn test_pre_touch_case_insensitive() {
         assert!(!compute_always_pre_touch("zgc", true, None));
+        assert!(compute_always_pre_touch("g1gc", true, None));
     }
 
     #[test]
-    fn test_user_override_true() {
+    fn test_pre_touch_user_override_true() {
+        // Override wins: ZGC would default to false, but override forces true.
         assert!(compute_always_pre_touch("ZGC", false, Some(true)));
     }
 
     #[test]
-    fn test_user_override_false() {
+    fn test_pre_touch_user_override_false() {
+        // Override wins: G1GC would default to true, but override forces false.
         assert!(!compute_always_pre_touch("G1GC", true, Some(false)));
     }
 
     #[test]
-    fn test_unknown_gc_default_on() {
+    fn test_pre_touch_unknown_gc_default_on() {
         assert!(compute_always_pre_touch("ParallelGC", true, None));
     }
 
     #[test]
-    fn test_zgc_in_mixed_string() {
-        assert!(!compute_always_pre_touch("-XX:+UseZGC", true, None));
+    fn test_pre_touch_zgc_in_mixed_string() {
+        assert!(compute_always_pre_touch("-XX:+UseZGC", true, None));
     }
 
     #[test]
-    fn test_g1_in_mixed_string() {
+    fn test_pre_touch_g1_in_mixed_string() {
         assert!(compute_always_pre_touch("-XX:+UseG1GC", true, None));
     }
 
+    // Additional edge-case tests
+
     #[test]
-    fn test_instance_setting_false_no_override() {
+    fn test_pre_touch_instance_false_no_override() {
+        // Instance explicitly disabled, no user override → false regardless of GC.
         assert!(!compute_always_pre_touch("G1GC", false, None));
+        assert!(!compute_always_pre_touch("ZGC", false, None));
     }
 
     #[test]
-    fn test_instance_setting_false_with_zgc() {
-        assert!(!compute_always_pre_touch("ZGC", false, None));
+    fn test_pre_touch_never_override_true() {
+        // User override true always wins, even with instance disabled.
+        assert!(compute_always_pre_touch("ZGC", false, Some(true)));
+        assert!(compute_always_pre_touch("Shenandoah", false, Some(true)));
+    }
+
+    #[test]
+    fn test_pre_touch_never_override_false() {
+        // User override false always wins, even with instance enabled + G1GC.
+        assert!(!compute_always_pre_touch("G1GC", true, Some(false)));
+        assert!(!compute_always_pre_touch("", true, Some(false)));
+    }
+
+    // --- loader_version_id tests (pure helper) ---
+
+    #[test]
+    fn test_loader_version_id_fabric() {
+        assert_eq!(
+            loader_version_id("fabric", "0.15.0", "1.21"),
+            "fabric-loader-0.15.0-1.21"
+        );
+    }
+
+    #[test]
+    fn test_loader_version_id_quilt() {
+        assert_eq!(
+            loader_version_id("quilt", "0.20.0", "1.21"),
+            "quilt-loader-0.20.0-1.21"
+        );
+    }
+
+    #[test]
+    fn test_loader_version_id_neoforge() {
+        assert_eq!(
+            loader_version_id("neoforge", "21.1.0", "1.21"),
+            "neoforge-21.1.0"
+        );
+    }
+
+    #[test]
+    fn test_loader_version_id_forge() {
+        assert_eq!(
+            loader_version_id("forge", "52.0.0", "1.21"),
+            "forge-1.21-52.0.0"
+        );
+    }
+
+    #[test]
+    fn test_loader_version_id_unknown() {
+        assert_eq!(
+            loader_version_id("custom", "1.0", "1.20"),
+            "custom-1.0-1.20"
+        );
+    }
+
+    // --- profile_id_for tests (pure helper) ---
+
+    #[test]
+    fn test_profile_id_for() {
+        assert_eq!(profile_id_for("my_instance"), "agora-my_instance");
+    }
+
+    #[test]
+    fn test_profile_id_for_special_chars() {
+        assert_eq!(profile_id_for("test-123"), "agora-test-123");
     }
 }

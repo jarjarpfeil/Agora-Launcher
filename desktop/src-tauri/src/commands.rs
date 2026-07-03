@@ -1305,3 +1305,79 @@ pub fn ai_get_models() -> Vec<ai_assistant::AvailableModel> {
 pub fn ai_get_default_model() -> String {
     ai_assistant::DEFAULT_AI_MODEL.to_string()
 }
+
+// ---------------------------------------------------------------------------
+// Phase 5: MSA auth + GC architect
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct MsaBeginLoginResponse {
+    pub auth_uri: String,
+}
+
+/// Begin the Microsoft Account login flow. Returns a URL the frontend should
+/// open in a browser/webview. After the user completes login, call
+/// `msa_finish_login` with the `?code=` from the redirect URL.
+#[tauri::command]
+pub async fn msa_begin_login(
+    _app: tauri::AppHandle,
+    state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<MsaBeginLoginResponse> {
+    let mut s = state.lock().await;
+    let flow = agora_core::msa::begin_login(&s.client).await?;
+    let auth_uri = flow.auth_uri.clone();
+    s.login_flow = Some(flow);
+    Ok(MsaBeginLoginResponse { auth_uri })
+}
+
+/// Complete the MSA login flow with the auth code from the browser redirect.
+#[tauri::command]
+pub async fn msa_finish_login(
+    _app: tauri::AppHandle,
+    state: tauri::State<'_, LauncherState>,
+    code: String,
+    oauth_state: Option<String>,
+) -> LauncherResult<agora_core::msa::MsaCredentials> {
+    let mut s = state.lock().await;
+    let flow = s.login_flow.take().ok_or_else(|| LauncherError::Generic {
+        code: "ERR_MSA_NO_FLOW".into(),
+        message: "No login flow in progress. Call msa_begin_login first.".into(),
+    })?;
+    let creds = agora_core::msa::finish_login(&s.client, &code, &flow, oauth_state.as_deref()).await?;
+    Ok(creds)
+}
+/// Refresh expired MSA credentials.
+#[tauri::command]
+pub async fn msa_refresh(
+    _app: tauri::AppHandle,
+    state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<agora_core::msa::MsaCredentials> {
+    let s = state.lock().await;
+    let creds = agora_core::msa::load_credentials()?.ok_or_else(|| LauncherError::Generic {
+        code: "ERR_MSA_NOT_AUTHENTICATED".into(),
+        message: "Not signed in. Use msa_begin_login first.".into(),
+    })?;
+    let refreshed = agora_core::msa::refresh_credentials(&s.client, &creds).await?;
+    Ok(refreshed)
+}
+
+/// Sign out and clear stored MSA credentials.
+#[tauri::command]
+pub async fn msa_logout(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<()> {
+    agora_core::msa::clear_credentials()
+}
+
+/// Compute optimal JVM GC flags for an instance.
+#[tauri::command]
+pub fn compute_gc_args(
+    _state: tauri::State<'_, LauncherState>,
+    java_version: u32,
+    requested_heap_mb: i64,
+    manual_args: String,
+    override_profile: Option<agora_core::gc::GcProfile>,
+) -> agora_core::gc::GcResult {
+    agora_core::gc::compute_gc(java_version, requested_heap_mb, &manual_args, override_profile)
+}

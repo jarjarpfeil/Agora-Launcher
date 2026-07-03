@@ -27,3 +27,7 @@ pub mod launcher_profiles;
 pub mod auth;
 pub mod jar_metadata;
 pub mod health;
+pub mod msa;
+pub mod gc;
+pub mod java;
+pub mod log_sanitizer;

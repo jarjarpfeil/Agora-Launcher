@@ -64,3 +64,59 @@ pub fn local_state_db_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> anyh
     let base = app_data_dir(app)?;
     agora_core::paths::local_state_db_path(&base)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_id_preserves_alphanumeric() {
+        let result = sanitize_id("my-instance-1");
+        assert!(result.contains("my-instance-1"));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_path_separators() {
+        assert!(!sanitize_id("foo/bar").contains('/'));
+        assert!(!sanitize_id("foo\\bar").contains('\\'));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_dot_dot() {
+        let result = sanitize_id("..");
+        assert!(!result.contains(".."));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_dot_dot_slash() {
+        let result = sanitize_id("../etc/passwd");
+        assert!(!result.contains(".."));
+        assert!(!result.contains('/'));
+    }
+
+    #[test]
+    fn test_sanitize_id_removes_special_chars() {
+        let result = sanitize_id("foo!@#bar");
+        assert!(result.contains("foo"));
+        assert!(result.contains("bar"));
+        assert!(!result.contains(|c: char| matches!(c, '!' | '@' | '#')));
+    }
+
+    #[test]
+    fn test_sanitize_id_empty_string() {
+        let result = sanitize_id("");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_sanitize_id_unicode_preserved() {
+        let result = sanitize_id("café");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_sanitize_id_null_bytes_removed() {
+        let result = sanitize_id("foo\0bar");
+        assert!(!result.contains('\0'));
+    }
+}

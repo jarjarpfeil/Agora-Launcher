@@ -1,10 +1,33 @@
+use crate::msa::LoginFlow;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Lightweight shared application state.
-#[derive(Default)]
 pub struct AppState {
-    // TODO: cache SQL connection handles, registry paths, etc.
+    /// Shared HTTP client for all network operations (MSA, Modrinth, etc.)
+    pub client: reqwest::Client,
+    /// In-flight MSA login flow (ephemeral — only alive between begin/finish).
+    /// If the app crashes, the flow is lost and the user re-authenticates.
+    pub login_flow: Option<LoginFlow>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            client,
+            login_flow: None,
+        }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Tauri-managed wrapper around the shared application state.

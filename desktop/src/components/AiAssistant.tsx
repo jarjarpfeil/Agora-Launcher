@@ -148,12 +148,12 @@ export function AiAssistant({
   // --- Auth gate ---
   if (authenticated === false) {
     return (
-      <div className="flex h-full w-full flex-col rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
-        <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-4 py-3">
+      <div className="flex h-full w-full flex-col rounded-xl border border-border bg-background">
+        <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <h2 className="text-sm font-semibold">AI Assistant</h2>
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+            className="text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
             &times;
@@ -163,11 +163,11 @@ export function AiAssistant({
           <div className="text-3xl" aria-hidden="true">
             &#129302;
           </div>
-          <p className="text-sm text-gray-600 dark:text-gray-400">
+          <p className="text-sm text-muted-foreground">
             Sign in with GitHub to use the AI assistant. Your GitHub account
             provides free access to AI models via GitHub Models.
           </p>
-          <p className="text-xs text-gray-400 dark:text-gray-500">
+          <p className="text-xs text-muted-foreground">
             No separate API key needed.
           </p>
         </div>
@@ -178,24 +178,24 @@ export function AiAssistant({
   // --- Loading auth ---
   if (authenticated === null) {
     return (
-      <div className="flex h-full w-full flex-col items-center justify-center rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
-        <p className="text-sm text-gray-500">Loading…</p>
+      <div className="flex h-full w-full flex-col items-center justify-center rounded-xl border border-border bg-background">
+        <p className="text-sm text-muted-foreground">Loading…</p>
       </div>
     );
   }
 
   // --- Main chat UI ---
   return (
-    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900">
+    <div className="flex h-full w-full flex-col overflow-hidden rounded-xl border border-border bg-background">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-gray-200 dark:border-gray-700 px-4 py-3">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold">AI Assistant</h2>
         <div className="flex items-center gap-2">
           {models.length > 0 && (
             <div className="flex items-center gap-1">
               <label
                 htmlFor="ai-model-select"
-                className="text-[11px] text-gray-400 dark:text-gray-500"
+                className="text-[11px] text-muted-foreground"
               >
                 Model:
               </label>
@@ -203,7 +203,7 @@ export function AiAssistant({
                 id="ai-model-select"
                 value={selectedModel ?? ''}
                 onChange={(e) => setSelectedModel(e.target.value)}
-                className="rounded-md border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-[11px] text-gray-700 dark:text-gray-300 outline-none focus:ring-1 focus:ring-brand-500"
+                className="rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-brand-500"
               >
                 {models.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -215,7 +215,7 @@ export function AiAssistant({
           )}
           <button
             onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300"
+            className="text-muted-foreground hover:text-foreground"
             aria-label="Close"
           >
             &times;
@@ -225,8 +225,8 @@ export function AiAssistant({
 
       {/* Privacy note */}
       {messages.length === 0 && (
-        <div className="border-b border-gray-100 dark:border-gray-800 px-4 py-2">
-          <p className="text-[11px] text-gray-400 dark:text-gray-500">
+        <div className="border-b border-border px-4 py-2">
+          <p className="text-[11px] text-muted-foreground">
             Your crash data is sent to GitHub Models for analysis. This uses
             your GitHub account — no separate API key needed.
           </p>
@@ -240,7 +240,7 @@ export function AiAssistant({
       >
         {messages.length === 0 && !loading && (
           <div className="flex flex-1 items-center justify-center">
-            <p className="text-xs text-gray-400 dark:text-gray-500">
+            <p className="text-xs text-muted-foreground">
               Ask about crashes, mods, or anything Agora-related.
             </p>
           </div>
@@ -249,13 +249,13 @@ export function AiAssistant({
         {messages.map((msg, i) =>
           msg.role === 'user' ? (
             <div key={i} className="flex justify-end">
-              <div className="max-w-[80%] rounded-xl bg-brand-600 px-4 py-2 text-sm text-white">
+              <div className="max-w-[80%] rounded-xl bg-primary px-4 py-2 text-sm text-primary-foreground">
                 {msg.content}
               </div>
             </div>
           ) : (
             <div key={i} className="flex justify-start">
-              <div className="max-w-[80%] rounded-xl bg-gray-100 px-4 py-2 text-sm text-gray-800 dark:bg-gray-800 dark:text-gray-200">
+              <div className="max-w-[80%] rounded-xl bg-card px-4 py-2 text-sm text-card-foreground">
                 <div className="prose prose-sm prose-neutral dark:prose-invert max-w-none break-words">
                   <ReactMarkdown rehypePlugins={[rehypeRaw, rehypeSanitize]}>
                     {msg.content}
@@ -269,8 +269,8 @@ export function AiAssistant({
         {/* Loading indicator */}
         {loading && (
           <div className="flex justify-start">
-            <div className="rounded-xl bg-gray-100 px-4 py-2 dark:bg-gray-800">
-              <span className="text-sm text-gray-500 dark:text-gray-400">
+            <div className="rounded-xl bg-card">
+              <span className="text-sm text-muted-foreground">
                 Thinking
                 <span className="inline-flex gap-0.5">
                   <span className="dot1">.</span>
@@ -284,11 +284,11 @@ export function AiAssistant({
 
         {/* Error display */}
         {error && (
-          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 dark:border-red-900 dark:bg-red-950">
-            <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
+          <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-4 py-3">
+            <p className="text-sm text-destructive">{error}</p>
             <button
               onClick={handleRetry}
-              className="mt-2 text-xs text-red-500 underline hover:text-red-700 dark:hover:text-red-300"
+              className="mt-2 text-xs text-destructive underline hover:text-destructive/80"
             >
               Retry
             </button>
@@ -297,7 +297,7 @@ export function AiAssistant({
       </div>
 
       {/* Input area */}
-      <div className="border-t border-gray-200 dark:border-gray-700 p-3">
+      <div className="border-t border-border p-3">
         <div className="flex gap-2">
           <textarea
             value={input}
@@ -305,12 +305,12 @@ export function AiAssistant({
             onKeyDown={handleKeyDown}
             placeholder="Ask about crashes, mods, or anything…"
             rows={2}
-            className="flex-1 resize-none rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-800 outline-none placeholder-gray-400 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200 dark:placeholder-gray-500"
+            className="flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none placeholder-muted-foreground focus:border-primary focus:ring-1 focus:ring-brand-500"
           />
           <button
             onClick={handleSend}
             disabled={loading || !input.trim()}
-            className="self-end rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+            className="self-end rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Send
           </button>

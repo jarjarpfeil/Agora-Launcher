@@ -113,7 +113,13 @@ pub fn run() {
             commands::set_mcp_approval,
             commands::ai_chat,
             commands::ai_get_models,
-            commands::ai_get_default_model
+            commands::ai_get_default_model,
+            commands::msa_begin_login,
+            commands::msa_finish_login,
+            commands::msa_get_status,
+            commands::msa_refresh,
+            commands::msa_logout,
+            commands::compute_gc_args
         ])
         .setup(|app| {
             let handle = app.handle().clone();

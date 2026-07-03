@@ -43,10 +43,10 @@ function BreakdownEntry({ key, value }: { key: string; value: unknown }) {
   }
   return (
     <div className="flex items-center justify-between text-sm py-1">
-      <span className="text-[rgb(var(--muted))]" data-testid={`breakdown-key-${key}`}>
+      <span className="text-muted-foreground" data-testid={`breakdown-key-${key}`}>
         {key}
       </span>
-      <span className="font-mono text-xs text-[rgb(var(--muted))]">
+      <span className="font-mono text-xs text-muted-foreground">
         {displayValue}
       </span>
     </div>
@@ -58,7 +58,7 @@ function BreakdownList({ breakdown }: { breakdown: Record<string, unknown> }) {
   const entries = Object.entries(breakdown);
   if (entries.length === 0) return null;
   return (
-    <div className="mt-2 space-y-0.5 border-t border-gray-200 dark:border-gray-700 pt-2">
+    <div className="mt-2 space-y-0.5 border-t border-border pt-2">
       {entries.map(([k, v]) => (
         <BreakdownEntry key={k} value={v} />
       ))}
@@ -88,8 +88,8 @@ function SuspectCard({
       className={[
         'rounded-xl border p-4 transition-colors',
         isTop
-          ? 'border-brand-300 dark:border-brand-700 bg-brand-50 dark:bg-brand-900/30'
-          : 'border-gray-200 dark:border-gray-700 bg-white dark:bg-[rgb(var(--surface))]',
+          ? 'border-primary/30 bg-primary/10'
+          : 'border-border bg-card',
       ].join(' ')}
     >
       <div className="flex items-center justify-between">
@@ -98,8 +98,8 @@ function SuspectCard({
             className={[
               'inline-flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold',
               isTop
-                ? 'bg-brand-600 text-white'
-                : 'bg-gray-100 dark:bg-gray-800 text-[rgb(var(--muted))]',
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-card text-muted-foreground',
             ].join(' ')}
           >
             {rank}
@@ -107,7 +107,7 @@ function SuspectCard({
           <div>
             <p className="text-sm font-semibold">{suspect.filename}</p>
             {suspect.mod_id && suspect.mod_id !== suspect.filename && (
-              <p className="text-xs text-[rgb(var(--muted))]">{suspect.mod_id}</p>
+              <p className="text-xs text-muted-foreground">{suspect.mod_id}</p>
             )}
             {suspect.is_dependent_of && (
               <span className="mt-1 inline-block rounded-md bg-amber-100 dark:bg-amber-900/30 px-2 py-0.5 text-xs font-medium text-amber-800 dark:text-amber-300">
@@ -116,20 +116,20 @@ function SuspectCard({
             )}
           </div>
         </div>
-        <span className="font-mono text-sm font-bold text-[rgb(var(--muted))]">
+        <span className="font-mono text-sm font-bold text-muted-foreground">
           {score}
         </span>
       </div>
       <BreakdownList breakdown={suspect.breakdown} />
       {isTop && action && (
-        <div className="mt-3 pt-3 border-t border-brand-200 dark:border-brand-800">
+        <div className="mt-3 pt-3 border-t border-primary/20">
           {action.kind === 'GuidedDisable' && (
             <button
               disabled={loading}
               onClick={onAction}
               className={[
                 'w-full rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                'bg-brand-600 text-white hover:bg-brand-700',
+                'bg-primary text-primary-foreground hover:bg-primary/90',
                 'disabled:opacity-50 disabled:cursor-not-allowed',
               ].join(' ')}
             >
@@ -142,7 +142,7 @@ function SuspectCard({
               onClick={onAction}
               className={[
                 'w-full rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                'bg-brand-600 text-white hover:bg-brand-700',
+                'bg-primary text-primary-foreground hover:bg-primary/90',
                 'disabled:opacity-50 disabled:cursor-not-allowed',
               ].join(' ')}
             >
@@ -168,7 +168,7 @@ function FixConfirmation({
   loading: boolean;
 }) {
   return (
-    <div className="rounded-xl border border-brand-300 dark:border-brand-700 bg-brand-50 dark:bg-brand-900/30 p-4">
+    <div className="rounded-xl border border-primary/30 bg-primary/10 p-4">
       <p className="text-sm font-semibold mb-3">
         Did that fix &quot;{filename}&quot;?
       </p>
@@ -189,7 +189,7 @@ function FixConfirmation({
           onClick={onStillCrashing}
           className={[
             'flex-1 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-            'bg-red-600 text-white hover:bg-red-700',
+            'bg-destructive text-destructive-foreground hover:bg-destructive/90',
             'disabled:opacity-50 disabled:cursor-not-allowed',
           ].join(' ')}
         >
@@ -231,8 +231,8 @@ function SuccessBanner({ message }: { message: string }) {
 /** Error banner. */
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <div className="rounded-xl border border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 p-4">
-      <p className="text-sm font-semibold text-red-800 dark:text-red-200">
+    <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4">
+      <p className="text-sm font-semibold text-destructive">
         {message}
       </p>
     </div>
@@ -243,7 +243,7 @@ function ErrorBanner({ message }: { message: string }) {
 function RuledOutList({ ruledOut }: { ruledOut: string[] }) {
   if (ruledOut.length === 0) return null;
   return (
-    <div className="mt-2 text-xs text-[rgb(var(--muted))]">
+    <div className="mt-2 text-xs text-muted-foreground">
       Already ruled out:{' '}
       <span className="font-medium">{ruledOut.join(', ')}</span>
     </div>
@@ -471,10 +471,10 @@ export function CrashInvestigator({
   if (loading && !result) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[rgb(var(--surface))] p-8 w-full max-w-lg mx-4">
+        <div className="rounded-2xl border border-border bg-card p-8 w-full max-w-lg mx-4">
           <div className="flex flex-col items-center gap-3">
-            <div className="h-8 w-8 animate-spin rounded-full border-2 border-brand-600 border-t-transparent" />
-            <p className="text-sm text-[rgb(var(--muted))]">Investigating crash…</p>
+            <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+            <p className="text-sm text-muted-foreground">Investigating crash…</p>
           </div>
         </div>
       </div>
@@ -484,12 +484,12 @@ export function CrashInvestigator({
   if (error) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-        <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[rgb(var(--surface))] p-8 w-full max-w-lg mx-4">
+        <div className="rounded-2xl border border-border bg-card p-8 w-full max-w-lg mx-4">
           <div className="flex items-start justify-between mb-4">
             <h2 className="text-lg font-bold">Crash Investigator</h2>
             <button
               onClick={onClose}
-              className="rounded-lg p-1 text-[rgb(var(--muted))] hover:text-[rgb(var(--text))] transition-colors"
+              className="rounded-lg p-1 text-muted-foreground hover:text-foreground transition-colors"
               aria-label="Close"
             >
               ✕
@@ -515,18 +515,18 @@ export function CrashInvestigator({
 
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto">
-      <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[rgb(var(--surface))] w-full max-w-lg mx-4 my-8">
+      <div className="rounded-2xl border border-border bg-card w-full max-w-lg mx-4 my-8">
         {/* Header */}
-        <div className="flex items-start justify-between p-6 pb-4 border-b border-gray-200 dark:border-gray-700">
+        <div className="flex items-start justify-between p-6 pb-4 border-b border-border">
           <div className="flex-1 min-w-0">
             <h2 className="text-lg font-bold">Crash Investigator</h2>
             {fingerprint && (
-              <p className="text-sm text-[rgb(var(--muted))] mt-1 truncate">
+              <p className="text-sm text-muted-foreground mt-1 truncate">
                 {fingerprint.exception_class}
               </p>
             )}
             {signature_name && (
-              <p className="text-xs text-brand-600 dark:text-brand-400 mt-0.5">
+              <p className="text-xs text-primary mt-0.5">
                 {signature_name}
               </p>
             )}
@@ -534,13 +534,13 @@ export function CrashInvestigator({
           <div className="flex items-center gap-2">
             <button
               onClick={() => setShowAiAssistant(true)}
-              className="rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-700"
+              className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
             >
               Ask AI Assistant
             </button>
             <button
               onClick={onClose}
-              className="rounded-lg p-1 text-[rgb(var(--muted))] hover:text-[rgb(var(--text))] transition-colors"
+              className="rounded-lg p-1 text-muted-foreground hover:text-foreground transition-colors"
               aria-label="Close"
             >
               ✕
@@ -565,7 +565,7 @@ export function CrashInvestigator({
               {/* Suspect list */}
               {suspects.length > 0 && (
                 <div className="space-y-3">
-                  <p className="text-xs font-semibold uppercase tracking-wider text-[rgb(var(--muted))]">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                     Suspects
                   </p>
                   {suspects.map((suspect, idx) => (
@@ -605,8 +605,8 @@ export function CrashInvestigator({
 
               {/* No suspects */}
               {suggested_action.kind === 'NoSuspects' && (
-                <div className="rounded-xl border border-gray-200 dark:border-gray-700 p-4">
-                  <p className="text-sm text-[rgb(var(--muted))]">
+                <div className="rounded-xl border border-border p-4">
+                  <p className="text-sm text-muted-foreground">
                     No suspects identified. The crash may not be mod-related. Use the manual log viewer for deeper inspection.
                   </p>
                 </div>

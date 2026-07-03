@@ -218,64 +218,66 @@ mod tests {
     #[test]
     fn test_serialize_generic_error() {
         let err = LauncherError::Generic {
-            code: "ERR_CUSTOM".to_string(),
-            message: "Something went wrong".to_string(),
+            code: "ERR_TEST".into(),
+            message: "test message".into(),
         };
         let val = serde_json::to_value(err).unwrap();
-        assert_eq!(val["code"], "ERR_CUSTOM");
-        assert_eq!(val["message"], "Something went wrong");
-        assert!(val["details"].is_null());
-        assert!(val["suggested_action"].is_null());
+        assert_eq!(val.get("code").unwrap().as_str().unwrap(), "ERR_TEST");
+        assert_eq!(val.get("message").unwrap().as_str().unwrap(), "test message");
+        assert_eq!(val.get("details"), Some(&serde_json::Value::Null));
+        assert_eq!(val.get("suggested_action"), Some(&serde_json::Value::Null));
     }
 
     #[test]
-    fn test_serialize_hash_mismatch() {
+    fn test_serialize_hash_mismatch_has_suggested_action() {
         let err = LauncherError::HashMismatch;
         let val = serde_json::to_value(err).unwrap();
-        assert!(val["suggested_action"].is_string());
+        assert!(val.get("suggested_action").unwrap().as_str().is_some());
     }
 
     #[test]
-    fn test_serialize_mojang_not_found() {
+    fn test_serialize_mojang_not_found_has_suggested_action() {
         let err = LauncherError::MojangNotFound;
         let val = serde_json::to_value(err).unwrap();
-        assert!(val["suggested_action"].is_string());
+        assert!(val.get("suggested_action").unwrap().as_str().is_some());
     }
 
     #[test]
-    fn test_serialize_network_offline() {
+    fn test_serialize_network_offline_has_suggested_action() {
         let err = LauncherError::NetworkOffline;
         let val = serde_json::to_value(err).unwrap();
-        assert!(val["suggested_action"].is_string());
+        assert!(val.get("suggested_action").unwrap().as_str().is_some());
     }
 
     #[test]
-    fn test_serialize_auth_required() {
+    fn test_serialize_auth_required_has_suggested_action() {
         let err = LauncherError::AuthRequired;
         let val = serde_json::to_value(err).unwrap();
-        assert!(val["suggested_action"].is_string());
+        assert!(val.get("suggested_action").unwrap().as_str().is_some());
     }
 
     #[test]
     fn test_serialize_local_state_failed() {
         let err = LauncherError::LocalStateFailed;
         let val = serde_json::to_value(err).unwrap();
-        assert!(val["details"].is_null());
-        assert!(val["suggested_action"].is_null());
+        assert!(val.get("code").unwrap().as_str().is_some());
+        assert_eq!(val.get("details"), Some(&serde_json::Value::Null));
+        assert_eq!(val.get("suggested_action"), Some(&serde_json::Value::Null));
     }
 
     #[test]
-    fn test_serialize_roundtrip_code() {
+    fn test_serialize_roundtrip_preserves_code() {
         let err = LauncherError::Generic {
-            code: "ERR_ROUNDTRIP".to_string(),
-            message: "test".to_string(),
+            code: "ERR_RT".into(),
+            message: "roundtrip".into(),
         };
         let val = serde_json::to_value(err).unwrap();
-        assert_eq!(val["code"], "ERR_ROUNDTRIP");
+        let code: &str = val.get("code").unwrap().as_str().unwrap();
+        assert_eq!(code, "ERR_RT");
     }
 
     #[test]
-    fn test_all_variants_no_panic() {
+    fn test_all_variants_serialize_without_panic() {
         let variants: Vec<LauncherError> = vec![
             LauncherError::NetworkOffline,
             LauncherError::RegistryDownloadFailed,
@@ -304,12 +306,13 @@ mod tests {
             LauncherError::McpDenied,
             LauncherError::McpUnauthorized,
             LauncherError::Generic {
-                code: "TEST".to_string(),
-                message: "test".to_string(),
+                code: "ERR_X".into(),
+                message: "x".into(),
             },
         ];
         for err in variants {
-            let _val = serde_json::to_value(&err).unwrap();
+            let val = serde_json::to_value(err).unwrap();
+            assert!(val.get("code").is_some());
         }
     }
 }

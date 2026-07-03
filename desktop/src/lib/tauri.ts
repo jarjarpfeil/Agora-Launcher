@@ -687,3 +687,54 @@ export const aiGetModels = () =>
 
 export const aiGetDefaultModel = () =>
   invoke<string>('ai_get_default_model');
+
+// ---------------------------------------------------------------------------
+// Phase 5: MSA auth + GC architect
+// ---------------------------------------------------------------------------
+
+export interface MsaCredentials {
+  username: string;
+  uuid: string;
+  access_token: string;
+  refresh_token: string;
+  expires: string;
+}
+
+export type GcProfile = 'low_latency' | 'high_efficiency' | 'manual';
+
+export interface GcResult {
+  profile: GcProfile;
+  jvm_args: string;
+  heap_mb: number;
+  total_ram_mb: number;
+  cpu_threads: number;
+  recommended: boolean;
+}
+
+export const msaBeginLogin = () =>
+  invoke<{ auth_uri: string }>('msa_begin_login');
+
+export const msaFinishLogin = (code: string) =>
+  invoke<MsaCredentials>('msa_finish_login', { code });
+
+export const msaGetStatus = () =>
+  invoke<MsaCredentials | null>('msa_get_status');
+
+export const msaRefresh = () =>
+  invoke<MsaCredentials>('msa_refresh');
+
+export const msaLogout = () =>
+  invoke<void>('msa_logout');
+
+export const computeGcArgs = (
+  javaVersion: number,
+  requestedHeapMb: number,
+  manualArgs: string,
+  overrideProfile?: GcProfile,
+) =>
+  invoke<GcResult>('compute_gc_args', {
+    javaVersion,
+    requestedHeapMb,
+    manualArgs,
+    overrideProfile,
+  });

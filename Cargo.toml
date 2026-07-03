@@ -40,6 +40,11 @@ anyhow = "1"
 dirs = "5"
 ed25519-dalek = { version = "2", features = ["alloc"] }
 async-trait = "0.1"
+p256 = { version = "0.13", features = ["ecdsa"] }
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+sysinfo = "0.30"
+rand = "0.8"
 
 [profile.release]
 panic = "abort"

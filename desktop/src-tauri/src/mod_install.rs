@@ -1595,3 +1595,114 @@ async fn import_agora_pack(app: &tauri::AppHandle, source_path: &str) -> Launche
     Ok(instance_id)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Host allowlist (SSRF prevention) ---
+
+    #[test]
+    fn test_allowed_host_github() {
+        assert!(is_mod_download_host("github.com"));
+        assert!(is_mod_download_host("raw.githubusercontent.com"));
+        assert!(is_mod_download_host("objects.githubusercontent.com"));
+        assert!(is_mod_download_host("api.github.com"));
+    }
+
+    #[test]
+    fn test_allowed_host_modrinth() {
+        assert!(is_mod_download_host("cdn.modrinth.com"));
+        assert!(is_mod_download_host("api.modrinth.com"));
+    }
+
+    #[test]
+    fn test_disallowed_host_localhost() {
+        assert!(!is_mod_download_host("localhost"));
+        assert!(!is_mod_download_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_disallowed_host_internal_ip() {
+        // AWS / GCP / Azure metadata endpoints — must never be reachable.
+        assert!(!is_mod_download_host("169.254.169.254"));
+        assert!(!is_mod_download_host("metadata.google.internal"));
+    }
+
+    #[test]
+    fn test_disallowed_host_random_external() {
+        assert!(!is_mod_download_host("evil.example.com"));
+        assert!(!is_mod_download_host("attacker.net"));
+    }
+
+    #[test]
+    fn test_disallowed_host_empty() {
+        // Empty string and whitespace-only should not accidentally match.
+        assert!(!is_mod_download_host(""));
+        assert!(!is_mod_download_host("   "));
+    }
+
+    // --- Filename / path traversal validation ---
+
+    #[test]
+    fn test_filename_valid() {
+        assert_eq!(
+            safe_zip_entry_name("my-mod-1.0.jar"),
+            Some("mods/my-mod-1.0.jar".to_string())
+        );
+        assert_eq!(
+            safe_zip_entry_name("fabric-api-0.92.0.jar"),
+            Some("mods/fabric-api-0.92.0.jar".to_string())
+        );
+    }
+
+    #[test]
+    fn test_filename_path_traversal() {
+        assert!(safe_zip_entry_name("../../evil.jar").is_none());
+        assert!(safe_zip_entry_name("../evil.jar").is_none());
+        assert!(safe_zip_entry_name("../../../etc/passwd").is_none());
+    }
+
+    #[test]
+    fn test_filename_absolute_path() {
+        assert!(safe_zip_entry_name("/etc/passwd").is_none());
+        assert!(safe_zip_entry_name("C:\\Windows\\system32\\evil.jar").is_none());
+    }
+
+    #[test]
+    fn test_filename_special_cases() {
+        // Dot, dot-dot, NUL, and separator characters must all be rejected.
+        assert!(safe_zip_entry_name("").is_none());
+        assert!(safe_zip_entry_name(".").is_none());
+        assert!(safe_zip_entry_name("..").is_none());
+        assert!(safe_zip_entry_name("bad\0name.jar").is_none());
+        assert!(safe_zip_entry_name("foo/bar.jar").is_none());
+        assert!(safe_zip_entry_name("foo\\bar.jar").is_none());
+    }
+
+    // --- Version-from-filename parser ---
+
+    #[test]
+    fn test_parse_version_matches() {
+        let result = parse_version_from_filename(
+            "fabric-api-0.92.0+1.20.1.jar",
+            "1.20.1",
+            "fabric",
+        );
+        assert_eq!(
+            result,
+            Some(("1.20.1".to_string(), "fabric".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_version_no_match() {
+        // Loader string not present in filename.
+        let result = parse_version_from_filename(
+            "some-random-mod.jar",
+            "1.20.1",
+            "fabric",
+        );
+        assert!(result.is_none());
+    }
+}
+
