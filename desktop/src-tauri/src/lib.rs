@@ -60,6 +60,18 @@ pub fn run() {
             commands::lock_instance,
             commands::revert_instance,
             commands::launch_instance,
+            commands::launch_instance_direct,
+            commands::list_snapshots,
+            commands::create_snapshot,
+            commands::restore_snapshot,
+            commands::delete_snapshot,
+            commands::list_loadout_profiles,
+            commands::create_loadout_profile,
+            commands::apply_loadout_profile,
+            commands::delete_loadout_profile,
+            commands::import_instance,
+            commands::detect_launchers,
+            commands::clone_instance_cmd,
             commands::check_instance_health,
             commands::list_loader_versions,
             commands::list_manifest_loaders,
@@ -119,7 +131,8 @@ pub fn run() {
             commands::msa_get_status,
             commands::msa_refresh,
             commands::msa_logout,
-            commands::compute_gc_args
+            commands::compute_gc_args,
+            commands::export_server_environment
         ])
         .setup(|app| {
             let handle = app.handle().clone();

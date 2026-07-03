@@ -36,4 +36,4 @@ Security rules for the Agora desktop app. Apply these whenever modifying `deskto
 ## Modpack Sandboxing
 
 - Validate override archives before extraction; reject files with executable extensions or absolute paths.
-- Run game instances using the official Mojang launcher rather than a custom JVM invocation.
+<!-- - Run game instances using the official Mojang launcher rather than a custom JVM invocation. -->

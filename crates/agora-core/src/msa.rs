@@ -809,7 +809,10 @@ pub async fn finish_login(
             });
         }
     } else if !flow.state.is_empty() {
-        eprintln!("[agora-core] WARNING: finish_login called without state parameter; skipping CSRF check");
+        return Err(LauncherError::Generic {
+            code: "ERR_MSA_STATE_MISMATCH".into(),
+            message: "OAuth state parameter missing — possible CSRF attack. Login aborted.".into(),
+        });
     }
 
     let key = DeviceTokenKey::from_json(&flow.key_json)?;

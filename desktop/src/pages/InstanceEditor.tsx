@@ -17,6 +17,15 @@ import {
   unlockInstance,
   lockInstance,
   revertInstance,
+  listSnapshots,
+  createSnapshot,
+  restoreSnapshot,
+  deleteSnapshot,
+  listLoadoutProfiles,
+  createLoadoutProfile,
+  applyLoadoutProfile,
+  deleteLoadoutProfile,
+  importInstance,
   type InstanceDetail,
   type RegistryItem,
   type CategoryInfo,
@@ -24,6 +33,8 @@ import {
   type SortOption,
   type PackModRow,
   type DependentInfo,
+  type Snapshot,
+  type LoadoutProfile,
 } from '../lib/tauri';
 
 const SORTS: { label: string; value: SortOption }[] = [
@@ -43,6 +54,27 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const [status, setStatus] = useState<string | null>(null);
   const [removeBusy, setRemoveBusy] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
+
+  // Sub-sidebar active tab
+  const [activeTab, setActiveTab] = useState<'mods' | 'snapshots' | 'loadout-profiles' | 'import'>('mods');
+
+  // Snapshots state (Phase 6)
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [snapshotLabelInput, setSnapshotLabelInput] = useState('');
+  const [snapshotBusy, setSnapshotBusy] = useState<string | null>(null);
+  const [confirmDeleteSnapshot, setConfirmDeleteSnapshot] = useState<string | null>(null);
+
+  // Loadout profiles state (Phase 6)
+  const [profiles, setProfiles] = useState<LoadoutProfile[]>([]);
+  const [profileNameInput, setProfileNameInput] = useState('');
+  const [profileBusy, setProfileBusy] = useState<string | null>(null);
+  const [confirmDeleteProfile, setConfirmDeleteProfile] = useState<string | null>(null);
+
+  // Import state (Phase 6)
+  const [symlinkSaves, setSymlinkSaves] = useState(true);
+  const [importBusy, setImportBusy] = useState(false);
+
+
 
   // Removal plan prompt state
   const [removePlanTarget, setRemovePlanTarget] = useState<{ filename: string; dependents: DependentInfo[] } | null>(null);
@@ -98,6 +130,36 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     })();
     return () => { cancelled = true; };
   }, []);
+
+  // Load snapshots when tab becomes active
+  useEffect(() => {
+    if (activeTab !== 'snapshots') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await listSnapshots(instanceId);
+        if (!cancelled) setSnapshots(result);
+      } catch (e) {
+        if (!cancelled) setError(formatError(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [instanceId, activeTab]);
+
+  // Load loadout profiles when tab becomes active
+  useEffect(() => {
+    if (activeTab !== 'loadout-profiles') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await listLoadoutProfiles(instanceId);
+        if (!cancelled) setProfiles(result);
+      } catch (e) {
+        if (!cancelled) setError(formatError(e));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [instanceId, activeTab]);
 
   const handleRemove = async (filename: string) => {
     if (!confirm(`Remove "${filename}" from this instance?`)) return;
@@ -529,6 +591,26 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         )}
       </section>
 
+      {/* Sub-sidebar tabs */}
+      <div className="flex border-b border-border gap-0">
+        {(['mods', 'snapshots', 'loadout-profiles', 'import'] as const).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={[
+              'px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px',
+              activeTab === tab
+                ? 'border-primary text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground',
+            ].join(' ')}
+          >
+            {tab === 'mods' ? 'Mods' : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : 'Import'}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'mods' && (
+        <>
       {/* Pack install progress */}
       {packInstallOpen && (
         <section className="rounded-xl border border-border bg-card p-4 space-y-3">
@@ -883,6 +965,295 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
           onConfirm={handleRemoveConfirm}
           onCancel={() => setRemovePlanTarget(null)}
         />
+      )}
+        </>
+      )}
+
+      {activeTab === 'snapshots' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold text-sm">Snapshots</h3>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={snapshotLabelInput}
+                onChange={(e) => setSnapshotLabelInput(e.target.value)}
+                placeholder="Optional label…"
+                className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm w-48"
+              />
+              <button
+                onClick={async () => {
+                  setError(null);
+                  try {
+                    await createSnapshot(instanceId, snapshotLabelInput || undefined);
+                    const result = await listSnapshots(instanceId);
+                    setSnapshots(result);
+                    setSnapshotLabelInput('');
+                  } catch (e) {
+                    setError(formatError(e));
+                  }
+                }}
+                className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 whitespace-nowrap"
+              >
+                Create Snapshot
+              </button>
+            </div>
+          </div>
+
+          {snapshots.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No snapshots yet. Create one to save a restore point.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {snapshots.map((snap) => (
+                <div key={snap.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm">
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium block">{snap.label ?? 'Unnamed'}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {snap.created_at} · {snap.file_count} file{snap.file_count !== 1 ? 's' : ''}
+                    </span>
+                  </div>
+                  <div className="flex gap-2 ml-3">
+                    <button
+                      onClick={async () => {
+                        setSnapshotBusy(snap.id);
+                        setError(null);
+                        try {
+                          await restoreSnapshot(instanceId, snap.id);
+                          const result = await listSnapshots(instanceId);
+                          setSnapshots(result);
+                          setStatus('Snapshot restored.');
+                        } catch (e) {
+                          setError(formatError(e));
+                        } finally {
+                          setSnapshotBusy(null);
+                        }
+                      }}
+                      disabled={snapshotBusy === snap.id}
+                      className="text-xs text-foreground hover:underline disabled:opacity-50"
+                    >
+                      {snapshotBusy === snap.id ? 'Restoring…' : 'Restore'}
+                    </button>
+                    {confirmDeleteSnapshot === snap.id ? (
+                      <div className="flex gap-1">
+                        <button
+                          onClick={async () => {
+                            setSnapshotBusy(snap.id);
+                            setError(null);
+                            try {
+                              await deleteSnapshot(instanceId, snap.id);
+                              const result = await listSnapshots(instanceId);
+                              setSnapshots(result);
+                              setConfirmDeleteSnapshot(null);
+                            } catch (e) {
+                              setError(formatError(e));
+                            } finally {
+                              setSnapshotBusy(null);
+                            }
+                          }}
+                          className="text-xs text-destructive font-medium"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteSnapshot(null)}
+                          className="text-xs text-muted-foreground"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteSnapshot(snap.id)}
+                        className="text-xs text-destructive hover:underline"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {activeTab === 'loadout-profiles' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="font-semibold text-sm">Loadout Profiles</h3>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={profileNameInput}
+                onChange={(e) => setProfileNameInput(e.target.value)}
+                placeholder="Profile name…"
+                className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm w-48"
+              />
+              <button
+                onClick={async () => {
+                  if (!profileNameInput.trim()) return;
+                  setError(null);
+                  try {
+                    await createLoadoutProfile(instanceId, profileNameInput.trim());
+                    const result = await listLoadoutProfiles(instanceId);
+                    setProfiles(result);
+                    setProfileNameInput('');
+                    setStatus(`Profile "${profileNameInput.trim()}" created.`);
+                  } catch (e) {
+                    setError(formatError(e));
+                  }
+                }}
+                className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 whitespace-nowrap"
+              >
+                Create Profile
+              </button>
+            </div>
+          </div>
+
+          <button
+            onClick={async () => {
+              setError(null);
+              try {
+                await createLoadoutProfile(instanceId, `Current Setup ${new Date().toLocaleString()}`);
+                const result = await listLoadoutProfiles(instanceId);
+                setProfiles(result);
+                setStatus('Current mod setup saved as profile.');
+              } catch (e) {
+                setError(formatError(e));
+              }
+            }}
+            className="rounded-lg border border-input bg-background hover:bg-accent px-4 py-2 text-sm font-medium w-full"
+          >
+            + Save Current as Profile
+          </button>
+
+          {profiles.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No loadout profiles yet. Create one or save the current mod setup.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {profiles.map((prof) => (
+                <div key={prof.name} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm">
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium block">{prof.name}</span>
+                    <span className="text-xs text-muted-foreground">{prof.enabled_mods.length} mod{prof.enabled_mods.length !== 1 ? 's' : ''}</span>
+                  </div>
+                  <div className="flex gap-2 ml-3">
+                    <button
+                      onClick={async () => {
+                        setProfileBusy(prof.name);
+                        setError(null);
+                        try {
+                          await applyLoadoutProfile(instanceId, prof.name);
+                          const result = await listLoadoutProfiles(instanceId);
+                          setProfiles(result);
+                          setStatus(`Profile "${prof.name}" applied.`);
+                        } catch (e) {
+                          setError(formatError(e));
+                        } finally {
+                          setProfileBusy(null);
+                        }
+                      }}
+                      disabled={profileBusy === prof.name}
+                      className="text-xs text-foreground hover:underline disabled:opacity-50"
+                    >
+                      {profileBusy === prof.name ? 'Applying…' : 'Apply'}
+                    </button>
+                    {confirmDeleteProfile === prof.name ? (
+                      <div className="flex gap-1">
+                        <button
+                          onClick={async () => {
+                            setProfileBusy(prof.name);
+                            setError(null);
+                            try {
+                              await deleteLoadoutProfile(instanceId, prof.name);
+                              const result = await listLoadoutProfiles(instanceId);
+                              setProfiles(result);
+                              setConfirmDeleteProfile(null);
+                            } catch (e) {
+                              setError(formatError(e));
+                            } finally {
+                              setProfileBusy(null);
+                            }
+                          }}
+                          className="text-xs text-destructive font-medium"
+                        >
+                          Confirm
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteProfile(null)}
+                          className="text-xs text-muted-foreground"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteProfile(prof.name)}
+                        className="text-xs text-destructive hover:underline"
+                      >
+                        Delete
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {activeTab === 'import' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-4">
+          <h3 className="font-semibold text-sm">Import from file</h3>
+          <p className="text-xs text-muted-foreground">
+            Import a Modrinth pack (.mrpack) or a ZIP archive as a new instance.
+          </p>
+          <div className="flex items-center justify-between">
+            <span className="text-sm">Symlink saves (recommended)</span>
+            <button
+              onClick={() => setSymlinkSaves(!symlinkSaves)}
+              className={[
+                'relative inline-flex h-5 w-9 items-center rounded-full transition-colors',
+                symlinkSaves ? 'bg-primary' : 'bg-border',
+              ].join(' ')}
+            >
+              <span
+                className={[
+                  'inline-block h-3.5 w-3.5 rounded-full bg-primary-foreground transition-transform',
+                  symlinkSaves ? 'translate-x-[18px]' : 'translate-x-[3px]',
+                ].join(' ')}
+              />
+            </button>
+          </div>
+          <button
+            onClick={async () => {
+              setImportBusy(true);
+              setError(null);
+              try {
+                const path = await pickOpenFile('Import Instance', ['mrpack', 'zip']);
+                if (path === null) { setImportBusy(false); return; }
+                const result = await importInstance(path, symlinkSaves);
+                if (onOpenInstanceEditor) {
+                  onOpenInstanceEditor(result.instance_id);
+                } else {
+                  setStatus(`Imported "${result.name}" (MC ${result.minecraft_version}).`);
+                }
+              } catch (e) {
+                setError(formatError(e));
+              } finally {
+                setImportBusy(false);
+              }
+            }}
+            disabled={importBusy}
+            className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 w-full"
+          >
+            {importBusy ? 'Importing…' : 'Select File & Import'}
+          </button>
+        </section>
       )}
     </div>
   );

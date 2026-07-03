@@ -186,6 +186,9 @@ export const revertInstance = (instanceId: string) =>
 export const launchInstance = (instanceId: string) =>
   invoke<void>('launch_instance', { instanceId });
 
+export const launchInstanceDirect = (instanceId: string) =>
+  invoke<number>('launch_instance_direct', { instanceId });
+
 export type HealthScore = 'green' | 'yellow' | 'red';
 
 export interface HealthWarning {
@@ -738,3 +741,94 @@ export const computeGcArgs = (
     manualArgs,
     overrideProfile,
   });
+
+// ---------------------------------------------------------------------------
+// Phase 6: Instance lifecycle
+// ---------------------------------------------------------------------------
+
+export interface Snapshot {
+  id: string;
+  label: string | null;
+  created_at: string;
+  file_count: number;
+  size_estimate: number;
+}
+
+export interface LoadoutProfile {
+  name: string;
+  enabled_mods: string[];
+  created_at: string;
+}
+
+export interface ImportResult {
+  instance_id: string;
+  name: string;
+  minecraft_version: string;
+  loader: string;
+  loader_version: string;
+  imported_mods: number;
+  linked_saves: boolean;
+}
+
+export interface DetectedLauncher {
+  launcher_type: string;
+  instances_dir: string;
+  instance_count: number;
+}
+
+export interface ClonePrefs {
+  copy_saves: boolean;
+  copy_mods: boolean;
+  copy_resource_packs: boolean;
+  copy_shader_packs: boolean;
+  copy_screenshots: boolean;
+  copy_config: boolean;
+  copy_servers: boolean;
+  copy_options: boolean;
+  use_hard_links: boolean;
+  use_sym_links: boolean;
+}
+
+export interface ExportResult {
+  total_mods: number;
+  server_mods: number;
+  removed_client_only: string[];
+  server_jar_downloaded: boolean;
+  start_scripts_created: boolean;
+}
+
+export const listSnapshots = (instanceId: string) =>
+  invoke<Snapshot[]>('list_snapshots', { instanceId });
+
+export const createSnapshot = (instanceId: string, label?: string) =>
+  invoke<Snapshot>('create_snapshot', { instanceId, label });
+
+export const restoreSnapshot = (instanceId: string, snapshotId: string) =>
+  invoke<void>('restore_snapshot', { instanceId, snapshotId });
+
+export const deleteSnapshot = (instanceId: string, snapshotId: string) =>
+  invoke<void>('delete_snapshot', { instanceId, snapshotId });
+
+export const listLoadoutProfiles = (instanceId: string) =>
+  invoke<LoadoutProfile[]>('list_loadout_profiles', { instanceId });
+
+export const createLoadoutProfile = (instanceId: string, name: string) =>
+  invoke<LoadoutProfile>('create_loadout_profile', { instanceId, name });
+
+export const applyLoadoutProfile = (instanceId: string, profileName: string) =>
+  invoke<void>('apply_loadout_profile', { instanceId, profileName });
+
+export const deleteLoadoutProfile = (instanceId: string, profileName: string) =>
+  invoke<void>('delete_loadout_profile', { instanceId, profileName });
+
+export const importInstance = (sourcePath: string, symlinkSaves: boolean) =>
+  invoke<ImportResult>('import_instance', { sourcePath, symlinkSaves });
+
+export const detectLaunchers = () =>
+  invoke<DetectedLauncher[]>('detect_launchers');
+
+export const cloneInstance = (instanceId: string, newName: string, prefs: ClonePrefs) =>
+  invoke<string>('clone_instance_cmd', { instanceId, newName, prefs });
+
+export const exportServerEnvironment = (instanceId: string, destPath: string) =>
+  invoke<ExportResult>('export_server_environment', { instanceId, destPath });

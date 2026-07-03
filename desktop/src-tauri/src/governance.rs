@@ -1,5 +1,5 @@
-//! Governance network actions: live triage-poll fetching and comment-flag
-//! submission with rate limiting (§5.5 / §5.6).
+﻿//! Governance network actions: live triage-poll fetching and comment-flag
+//! submission with rate limiting (Â§5.5 / Â§5.6).
 //!
 //! Pure logic is in `agora_core::governance`. This module provides Tauri-coupled
 //! wrappers that resolve `AppHandle` to connections / auth tokens.
@@ -19,7 +19,7 @@ use tauri::AppHandle;
 /// Fetch the live triage poll for `mod_id` from GitHub Discussions.
 ///
 /// Searches for a "[Community Triage]" discussion matching the mod_id, then
-/// tallies reaction votes (thumbs-up/+1/hooray → keep, thumbs-down/-1 → remove).
+/// tallies reaction votes (thumbs-up/+1/hooray â†’ keep, thumbs-down/-1 â†’ remove).
 pub async fn fetch_triage_poll(app: &AppHandle, mod_id: String) -> LauncherResult<TriagePoll> {
     let token = auth::get_token(app).ok_or(LauncherError::AuthRequired)?;
 
@@ -351,7 +351,8 @@ pub async fn flag_review(
 // --- Rate limit status ---
 
 /// Return the current flag rate-limit status for the local state database.
-pub fn get_flag_rate_limit(app: &AppHandle) -> LauncherResult<db::FlagRateLimit> {
+pub fn get_flag_rate_limit(app: &AppHandle) -> LauncherResult<agora_core::db::FlagRateLimit> {
     let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
     agora_core::governance::get_flag_rate_limit(&conn)
 }
+

@@ -1,4 +1,4 @@
-use crate::ai_assistant::{self, ChatMessage, ChatResponse};
+﻿use crate::ai_assistant::{self, ChatMessage, ChatResponse};
 use crate::auth::{DeviceFlowResponse, GithubProfile};
 use crate::crash_diagnostics::{self, CrashReportInfo, CrashTriageResult};
 use crate::crash_investigator;
@@ -14,6 +14,7 @@ use crate::modrinth_raw;
 use crate::paths;
 use crate::registry::{self, AuditLogEntry, CategoryInfo, ModReview, PackModRow, RegistryItem, SortOption, UnderReviewItem};
 use crate::state::LauncherState;
+use std::path::{Path, PathBuf};
 use tauri::Manager;
 
 /// Current status of the MCP server.
@@ -65,7 +66,7 @@ pub async fn browse_items(
 }
 
 /// "For You" recommendations: boost uninstalled mods whose categories overlap
-/// with the user's installed mods (§6.2). Honors the user's selected MC version
+/// with the user's installed mods (Â§6.2). Honors the user's selected MC version
 /// and loader compatibility filters when supplied.
 #[tauri::command]
 pub async fn for_you_items(
@@ -148,7 +149,7 @@ pub async fn list_pack_mods(
     })?
 }
 
-/// List audit log entries from the registry DB (§4.6).
+/// List audit log entries from the registry DB (Â§4.6).
 #[tauri::command]
 pub async fn list_audit_log(
     app: tauri::AppHandle,
@@ -212,7 +213,7 @@ pub async fn delete_instance(
         .map_err(|_| LauncherError::LocalStateFailed)?
 }
 
-/// Unlock a locked pack instance for manual mod management (§6.5).
+/// Unlock a locked pack instance for manual mod management (Â§6.5).
 #[tauri::command]
 pub async fn unlock_instance(
     app: tauri::AppHandle,
@@ -254,6 +255,261 @@ pub async fn launch_instance(
         .map_err(|_| LauncherError::LocalStateFailed)?
 }
 
+/// Direct Java spawn — Agora owns the launch process instead of delegating to Mojang launcher.
+#[tauri::command]
+pub async fn launch_instance_direct(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+) -> LauncherResult<u32> {
+    use tauri::Emitter;
+    use tokio::io::AsyncBufReadExt;
+
+    let sanitized = paths::sanitize_id(&instance_id);
+
+    let conn = db::local_state_connection(&app)
+        .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?;
+    let row = db::get_instance(&conn, &sanitized)
+        .map_err(|_| LauncherError::LocalStateFailed)?
+        .ok_or(LauncherError::LaunchFailed)?;
+    drop(conn);
+
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_INSTANCE_PATH".into(), message: e.to_string() })?;
+
+    let mc_version = match row.loader.as_str() {
+        "fabric" => format!("fabric-loader-{}-{}", row.loader_version, row.minecraft_version),
+        "quilt" => format!("quilt-loader-{}-{}", row.loader_version, row.minecraft_version),
+        "neoforge" => format!("neoforge-{}", row.loader_version),
+        "forge" => format!("forge-{}-{}", row.minecraft_version, row.loader_version),
+        _ => format!("{}-{}-{}", row.loader, row.loader_version, row.minecraft_version),
+    };
+
+    let java_paths = agora_core::java::detect_installed_jres();
+    let java_path: PathBuf = {
+        let conn2 = db::local_state_connection(&app)
+            .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?;
+        let user_override = db::get_setting(&conn2, "java_path")
+            .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        drop(conn2);
+        if let Some(p) = user_override {
+            PathBuf::from(p)
+        } else if let Some(inst) = java_paths.first() {
+            inst.path.clone()
+        } else {
+            return Err(LauncherError::Generic {
+                code: "ERR_NO_JAVA".into(),
+                message: "No Java installation found. Install Java 17+ or set the path in Settings.".into(),
+            });
+        }
+    };
+
+    let heap_mb = row.jvm_memory_mb.max(1024);
+    let gc = agora_core::gc::compute_gc(
+        java_paths.first().map(|j| j.version).unwrap_or(21),
+        heap_mb,
+        &row.jvm_custom_args,
+        None,
+    );
+
+    let assets_dir = instance_dir.parent().unwrap_or(&instance_dir).join("assets");
+
+    let (username, access_token, uuid, user_type) =
+        if let Ok(Some(creds)) = agora_core::msa::load_credentials() {
+            (creds.username, creds.access_token, creds.uuid, "msa".to_string())
+        } else {
+            ("Player".to_string(), "0".to_string(), "00000000-0000-0000-0000-000000000000".to_string(), "mojang".to_string())
+        };
+
+    let opts = agora_core::launch::LaunchOptions {
+        java_path: java_path.clone(),
+        mc_version,
+        game_dir: instance_dir.clone(),
+        assets_dir,
+        username,
+        access_token,
+        uuid,
+        user_type,
+        jvm_args: gc.jvm_args,
+        mc_args_extra: vec![],
+        loader: None,
+    };
+
+    let client = reqwest::Client::new();
+    let manifest = agora_core::launch::fetch_version_manifest(&client).await?;
+
+    let version_ref = manifest
+        .versions
+        .iter()
+        .find(|v| v.id == opts.mc_version)
+        .ok_or(LauncherError::VersionNotFound)?;
+
+    let version_info = agora_core::launch::fetch_version_info(&client, &version_ref.url).await?;
+
+    let cache_dir = dirs::data_local_dir()
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_NO_DATA_DIR".into(),
+            message: "Could not determine local data directory.".into(),
+        })?
+        .join("agora")
+        .join("lib_cache");
+
+    let filtered = agora_core::launch::filter_libraries(&version_info.libraries);
+
+    let natives_subdir = match std::env::consts::OS {
+        "windows" => "natives/windows",
+        "macos" => "natives/osx",
+        _ => "natives/linux",
+    };
+    let natives_dir = instance_dir.join(natives_subdir);
+    std::fs::create_dir_all(&natives_dir).map_err(|e| LauncherError::Generic {
+        code: "ERR_NATIVES_DIR".into(),
+        message: format!("Failed to create natives directory: {e}"),
+    })?;
+
+    for lib in &filtered {
+        if let Some(downloads) = &lib.downloads {
+            if let Some(artifact) = &downloads.artifact {
+                let cache_path = cache_dir.join(&artifact.path);
+                download_lib(&client, &artifact.url, &cache_path, artifact.sha1.as_deref()).await?;
+            }
+        }
+    }
+
+    let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+    let rel_cp = agora_core::launch::build_classpath(&version_info.libraries);
+    let abs_cp = if rel_cp.is_empty() {
+        String::new()
+    } else {
+        rel_cp
+            .split(sep)
+            .map(|p| {
+                if p.is_empty() {
+                    p.to_string()
+                } else {
+                    cache_dir.join(p).to_string_lossy().to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(sep)
+    };
+
+    let full_args = agora_core::launch::build_launch_command(&opts, &version_info, &abs_cp);
+
+    let mut child = tokio::process::Command::new(&opts.java_path)
+        .args(&full_args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .current_dir(&opts.game_dir)
+        .spawn()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_LAUNCH_SPAWN".into(),
+            message: e.to_string(),
+        })?;
+
+    let pid = child.id().unwrap_or(0);
+
+    let app1 = app.clone();
+    if let Some(stdout) = child.stdout.take() {
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let sanitized = agora_core::log_sanitizer::sanitize_log(&line);
+                let _ = app1.emit("game-log", serde_json::json!({"line": sanitized, "stream": "stdout"}));
+            }
+        });
+    }
+
+    let app2 = app.clone();
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let sanitized = agora_core::log_sanitizer::sanitize_log(&line);
+                let _ = app2.emit("game-log", serde_json::json!({"line": sanitized, "stream": "stderr"}));
+            }
+        });
+    }
+
+    let app3 = app.clone();
+    let inst_id = instance_id.clone();
+    tokio::spawn(async move {
+        let status = child.wait().await;
+        let exit_code = status.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);
+        let _ = app3.emit("game-exited", serde_json::json!({
+            "instance_id": inst_id,
+            "exit_code": exit_code
+        }));
+
+        if let Some(win) = app3.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+
+        if exit_code != 0 {
+            let _ = app3.emit("crash-detected", serde_json::json!({
+                "instance_id": inst_id,
+                "exit_code": exit_code
+            }));
+        }
+    });
+
+    Ok(pid)
+}
+
+async fn download_lib(
+    client: &reqwest::Client,
+    url: &str,
+    cache_path: &Path,
+    expected_sha1: Option<&str>,
+) -> LauncherResult<PathBuf> {
+    if cache_path.is_file() {
+        if let Some(sha1) = expected_sha1 {
+            if let Ok(data) = std::fs::read(cache_path) {
+                use sha1::Digest;
+                let actual = hex::encode(sha1::Sha1::digest(&data));
+                if actual == sha1 {
+                    return Ok(cache_path.to_path_buf());
+                }
+            }
+        } else {
+            return Ok(cache_path.to_path_buf());
+        }
+    }
+
+    if let Some(parent) = cache_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| LauncherError::Generic {
+            code: "ERR_CACHE_CREATE_DIR".into(),
+            message: format!("Failed to create cache directory {}: {e}", parent.display()),
+        })?;
+    }
+
+    let resp = client.get(url).send().await.map_err(|_| LauncherError::NetworkOffline)?;
+    if !resp.status().is_success() {
+        return Err(LauncherError::Generic {
+            code: "ERR_DOWNLOAD_HTTP".into(),
+            message: format!("Download {url} returned HTTP {}", resp.status()),
+        });
+    }
+    let data = resp.bytes().await.map_err(|_| LauncherError::NetworkOffline)?.to_vec();
+
+    if let Some(sha1) = expected_sha1 {
+        use sha1::Digest;
+        let actual = hex::encode(sha1::Sha1::digest(&data));
+        if actual != sha1 {
+            return Err(LauncherError::HashMismatch);
+        }
+    }
+
+    std::fs::write(cache_path, &data).map_err(|e| LauncherError::Generic {
+        code: "ERR_CACHE_WRITE".into(),
+        message: format!("Failed to write cache file {}: {e}", cache_path.display()),
+    })?;
+
+    Ok(cache_path.to_path_buf())
+}
+
 /// Run the pre-launch health scan on an instance. Returns a [`HealthReport`]
 /// with blockers (must resolve before launch) and warnings (may override).
 #[tauri::command]
@@ -268,7 +524,7 @@ pub async fn check_instance_health(
             .map_err(|e| LauncherError::Generic { code: "ERR_INSTANCE_PATH".into(), message: e.to_string() })?;
         let manifest = load_manifest(&app, &sanitized)?;
 
-        // Registry DB for curated known_conflicts — optional (Phase 3: never required)
+        // Registry DB for curated known_conflicts â€” optional (Phase 3: never required)
         let reg_path = paths::registry_db_path(&app).ok();
 
         Ok(agora_core::health::health(
@@ -362,7 +618,7 @@ pub async fn get_registry_status(
 
 /// Extract a pack override zip into an instance directory with full sanitization.
 ///
-/// Implements §7.2: directory whitelist, zip-bomb limits, banned extensions,
+/// Implements Â§7.2: directory whitelist, zip-bomb limits, banned extensions,
 /// and Zip Slip protection.
 #[tauri::command]
 pub async fn extract_overrides(
@@ -522,7 +778,7 @@ pub async fn remove_mod_from_instance(
     mod_install::remove_mod_from_instance(&app, &instance_id, &filename).await
 }
 
-/// Add a manually-dropped .jar file into an instance's `mods/` folder (§6.5b).
+/// Add a manually-dropped .jar file into an instance's `mods/` folder (Â§6.5b).
 #[tauri::command]
 pub async fn add_manual_mod(
     app: tauri::AppHandle,
@@ -550,7 +806,7 @@ pub async fn pick_open_file(
     Ok(picked.map(|h| h.path().to_string_lossy().to_string()))
 }
 
-/// Export an instance as a shareable pack file (§6.5c).
+/// Export an instance as a shareable pack file (Â§6.5c).
 #[tauri::command]
 pub async fn export_instance_pack(
     app: tauri::AppHandle,
@@ -571,7 +827,7 @@ pub async fn import_instance_pack(
     mod_install::import_instance_pack(&app, &source_path).await
 }
 
-/// Whether the Modrinth integration is currently enabled (§6.3 toggle).
+/// Whether the Modrinth integration is currently enabled (Â§6.3 toggle).
 #[tauri::command]
 pub async fn is_modrinth_enabled(
     app: tauri::AppHandle,
@@ -580,7 +836,7 @@ pub async fn is_modrinth_enabled(
     Ok(modrinth_raw::is_modrinth_enabled(&app))
 }
 
-/// Live search of all of Modrinth (uncurated, §6.3). Gated by the
+/// Live search of all of Modrinth (uncurated, Â§6.3). Gated by the
 /// `modrinth_enabled` setting; returns `Err(ModrinthDisabled)` when off.
 #[tauri::command]
 pub async fn search_modrinth(
@@ -631,7 +887,7 @@ pub async fn list_raw_modrinth_versions(
 }
 
 /// Install an uncurated Modrinth mod file, verified against the SHA-1 hash
-/// published by Modrinth's API (§6.3).
+/// published by Modrinth's API (Â§6.3).
 #[tauri::command]
 pub async fn install_raw_modrinth(
     app: tauri::AppHandle,
@@ -737,7 +993,7 @@ pub async fn flag_review(
 pub async fn get_flag_rate_limit(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
-) -> LauncherResult<crate::db::FlagRateLimit> {
+) -> LauncherResult<agora_core::db::FlagRateLimit> {
     crate::governance::get_flag_rate_limit(&app)
 }
 
@@ -798,7 +1054,7 @@ pub async fn investigate_crash(
         let fingerprint = match crash_investigator::parse_crash_log(&crash_text) {
             Some(fp) => fp,
             None => {
-                // Can't parse — return empty investigation.
+                // Can't parse â€” return empty investigation.
                 return Ok(crash_investigator::InvestigationResult {
                     fingerprint: None,
                     signature_name: None,
@@ -1001,7 +1257,7 @@ pub async fn get_install_plan(
         let conn = registry::open_registry(&app)?;
         let manifest_deps = registry::get_manifest_dependencies(&conn, item_id)?;
 
-        // Parse the jar for declared dependencies (defensive: bad path → empty deps).
+        // Parse the jar for declared dependencies (defensive: bad path â†’ empty deps).
         let jar_metadata = crash_investigator::parse_jar_metadata(std::path::Path::new(&jar_path));
 
         // Load the target instance's installed mods to determine which deps are missing.
@@ -1017,7 +1273,7 @@ pub async fn get_install_plan(
     .map_err(|_| LauncherError::LocalStateFailed)?
 }
 
-/// Enable a mod by renaming `<filename>.disabled` → `<filename>` and
+/// Enable a mod by renaming `<filename>.disabled` â†’ `<filename>` and
 /// auto-re-enable any previously-disabled required dependencies.
 ///
 /// Returns the list of filenames that were auto-enabled (toast messages).
@@ -1065,7 +1321,7 @@ pub async fn enable_mod_with_auto_deps(
 
             let dep_mod = match dep_mod {
                 Some(m) => m,
-                None => continue, // Missing entirely — skip silently (can't auto-install).
+                None => continue, // Missing entirely â€” skip silently (can't auto-install).
             };
 
             // Check if the dep's jar file is disabled.
@@ -1346,6 +1602,15 @@ pub async fn msa_finish_login(
     let creds = agora_core::msa::finish_login(&s.client, &code, &flow, oauth_state.as_deref()).await?;
     Ok(creds)
 }
+
+/// Return the current MSA login status, or None if not authenticated.
+#[tauri::command]
+pub async fn msa_get_status(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<Option<agora_core::msa::MsaCredentials>> {
+    agora_core::msa::load_credentials()
+}
 /// Refresh expired MSA credentials.
 #[tauri::command]
 pub async fn msa_refresh(
@@ -1381,3 +1646,135 @@ pub fn compute_gc_args(
 ) -> agora_core::gc::GcResult {
     agora_core::gc::compute_gc(java_version, requested_heap_mb, &manual_args, override_profile)
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: Instance lifecycle — snapshots, loadouts, import, clone, export
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn list_snapshots(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String) -> LauncherResult<Vec<agora_core::snapshot::Snapshot>> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::snapshot::list_snapshots(&instance_dir)
+        .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn create_snapshot(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, label: Option<String>) -> LauncherResult<agora_core::snapshot::Snapshot> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::snapshot::create_snapshot(&instance_dir, label.as_deref())
+        .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn restore_snapshot(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, snapshot_id: String) -> LauncherResult<()> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::snapshot::restore_snapshot(&instance_dir, &snapshot_id)
+        .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn delete_snapshot(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, snapshot_id: String) -> LauncherResult<()> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::snapshot::delete_snapshot(&instance_dir, &snapshot_id)
+        .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn list_loadout_profiles(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String) -> LauncherResult<Vec<agora_core::loadout::LoadoutProfile>> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::loadout::list_profiles(&instance_dir)
+        .map_err(|e| LauncherError::Generic { code: "ERR_LOADOUT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn create_loadout_profile(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, name: String) -> LauncherResult<agora_core::loadout::LoadoutProfile> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::loadout::create_profile(&instance_dir, &name)
+        .map_err(|e| LauncherError::Generic { code: "ERR_LOADOUT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn apply_loadout_profile(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, profile_name: String) -> LauncherResult<()> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::loadout::apply_profile(&instance_dir, &profile_name)
+        .map_err(|e| LauncherError::Generic { code: "ERR_LOADOUT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn delete_loadout_profile(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, profile_name: String) -> LauncherResult<()> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    agora_core::loadout::delete_profile(&instance_dir, &profile_name)
+        .map_err(|e| LauncherError::Generic { code: "ERR_LOADOUT".into(), message: e })
+}
+
+#[tauri::command]
+pub async fn import_instance(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, source_path: String, symlink_saves: bool) -> LauncherResult<agora_core::import::ImportResult> {
+    let source = std::path::PathBuf::from(&source_path);
+    let app_data = paths::app_data_dir(&app)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    let instances_dir = app_data.join("instances");
+    std::fs::create_dir_all(&instances_dir).ok();
+
+    if source_path.ends_with(".mrpack") {
+        agora_core::import::import_mrpack(&source, &instances_dir, symlink_saves)
+    } else if source_path.ends_with(".zip") {
+        agora_core::import::import_prism_zip(&source, &instances_dir, symlink_saves)
+    } else {
+        agora_core::import::import_directory(&source, &instances_dir, symlink_saves)
+    }.map_err(|e| LauncherError::Generic { code: "ERR_IMPORT".into(), message: e.to_string() })
+}
+
+#[tauri::command]
+pub fn detect_launchers(_app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>) -> LauncherResult<Vec<agora_core::import::DetectedLauncher>> {
+    Ok(agora_core::import::auto_detect_launchers())
+}
+
+#[tauri::command]
+pub async fn clone_instance_cmd(app: tauri::AppHandle, _state: tauri::State<'_, LauncherState>, instance_id: String, new_name: String, prefs: agora_core::clone::ClonePrefs) -> LauncherResult<String> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let src_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    let app_data = paths::app_data_dir(&app)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    let new_id = paths::sanitize_id(&new_name);
+    let dest_dir = app_data.join("instances").join(&new_id);
+    agora_core::clone::clone_instance(&src_dir, &dest_dir, &prefs)
+        .map_err(|e| LauncherError::Generic { code: "ERR_CLONE".into(), message: e })
+}
+
+/// Export an instance as a server environment — filters client-only mods,
+/// downloads server loader, writes start scripts.
+#[tauri::command]
+pub async fn export_server_environment(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    dest_path: String,
+) -> LauncherResult<agora_core::server_export::ExportResult> {
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    let manifest = load_manifest(&app, &sanitized)?;
+    let dest = std::path::PathBuf::from(&dest_path);
+    std::fs::create_dir_all(&dest).ok();
+    agora_core::server_export::export_server_environment(
+        &instance_dir, &dest, &manifest.loader, &manifest.minecraft_version,
+    ).map_err(|e| LauncherError::Generic { code: "ERR_EXPORT".into(), message: e.to_string() })
+}
+

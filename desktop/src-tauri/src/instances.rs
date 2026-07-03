@@ -1,4 +1,4 @@
-use crate::crash_investigator;
+﻿use crate::crash_investigator;
 use crate::db;
 use crate::download;
 use crate::error::{LauncherError, LauncherResult};
@@ -13,7 +13,7 @@ use tauri::Emitter;
 
 /// Emit a staged progress event to the frontend during instance creation.
 ///
-/// Failure to emit is non-fatal — the frontend watcher is best-effort.
+/// Failure to emit is non-fatal â€” the frontend watcher is best-effort.
 fn emit_progress<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -30,7 +30,7 @@ fn emit_progress<R: tauri::Runtime>(
     );
 }
 
-/// Request payload for creating a custom instance (see §6.5b).
+/// Request payload for creating a custom instance (see Â§6.5b).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateInstanceRequest {
     pub name: String,
@@ -278,6 +278,48 @@ pub fn delete_instance<R: tauri::Runtime>(
     Ok(())
 }
 
+/// Unlock a locked pack instance for manual mod management (§6.5).
+/// Sets is_locked=false in the DB to allow manual mod changes.
+pub async fn unlock_instance<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+) -> LauncherResult<()> {
+    let sanitized = paths::sanitize_id(instance_id);
+    let app = app.clone();
+    let id = sanitized.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+        agora_core::db::set_locked(&conn, &id, false).map_err(|_| LauncherError::LocalStateFailed)
+    })
+    .await
+    .map_err(|_| LauncherError::LocalStateFailed)?
+}
+
+/// Lock an unlocked pack instance, discarding the lock snapshot.
+pub async fn lock_instance<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+) -> LauncherResult<()> {
+    let sanitized = paths::sanitize_id(instance_id);
+    let app = app.clone();
+    let id = sanitized.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+        agora_core::db::set_locked(&conn, &id, true).map_err(|_| LauncherError::LocalStateFailed)
+    })
+    .await
+    .map_err(|_| LauncherError::LocalStateFailed)?
+}
+
+/// Revert an unlocked instance to its lock snapshot (§6.5).
+/// Re-locks the instance (further revert logic is a future enhancement).
+pub async fn revert_instance<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+) -> LauncherResult<()> {
+    lock_instance(app, instance_id).await
+}
+
 /// Launch an instance by delegating to the official Mojang launcher.
 pub fn launch_instance<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -299,7 +341,7 @@ pub fn launch_instance<R: tauri::Runtime>(
 
     let launcher_path = mojang::resolve_launcher_path(user_override.as_deref())?;
 
-    // Update last_launched_at BEFORE spawning the game (§9.1).
+    // Update last_launched_at BEFORE spawning the game (Â§9.1).
     // This prevents crash-prompt loops where the interceptor sees a stale
     // last_launched_at and re-offers "Launch Anyway" indefinitely.
     let now = chrono::Utc::now().to_rfc3339();
@@ -466,9 +508,9 @@ fn get_java_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
 /// Compute the effective AlwaysPreTouch value based on GC type, instance setting,
 /// and optional user-level override.
 ///
-/// GC-conditional default (§8.5):
-/// - G1GC (or empty/unknown): true — safe and beneficial
-/// - ZGC / Shenandoah: false — may cause issues
+/// GC-conditional default (Â§8.5):
+/// - G1GC (or empty/unknown): true â€” safe and beneficial
+/// - ZGC / Shenandoah: false â€” may cause issues
 /// User override always wins when present.
 fn compute_always_pre_touch(gc: &str, instance_setting: bool, user_override: Option<bool>) -> bool {
     user_override.unwrap_or_else(|| {
@@ -638,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_pre_touch_instance_false_no_override() {
-        // Instance explicitly disabled, no user override → false regardless of GC.
+        // Instance explicitly disabled, no user override â†’ false regardless of GC.
         assert!(!compute_always_pre_touch("G1GC", false, None));
         assert!(!compute_always_pre_touch("ZGC", false, None));
     }
@@ -711,3 +753,4 @@ mod tests {
         assert_eq!(profile_id_for("test-123"), "agora-test-123");
     }
 }
+

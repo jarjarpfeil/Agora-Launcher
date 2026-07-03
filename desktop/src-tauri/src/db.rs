@@ -1,4 +1,4 @@
-use crate::models::InstanceRow;
+﻿use crate::models::InstanceRow;
 use crate::paths;
 use rusqlite::Connection;
 use serde::Serialize;
@@ -21,6 +21,16 @@ pub fn local_state_connection<R: tauri::Runtime>(
     }
     let conn = Connection::open(&db_path)?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
+    Ok(conn)
+}
+
+/// Open a connection to the downloaded read-only registry database.
+pub fn registry_connection<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> anyhow::Result<Connection> {
+    let db_path = paths::registry_db_path(app)?;
+    let conn = Connection::open(&db_path)?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;")?;
     Ok(conn)
 }
 
@@ -93,7 +103,7 @@ fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
         conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (1)", [])?;
     }
 
-    // Migration v2: add flag_submissions table for comment-flag rate limiting (§5.5).
+    // Migration v2: add flag_submissions table for comment-flag rate limiting (Â§5.5).
     if current < 2 {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS flag_submissions (
@@ -312,7 +322,7 @@ pub fn normalize_pair<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     }
 }
 
-/// Record a co-crash for a pair of mods (§4.1b).
+/// Record a co-crash for a pair of mods (Â§4.1b).
 pub fn record_co_crash(conn: &Connection, mod_a: &str, mod_b: &str) -> anyhow::Result<()> {
     let (a, b) = normalize_pair(mod_a, mod_b);
     let now = chrono::Utc::now().to_rfc3339();
@@ -327,7 +337,7 @@ pub fn record_co_crash(conn: &Connection, mod_a: &str, mod_b: &str) -> anyhow::R
     Ok(())
 }
 
-/// Purge stale crash telemetry records per §4.1b retention rules:
+/// Purge stale crash telemetry records per Â§4.1b retention rules:
 /// - Records older than 90 days.
 /// - Pairs with crash_count < 2.
 pub fn purge_stale_crash_telemetry(conn: &Connection) -> anyhow::Result<()> {
@@ -340,7 +350,7 @@ pub fn purge_stale_crash_telemetry(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Record a flag submission for rate-limit tracking (§5.5).
+/// Record a flag submission for rate-limit tracking (Â§5.5).
 pub fn record_flag_submission(conn: &Connection, now_unix: i64) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO flag_submissions (timestamp) VALUES (?1)",
@@ -359,7 +369,7 @@ pub fn count_flags_since(conn: &Connection, since_unix: i64) -> anyhow::Result<i
     .map_err(Into::into)
 }
 
-/// Rate-limit status for comment-flag submissions (§5.5).
+/// Rate-limit status for comment-flag submissions (Â§5.5).
 #[derive(Serialize)]
 pub struct FlagRateLimit {
     pub remaining_hour: i64,
@@ -1018,7 +1028,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Crash attribution — edge cases (DB-backed)
+    // Crash attribution â€” edge cases (DB-backed)
     // ------------------------------------------------------------------
 
     #[test]
@@ -1029,3 +1039,4 @@ mod tests {
         assert!(attributions.is_empty());
     }
 }
+
