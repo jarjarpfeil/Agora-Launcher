@@ -16,6 +16,7 @@
 //!   8. Minecraft entitlements check
 //!   9. Minecraft profile (username + UUID)
 
+use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -26,6 +27,28 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+/// Check a network enable setting from the local state DB.
+fn check_network_enabled(setting_key: &str, disabled_msg: &str) -> LauncherResult<()> {
+    let app_data_dir = dirs::data_local_dir()
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_NO_DATA_DIR".into(),
+            message: "Could not determine local data directory.".into(),
+        })?
+        .join("agora");
+    let db_path = app_data_dir.join("local_state.db");
+    let conn = db::local_state_connection(&db_path).map_err(|e| LauncherError::Generic {
+        code: "ERR_DB".into(),
+        message: e.to_string(),
+    })?;
+    if !db::is_network_enabled(&conn, setting_key) {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: disabled_msg.into(),
+        });
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Constants (from Theseus — public, well-known Microsoft identifiers)
@@ -769,6 +792,7 @@ async fn get_minecraft_profile(
 /// be opened in a browser. The caller captures the `?code=` from the redirect
 /// and passes it to [`finish_login`].
 pub async fn begin_login(client: &reqwest::Client) -> LauncherResult<LoginFlow> {
+    check_network_enabled("network_msa_enabled", "Microsoft account login is disabled in Privacy settings.")?;
     // Step 1: Generate p256 key + get device token
     let key = DeviceTokenKey::generate();
     let device_token = get_device_token(client, &key).await?;
@@ -800,6 +824,7 @@ pub async fn finish_login(
     flow: &LoginFlow,
     state: Option<&str>,
 ) -> LauncherResult<MsaCredentials> {
+    check_network_enabled("network_msa_enabled", "Microsoft account login is disabled in Privacy settings.")?;
     // CSRF check: verify state parameter if provided and flow has one
     if let Some(passed_state) = state {
         if !flow.state.is_empty() && flow.state != passed_state {
@@ -860,6 +885,7 @@ pub async fn refresh_credentials(
     client: &reqwest::Client,
     creds: &MsaCredentials,
 ) -> LauncherResult<MsaCredentials> {
+    check_network_enabled("network_msa_enabled", "Microsoft account login is disabled in Privacy settings.")?;
     // Step 4 (refresh): Get new OAuth token from refresh token
     let oauth = refresh_oauth_token(client, &creds.refresh_token).await?;
     let auth_date = Utc::now();

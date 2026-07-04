@@ -4,6 +4,7 @@
 //! Replaces Mojang-launcher delegation with Agora owning the entire launch
 //! process end-to-end.
 
+use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 use regex::Regex;
 use sha1::{Digest, Sha1};
@@ -170,6 +171,29 @@ pub struct LoaderInfo {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Check a network enable setting from the local state DB.
+/// Opens a temporary connection to `local_state.db` under the standard data dir.
+fn check_network_enabled(setting_key: &str, disabled_msg: &str) -> LauncherResult<()> {
+    let app_data_dir = dirs::data_local_dir()
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_NO_DATA_DIR".into(),
+            message: "Could not determine local data directory.".into(),
+        })?
+        .join("agora");
+    let db_path = app_data_dir.join("local_state.db");
+    let conn = db::local_state_connection(&db_path).map_err(|e| LauncherError::Generic {
+        code: "ERR_DB".into(),
+        message: e.to_string(),
+    })?;
+    if !db::is_network_enabled(&conn, setting_key) {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: disabled_msg.into(),
+        });
+    }
+    Ok(())
+}
+
 /// The OS name as Mojang spells it in library rules.
 fn mojang_os_name() -> &'static str {
     match std::env::consts::OS {
@@ -205,6 +229,7 @@ fn natives_subdir() -> &'static str {
 pub async fn fetch_version_manifest(
     client: &reqwest::Client,
 ) -> LauncherResult<MojangVersionManifest> {
+    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
     let url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
     let resp = client
         .get(url)
@@ -230,6 +255,7 @@ pub async fn fetch_version_info(
     client: &reqwest::Client,
     url: &str,
 ) -> LauncherResult<VersionInfo> {
+    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
     let resp = client
         .get(url)
         .send()
@@ -562,6 +588,7 @@ pub fn build_launch_command(
 /// Full launch flow: fetch manifest → resolve version → download libs →
 /// build classpath → construct args → spawn Java.
 pub async fn spawn_java(options: &LaunchOptions) -> LauncherResult<SpawnResult> {
+    check_network_enabled("network_adoptium_enabled", "Java runtime downloads are disabled in Privacy settings.")?;
     let client = reqwest::Client::new();
 
     // 1. Fetch version manifest
@@ -691,6 +718,7 @@ pub async fn load_install_profile(
     installer_jar_url: &str,
     cache_dir: &Path,
 ) -> LauncherResult<InstallProfile> {
+    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
     let installer_dir = cache_dir.join("forge_installers");
     std::fs::create_dir_all(&installer_dir).map_err(|e| LauncherError::Generic {
         code: "ERR_FORGE_CACHE_DIR".into(),
@@ -766,6 +794,7 @@ pub async fn download_processor_deps(
     profile: &InstallProfile,
     cache_dir: &Path,
 ) -> LauncherResult<Vec<PathBuf>> {
+    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
     let maven_cache = cache_dir.join("forge_maven");
     let mut unique_names: Vec<String> = Vec::new();
 
@@ -1090,6 +1119,7 @@ pub async fn prepare_loader(
     java_path: &Path,
     cache_dir: &Path,
 ) -> LauncherResult<VersionInfo> {
+    check_network_enabled("network_adoptium_enabled", "Java runtime downloads are disabled in Privacy settings.")?;
     let manifest = fetch_version_manifest(client).await?;
     let version_ref = manifest
         .versions

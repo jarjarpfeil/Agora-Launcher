@@ -12,8 +12,11 @@ use crate::mod_install;
 use crate::models::{InstanceManifest, InstanceRow, InstalledMod, ModVersionCandidate};
 use crate::modrinth_raw;
 use crate::paths;
-use crate::registry::{self, AuditLogEntry, CategoryInfo, ModReview, PackModRow, RegistryItem, SortOption, UnderReviewItem};
+use crate::registry::{self, AuditLogEntry, CategoryInfo, CuratedAnnotation, ModReview, PackModRow, RegistryItem, SortOption, UnderReviewItem};
+use agora_core::browse_cache::{self, BrowseFilters, BrowsePage};
+use agora_core::modrinth::{ModrinthSearchParams, ModrinthSort};
 use crate::state::LauncherState;
+use agora_core::pack_install;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
@@ -66,8 +69,9 @@ pub async fn browse_items(
 }
 
 /// "For You" recommendations: boost uninstalled mods whose categories overlap
-/// with the user's installed mods (Â§6.2). Honors the user's selected MC version
-/// and loader compatibility filters when supplied.
+/// with the user's installed mods (§6.2). Honors the user's selected MC version
+/// and loader compatibility filters when supplied. Accepts optional Modrinth
+/// category facets from the Browse page filter state to build the overlap set.
 #[tauri::command]
 pub async fn for_you_items(
     app: tauri::AppHandle,
@@ -76,6 +80,7 @@ pub async fn for_you_items(
     mc_version: Option<String>,
     loader: Option<String>,
     limit: Option<i64>,
+    modrinth_categories: Option<Vec<String>>,
 ) -> LauncherResult<Vec<RegistryItem>> {
     let modrinth_enabled = modrinth_enabled.unwrap_or(false);
     let limit = limit.unwrap_or(50).clamp(1, 500);
@@ -87,7 +92,26 @@ pub async fn for_you_items(
             mc_version.as_deref(),
             loader.as_deref(),
             limit,
+            modrinth_categories.as_deref(),
         )
+    })
+    .await
+    .map_err(|_| LauncherError::Generic {
+        code: "ERR_REGISTRY_QUERY".to_string(),
+        message: "Registry query task failed.".to_string(),
+    })?
+}
+
+/// Look up a curated annotation for a Modrinth project.
+#[tauri::command]
+pub async fn get_curated_annotation(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    modrinth_id: String,
+) -> LauncherResult<Option<CuratedAnnotation>> {
+    tokio::task::spawn_blocking(move || {
+        let conn = registry::open_registry(&app)?;
+        registry::get_curated_annotation(&conn, &modrinth_id)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -1484,6 +1508,49 @@ pub async fn set_mcp_approval(
     .map_err(|_| LauncherError::LocalStateFailed)?
 }
 
+/// Start the GitHub Copilot device code flow.
+#[tauri::command]
+pub async fn copilot_login(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<ai_assistant::CopilotDeviceFlowResponse> {
+    let client = reqwest::Client::new();
+    ai_assistant::start_copilot_flow(&client).await
+}
+
+/// Poll the Copilot device flow. On success, resolves endpoint + stores token.
+#[tauri::command]
+pub async fn copilot_login_poll(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    device_code: String,
+    interval: u64,
+) -> LauncherResult<ai_assistant::CopilotToken> {
+    let client = reqwest::Client::new();
+    let ghu_token = ai_assistant::poll_copilot_flow(&client, &device_code, interval).await?;
+    let copilot_token = ai_assistant::resolve_copilot_endpoint(&client, &ghu_token).await?;
+    ai_assistant::store_copilot_token(&copilot_token)?;
+    Ok(copilot_token)
+}
+
+/// Check if Copilot is connected and the token is still valid.
+#[tauri::command]
+pub async fn copilot_status(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<Option<ai_assistant::CopilotToken>> {
+    ai_assistant::load_copilot_token()
+}
+
+/// Sign out of Copilot.
+#[tauri::command]
+pub async fn copilot_logout(
+    _app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<()> {
+    ai_assistant::clear_copilot_token()
+}
+
 /// Send a chat message to the AI assistant and return the response.
 ///
 /// If `context` is provided and the messages don't already contain a context
@@ -1491,11 +1558,16 @@ pub async fn set_mcp_approval(
 /// message.
 #[tauri::command]
 pub async fn ai_chat(
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
     messages: Vec<ChatMessage>,
     context: Option<serde_json::Value>,
-    model: Option<String>,
 ) -> Result<ChatResponse, LauncherError> {
+    let token = ai_assistant::load_copilot_token()?
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_AI_NOT_AUTHENTICATED".to_string(),
+            message: "GitHub Copilot is not connected. Click 'Connect with GitHub' in the chat panel to set up free AI diagnostics (50 requests/month).".to_string(),
+        })?;
+
     let mut messages = messages;
 
     // Build context message if context JSON is provided and not already present.
@@ -1508,7 +1580,6 @@ pub async fn ai_chat(
                         || m.content.contains("## Curated Crash Signatures")))
         });
         if !has_context {
-            // Manually extract AiContext fields from JSON (AiContext lacks Deserialize).
             let instance_id = ctx_val
                 .get("instance_id")
                 .and_then(|v| v.as_str())
@@ -1547,19 +1618,39 @@ pub async fn ai_chat(
         });
     }
 
-    ai_assistant::chat_completion(&app, messages, model).await
+    ai_assistant::chat_completion(messages, &token).await
 }
 
-/// Return the list of available AI models (curated free-tier list).
+/// Get an AI explanation for a detected crash.
 #[tauri::command]
-pub fn ai_get_models() -> Vec<ai_assistant::AvailableModel> {
-    ai_assistant::AVAILABLE_MODELS.to_vec()
-}
+pub async fn explain_crash(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+    crash_log: String,
+) -> Result<String, LauncherError> {
+    let token = ai_assistant::load_copilot_token()?
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_AI_NOT_AUTHENTICATED".into(),
+            message: "GitHub Copilot is not connected. Click 'Connect with GitHub' in the chat panel.".into(),
+        })?;
 
-/// Return the default AI model ID.
-#[tauri::command]
-pub fn ai_get_default_model() -> String {
-    ai_assistant::DEFAULT_AI_MODEL.to_string()
+    let context = ai_assistant::AiContext {
+        instance_id: Some(instance_id),
+        crash_log: Some(crash_log),
+        crash_signatures: None,
+        suspects: None,
+    };
+    let system = ai_assistant::build_system_prompt();
+    let context_msg = ai_assistant::build_context_message(&context);
+
+    let messages = vec![
+        ChatMessage { role: "system".into(), content: system },
+        ChatMessage { role: "user".into(), content: context_msg },
+    ];
+
+    let response = ai_assistant::chat_completion(messages, &token).await?;
+    Ok(response.content)
 }
 
 // ---------------------------------------------------------------------------
@@ -1777,4 +1868,232 @@ pub async fn export_server_environment(
         &instance_dir, &dest, &manifest.loader, &manifest.minecraft_version,
     ).map_err(|e| LauncherError::Generic { code: "ERR_EXPORT".into(), message: e.to_string() })
 }
+
+/// Install a pack (Tier 1 or Tier 2) from a JSON manifest.
+#[tauri::command]
+pub async fn install_pack(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    manifest_json: String,
+    instance_id: String,
+) -> LauncherResult<agora_core::pack_install::PackInstallResult> {
+    let manifest = pack_install::parse_pack_manifest(&manifest_json)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PACK_PARSE".into(), message: e })?;
+    let client = reqwest::Client::new();
+    let sanitized = paths::sanitize_id(&instance_id);
+    let instance_dir = paths::instance_dir(&app, &sanitized)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+    if manifest.override_source.is_some() {
+        pack_install::install_complex_pack(&client, &manifest, &instance_dir).await
+    } else {
+        pack_install::install_simple_pack(&client, &manifest, &instance_dir).await
+    }
+    .map_err(|e| LauncherError::Generic { code: "ERR_PACK".into(), message: e })
+}
+
+/// Read the Windows personalization accent color. Returns HSL string or null.
+#[tauri::command]
+pub fn get_windows_accent_color() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::process::Command;
+        let output = Command::new("reg")
+            .args(["query", r"HKCU\Software\Microsoft\Windows\DWM", "/v", "AccentColor"])
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = stdout.lines().find(|l| l.contains("AccentColor")) {
+            if let Some(val_str) = line.split_whitespace().last() {
+                if let Ok(val) = u32::from_str_radix(val_str.trim_start_matches("0x"), 16) {
+                    let r = ((val >> 16) & 0xFF) as f64;
+                    let g = ((val >> 8) & 0xFF) as f64;
+                    let b = (val & 0xFF) as f64;
+                    let max = r.max(g).max(b);
+                    let min = r.min(g).min(b);
+                    let l = (max + min) / 510.0;
+                    let s = if max == min { 0.0 } else { (max - min) / if l > 0.5 { 510.0 - max - min } else { max + min } };
+                    let h = if max == min { 0.0 } else if max == r { 60.0 * ((g - b) / (max - min)) } else if max == g { 60.0 * (2.0 + (b - r) / (max - min)) } else { 60.0 * (4.0 + (r - g) / (max - min)) };
+                    return Some(format!("hsl({:.0} {:.0}% {:.0}%)", h.max(0.0), s * 100.0, l * 100.0));
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    { None }
+}
+
+// ---------------------------------------------------------------------------
+// Phase: Rust-backed browse cache (Modrinth + registry, paginated)
+// ---------------------------------------------------------------------------
+
+/// Search browse items — fetches registry + first Modrinth page, merges, caches in Rust, returns first page.
+#[tauri::command]
+pub async fn browse_search(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, LauncherState>,
+    query: Option<String>,
+    content_type: Option<String>,
+    category: Option<String>,
+    sort: Option<String>,
+    mc_version: Option<String>,
+    loader: Option<String>,
+) -> LauncherResult<BrowsePage> {
+    let s = state.lock().await;
+    let (modrinth_enabled, registry_items) = {
+        let conn = db::local_state_connection(&app)
+            .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?;
+        let me = match agora_core::db::get_setting(&conn, "modrinth_enabled") {
+            Ok(Some(ref v)) => v == &serde_json::Value::Bool(true),
+            _ => false,
+        };
+        drop(conn);
+        let rconn = db::registry_connection(&app)
+            .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?;
+        let sort_enum = to_sort_option(sort.as_deref().unwrap_or("net_score"));
+        let items = registry::browse_items(&rconn, content_type.as_deref(), category.as_deref(), &sort_enum, me, mc_version.as_deref(), loader.as_deref(), 100)
+            .map_err(|e| LauncherError::Generic { code: "ERR_REGISTRY".into(), message: e.to_string() })?;
+        (me, items)
+    };
+
+    let (modrinth_results, total_hits) = if modrinth_enabled {
+        let params = ModrinthSearchParams {
+            query: query.clone(),
+            categories: category.clone().map(|c| vec![c]),
+            loaders: loader.clone().map(|l| vec![l]),
+            game_versions: mc_version.clone().map(|v| vec![v]),
+            sort: Some(to_modrinth_sort(sort.as_deref().unwrap_or("relevance"))),
+            limit: Some(browse_cache::PAGE_SIZE as u32),
+            offset: Some(0),
+            project_type: content_type.clone(),
+        };
+        // Connection only needed for sync DB check — drop before async HTTP
+        match agora_core::modrinth::search_modrinth_http(&params).await {
+            Ok(page) => (page.results, page.total_hits as usize),
+            Err(e) => return Err(e),
+        }
+    } else {
+        (vec![], 0usize)
+    };
+
+    eprintln!("[BROWSE_RS] registry_items.len()={} modrinth_results.len()={} total_hits={}",
+        registry_items.len(), modrinth_results.len(), total_hits);
+
+    let offset = browse_cache::PAGE_SIZE;
+    let has_more = total_hits > offset;
+
+    browse_cache::load_initial(
+        &s.browse_cache,
+        registry_items,
+        modrinth_results,
+        BrowseFilters {
+            query: query.unwrap_or_default(),
+            content_type,
+            category,
+            sort: sort.unwrap_or_else(|| "relevance".to_string()),
+            mc_version,
+            loader,
+            modrinth_enabled,
+        },
+        offset,
+        has_more,
+    ).await;
+
+    let result = browse_cache::get_page(&s.browse_cache, 0).await;
+    let curated_count = result.items.iter().filter(|i| i.source == "curated").count();
+    let modrinth_count = result.items.iter().filter(|i| i.source == "modrinth").count();
+    eprintln!("[BROWSE_RS] page 0: {} total, {} curated, {} modrinth", result.items.len(), curated_count, modrinth_count);
+    for (i, item) in result.items.iter().enumerate() {
+        eprintln!("[BROWSE_RS]   item[{}]: source={} name={} id={}", i, item.source, item.name, item.id);
+    }
+    Ok(result)
+}
+
+/// Load more Modrinth results (next page) into the browse cache.
+#[tauri::command]
+pub async fn browse_load_more(
+    state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<BrowsePage> {
+    let s = state.lock().await;
+    let cache = s.browse_cache.read().await;
+    if !cache.has_more_modrinth || !cache.filters.modrinth_enabled {
+        return Ok(BrowsePage { items: vec![], total: cache.total, page: 0, has_more: false });
+    }
+    let offset = cache.modrinth_offset;
+    let filters = cache.filters.clone();
+    drop(cache);
+
+    let params = ModrinthSearchParams {
+        query: Some(filters.query.clone()),
+        categories: filters.category.clone().map(|c| vec![c]),
+        loaders: filters.loader.clone().map(|l| vec![l]),
+        game_versions: filters.mc_version.clone().map(|v| vec![v]),
+        sort: Some(to_modrinth_sort(&filters.sort)),
+        limit: Some(browse_cache::PAGE_SIZE as u32),
+        offset: Some(offset as u32),
+        project_type: filters.content_type.clone(),
+    };
+
+    let page = agora_core::modrinth::search_modrinth_http(&params).await
+        .map_err(|e| LauncherError::Generic { code: "ERR_MODRINTH".into(), message: e.to_string() })?;
+
+    let new_offset = offset + browse_cache::PAGE_SIZE;
+    let has_more = (page.total_hits as usize) > new_offset;
+
+    let new_items: Vec<browse_cache::BrowseItem> = page.results.into_iter().map(|mr| {
+        browse_cache::BrowseItem {
+            id: mr.project_id.clone(),
+            source: "modrinth".to_string(),
+            registry_item: None,
+            modrinth_result: Some(mr.clone()),
+            name: mr.title.clone(),
+            icon_url: mr.icon_url.clone(),
+            description: Some(mr.description.clone()),
+            content_type: mr.project_type.clone(),
+        }
+    }).collect();
+
+    let response_items = new_items.clone();
+    browse_cache::append_items(&s.browse_cache, new_items, new_offset, has_more).await;
+
+    let total = s.browse_cache.read().await.total;
+    Ok(BrowsePage {
+        items: response_items,
+        total,
+        page: offset / browse_cache::PAGE_SIZE,
+        has_more,
+    })
+}
+
+/// Get a specific page from the browse cache.
+#[tauri::command]
+pub async fn browse_page(
+    state: tauri::State<'_, LauncherState>,
+    page: usize,
+) -> LauncherResult<BrowsePage> {
+    let s = state.lock().await;
+    Ok(browse_cache::get_page(&s.browse_cache, page).await)
+}
+
+fn to_modrinth_sort(sort: &str) -> ModrinthSort {
+    match sort {
+        "downloads" => ModrinthSort::Downloads,
+        "follows" => ModrinthSort::Follows,
+        "newest" => ModrinthSort::Newest,
+        "updated" => ModrinthSort::Updated,
+        _ => ModrinthSort::Relevance,
+    }
+}
+
+fn to_sort_option(sort: &str) -> registry::SortOption {
+    match sort {
+        "net_score" => registry::SortOption::NetScore,
+        "velocity" => registry::SortOption::Velocity,
+        "most_downvoted" => registry::SortOption::MostDownvoted,
+        "newest" => registry::SortOption::Newest,
+        "most_upvoted" => registry::SortOption::MostUpvoted,
+        _ => registry::SortOption::NetScore,
+    }
+}
+
 

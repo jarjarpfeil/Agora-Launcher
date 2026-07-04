@@ -37,4 +37,6 @@ pub mod snapshot;
 pub mod import;
 pub mod clone;
 pub mod loadout;
+pub mod browse_cache;
+pub mod pack_install;
 pub mod server_export;

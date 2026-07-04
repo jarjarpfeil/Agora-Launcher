@@ -1,4 +1,5 @@
 use crate::msa::LoginFlow;
+use crate::browse_cache::SharedBrowseCache;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -9,6 +10,8 @@ pub struct AppState {
     /// In-flight MSA login flow (ephemeral — only alive between begin/finish).
     /// If the app crashes, the flow is lost and the user re-authenticates.
     pub login_flow: Option<LoginFlow>,
+    /// Shared browse cache for paginated Modrinth + registry results.
+    pub browse_cache: SharedBrowseCache,
 }
 
 impl AppState {
@@ -20,6 +23,7 @@ impl AppState {
         Self {
             client,
             login_flow: None,
+            browse_cache: crate::browse_cache::new_cache(),
         }
     }
 }

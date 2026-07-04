@@ -13,7 +13,7 @@ import type { InstanceRow } from '@/lib/tauri';
 interface CommandPaletteProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onNavigate: (tab: 'home' | 'browse' | 'instances' | 'governance' | 'settings' | 'modrinth' | 'ai', clearSelection?: boolean) => void;
+  onNavigate: (tab: 'home' | 'browse' | 'instances' | 'governance' | 'settings' | 'ai', clearSelection?: boolean) => void;
 }
 
 const SETTINGS_ITEMS: { label: string; tab: 'home' | 'browse' | 'instances' | 'governance' | 'settings'; icon: string }[] = [
@@ -103,8 +103,6 @@ export function CommandPalette({ open, onOpenChange, onNavigate }: CommandPalett
     ...(filteredSettings.length > 0
       ? [{ __section: 'Settings' as const }, ...filteredSettings.map((s) => ({ __type: 'setting' as const, ...s }))]
       : []),
-    { __section: 'Online Catalog' as const },
-    { __type: 'modrinth_stub' as const },
   ];
 
   const totalItems = results.length;
@@ -120,7 +118,7 @@ export function CommandPalette({ open, onOpenChange, onNavigate }: CommandPalett
       onOpenChange(false);
       onNavigate(item.tab);
     }
-    // modrinth_stub and section headers do nothing
+    // section headers do nothing
   };
 
   const isItemSelected = (index: number) => index === selectedIndex;
@@ -166,25 +164,6 @@ export function CommandPalette({ open, onOpenChange, onNavigate }: CommandPalett
                   >
                     {item.__section}
                   </div>
-                );
-              }
-
-              // Modrinth stub
-              if (item.__type === 'modrinth_stub') {
-                return (
-                  <button
-                    key="modrinth-stub"
-                    onClick={() => {}}
-                    className={cn(
-                      'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors',
-                      isItemSelected(index)
-                        ? 'bg-brand-100 text-brand-900 dark:bg-brand-900 dark:text-brand-100'
-                        : 'text-[rgb(var(--text))] hover:bg-gray-100 dark:hover:bg-gray-800'
-                    )}
-                  >
-                    <span className="text-lg" aria-hidden="true">🌐</span>
-                    <span className="text-[rgb(var(--muted))]">Search Modrinth (coming soon)</span>
-                  </button>
                 );
               }
 

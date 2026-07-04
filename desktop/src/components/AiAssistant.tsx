@@ -5,12 +5,14 @@ import rehypeSanitize from 'rehype-sanitize';
 
 import {
   aiChat,
-  aiGetDefaultModel,
-  aiGetModels,
-  AvailableModel,
   ChatMessage,
+  copilotLogin,
+  copilotLoginPoll,
+  copilotLogout,
+  copilotStatus,
+  CopilotDeviceFlowResponse,
+  CopilotToken,
   formatError,
-  getAuthStatus,
 } from '../lib/tauri';
 
 // ---------------------------------------------------------------------------
@@ -36,35 +38,41 @@ export function AiAssistant({
   suspects,
   onClose,
 }: AiAssistantProps) {
-  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [copilotToken, setCopilotToken] = useState<CopilotToken | null>(null);
+  const [copilotLoading, setCopilotLoading] = useState(true);
+  const [flowResponse, setFlowResponse] = useState<CopilotDeviceFlowResponse | null>(null);
+  const [polling, setPolling] = useState(false);
+  const [countdown, setCountdown] = useState(0);
+  const [rateLimited, setRateLimited] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [models, setModels] = useState<AvailableModel[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // --- Auth check on mount ---
+  // --- Check Copilot status on mount ---
   useEffect(() => {
-    getAuthStatus().then(setAuthenticated).catch(() => setAuthenticated(false));
+    (async () => {
+      setCopilotLoading(true);
+      try {
+        const token = await copilotStatus();
+        setCopilotToken(token);
+      } catch { setCopilotToken(null); }
+      setCopilotLoading(false);
+    })();
   }, []);
 
-  // --- Load models on mount ---
+  // --- Countdown timer for device code ---
   useEffect(() => {
-    let cancelled = false;
-    Promise.all([aiGetModels(), aiGetDefaultModel()]).then(
-      ([rawModels, defaultModel]) => {
-        if (cancelled) return;
-        setModels(rawModels);
-        setSelectedModel(defaultModel);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!flowResponse) return;
+    const expiresAt = Date.now() + flowResponse.expires_in * 1000;
+    const timer = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
+      setCountdown(remaining);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [flowResponse]);
 
   // --- Auto-scroll to bottom on new messages ---
   useEffect(() => {
@@ -88,6 +96,27 @@ export function AiAssistant({
     [instanceId, crashLog, crashSignatures, suspects, messages.length],
   );
 
+  // --- Device code flow ---
+  const startDeviceFlow = useCallback(async () => {
+    setError(null);
+    setFlowResponse(null);
+    setPolling(false);
+    try {
+      const flow = await copilotLogin();
+      setFlowResponse(flow);
+      setCountdown(flow.expires_in);
+      setPolling(true);
+      const token = await copilotLoginPoll(flow.device_code, flow.interval);
+      setCopilotToken(token);
+      setFlowResponse(null);
+      setPolling(false);
+    } catch (e) {
+      setError(formatError(e));
+      setFlowResponse(null);
+      setPolling(false);
+    }
+  }, []);
+
   // --- Send handler ---
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
@@ -101,17 +130,23 @@ export function AiAssistant({
     setError(null);
 
     try {
-      const response = await aiChat(updated, context, selectedModel);
+      const response = await aiChat(updated, context);
       setMessages((prev) => [
         ...prev,
         { role: 'assistant', content: response.content },
       ]);
     } catch (e) {
-      setError(formatError(e));
+      const err = e as Record<string, unknown>;
+      if (err?.code === 'ERR_AI_RATE_LIMIT') {
+        setRateLimited(true);
+        setError('You\'ve reached your free monthly limit (50 Copilot requests). Your limit resets next month.');
+      } else {
+        setError(formatError(e));
+      }
     } finally {
       setLoading(false);
     }
-  }, [input, loading, messages, context, selectedModel]);
+  }, [input, loading, messages, context]);
 
   // --- Keyboard shortcut: Enter to send, Shift+Enter for newline ---
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -136,21 +171,36 @@ export function AiAssistant({
     setError(null);
 
     try {
-      const response = await aiChat(messagesToSend, context, selectedModel);
+      const response = await aiChat(messagesToSend, context);
       setMessages((prev) => [...prev, { role: 'assistant', content: response.content }]);
     } catch (e) {
-      setError(formatError(e));
+      const err = e as Record<string, unknown>;
+      if (err?.code === 'ERR_AI_RATE_LIMIT') {
+        setRateLimited(true);
+        setError('You\'ve reached your free monthly limit (50 Copilot requests). Your limit resets next month.');
+      } else {
+        setError(formatError(e));
+      }
     } finally {
       setLoading(false);
     }
-  }, [messages, context, selectedModel]);
+  }, [messages, context]);
 
-  // --- Auth gate ---
-  if (authenticated === false) {
+  // --- Copilot auth gate ---
+  if (copilotLoading) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center rounded-xl border border-border bg-background">
+        <p className="text-sm text-muted-foreground">Loading…</p>
+      </div>
+    );
+  }
+
+  // --- Device code flow (not authenticated) ---
+  if (copilotToken === null) {
     return (
       <div className="flex h-full w-full flex-col rounded-xl border border-border bg-background">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold">AI Assistant</h2>
+          <h2 className="text-sm font-semibold">Agora Instance Assistant</h2>
           <button
             onClick={onClose}
             className="text-muted-foreground hover:text-foreground"
@@ -159,27 +209,73 @@ export function AiAssistant({
             &times;
           </button>
         </div>
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
-          <div className="text-3xl" aria-hidden="true">
-            &#129302;
-          </div>
-          <p className="text-sm text-muted-foreground">
-            Sign in with GitHub to use the AI assistant. Your GitHub account
-            provides free access to AI models via GitHub Models.
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-8 text-center">
+          <div className="text-3xl" aria-hidden="true">&#129302;</div>
+          <h3 className="text-base font-medium text-foreground">
+            Need help optimizing your mods?
+          </h3>
+          <p className="max-w-xs text-sm text-muted-foreground">
+            Activate your built-in assistant to diagnose crashes, resolve conflicts,
+            and get mod recommendations — powered by GitHub Copilot.
           </p>
-          <p className="text-xs text-muted-foreground">
-            No separate API key needed.
-          </p>
+          {flowResponse === null ? (
+            <>
+              <button
+                onClick={startDeviceFlow}
+                className="mt-2 rounded-lg bg-primary px-6 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+              >
+                Connect with GitHub
+              </button>
+              <p className="text-xs text-muted-foreground">
+                Free — 50 diagnostic chats/month
+              </p>
+              <div className="flex w-full items-center gap-2 px-8 py-2">
+                <div className="h-px flex-1 bg-border" />
+                <span className="text-xs text-muted-foreground">OR</span>
+                <div className="h-px flex-1 bg-border" />
+              </div>
+              <button
+                onClick={startDeviceFlow}
+                className="text-xs text-muted-foreground underline hover:text-foreground"
+              >
+                Sign in with different account
+              </button>
+            </>
+          ) : (
+            <div className="flex flex-col items-center gap-4">
+              <p className="text-sm text-muted-foreground">
+                Enter the following code on GitHub:
+              </p>
+              <div className="rounded-lg border border-border bg-muted px-8 py-4">
+                <span className="select-all text-2xl font-bold tracking-widest text-foreground">
+                  {flowResponse.user_code}
+                </span>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => navigator.clipboard.writeText(flowResponse.user_code)}
+                  className="rounded-lg border border-border bg-background px-4 py-2 text-sm text-foreground transition-colors hover:bg-muted"
+                >
+                  Copy code
+                </button>
+                <button
+                  onClick={() => window.open(flowResponse.verification_uri, '_blank')}
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                >
+                  Open GitHub Activation Page
+                </button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {polling
+                  ? `Waiting for approval… Code expires in ${countdown}s`
+                  : `Code expires in ${countdown}s`}
+              </p>
+              {error && (
+                <p className="text-xs text-destructive">{error}</p>
+              )}
+            </div>
+          )}
         </div>
-      </div>
-    );
-  }
-
-  // --- Loading auth ---
-  if (authenticated === null) {
-    return (
-      <div className="flex h-full w-full flex-col items-center justify-center rounded-xl border border-border bg-background">
-        <p className="text-sm text-muted-foreground">Loading…</p>
       </div>
     );
   }
@@ -191,27 +287,24 @@ export function AiAssistant({
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
         <h2 className="text-sm font-semibold">AI Assistant</h2>
         <div className="flex items-center gap-2">
-          {models.length > 0 && (
-            <div className="flex items-center gap-1">
-              <label
-                htmlFor="ai-model-select"
-                className="text-[11px] text-muted-foreground"
-              >
-                Model:
-              </label>
-              <select
-                id="ai-model-select"
-                value={selectedModel ?? ''}
-                onChange={(e) => setSelectedModel(e.target.value)}
-                className="rounded-md border border-border bg-background px-2 py-1 text-[11px] text-foreground outline-none focus:ring-1 focus:ring-brand-500"
-              >
-                {models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+          {copilotToken && (
+            <span className="text-[11px] text-muted-foreground">
+              Connected as {copilotToken.username} ({copilotToken.plan})
+            </span>
+          )}
+          {copilotToken && (
+            <button
+              onClick={async () => {
+                await copilotLogout();
+                setCopilotToken(null);
+                setMessages([]);
+                setError(null);
+                setRateLimited(false);
+              }}
+              className="text-[11px] text-muted-foreground underline hover:text-foreground"
+            >
+              Sign out
+            </button>
           )}
           <button
             onClick={onClose}
@@ -227,8 +320,8 @@ export function AiAssistant({
       {messages.length === 0 && (
         <div className="border-b border-border px-4 py-2">
           <p className="text-[11px] text-muted-foreground">
-            Your crash data is sent to GitHub Models for analysis. This uses
-            your GitHub account — no separate API key needed.
+            Your crash data is sent to GitHub Copilot for analysis.
+            Free tier: 50 diagnostic chats per month.
           </p>
         </div>
       )}
@@ -296,6 +389,18 @@ export function AiAssistant({
         )}
       </div>
 
+      {/* Rate limit banner */}
+      {rateLimited && (
+        <div className="border-t border-border px-4 py-3">
+          <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3">
+            <p className="text-sm text-amber-600 dark:text-amber-400">
+              You've reached your free monthly limit (50 Copilot requests).
+              Your limit resets next month.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Input area */}
       <div className="border-t border-border p-3">
         <div className="flex gap-2">
@@ -303,13 +408,14 @@ export function AiAssistant({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about crashes, mods, or anything…"
+            placeholder={rateLimited ? 'Monthly limit reached' : "Ask about crashes, mods, or anything…"}
             rows={2}
-            className="flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none placeholder-muted-foreground focus:border-primary focus:ring-1 focus:ring-brand-500"
+            disabled={rateLimited}
+            className="flex-1 resize-none rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground outline-none placeholder-muted-foreground focus:border-primary focus:ring-1 focus:ring-brand-500 disabled:cursor-not-allowed disabled:opacity-50"
           />
           <button
             onClick={handleSend}
-            disabled={loading || !input.trim()}
+            disabled={loading || !input.trim() || rateLimited}
             className="self-end rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             Send

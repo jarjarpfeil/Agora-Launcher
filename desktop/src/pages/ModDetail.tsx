@@ -31,6 +31,9 @@ import {
   type RawModrinthVersionCandidate,
   listRawModrinthVersions,
   installRawModrinth,
+  getCuratedAnnotation,
+  type CuratedAnnotation,
+  type ModrinthProjectFull,
 } from '../lib/tauri';
 
 type CompatibleVersionEntry = Record<string, unknown> | string;
@@ -116,7 +119,9 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   const [instancesLoading, setInstancesLoading] = useState(false);
   const [selectedInstanceId, setSelectedInstanceId] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<ModVersionCandidate[]>([]);
+  const [modrinthCandidates, setModrinthCandidates] = useState<RawModrinthVersionCandidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<ModVersionCandidate | null>(null);
+  const [selectedModrinthCandidate, setSelectedModrinthCandidate] = useState<RawModrinthVersionCandidate | null>(null);
   const [phase, setPhase] = useState<'idle' | 'loadingVersions' | 'pickingVersion' | 'installing' | 'done' | 'error'>('idle');
   const [installMsg, setInstallMsg] = useState<string | null>(null);
 
@@ -136,7 +141,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   const [flagError, setFlagError] = useState<string | null>(null);
 
   // Tab state
-  const [activeTab, setActiveTab] = useState<'about' | 'versions' | 'gallery' | 'links' | 'reviews'>('about');
+  const [activeTab, setActiveTab] = useState<'description' | 'gallery' | 'versions' | 'agora'>('description');
 
   // Versions tab: live Modrinth version list + selected version detail
   const [modrinthVersions, setModrinthVersions] = useState<RawModrinthVersionCandidate[]>([]);
@@ -149,9 +154,13 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   const [versionInstallPhase, setVersionInstallPhase] = useState<'idle' | 'installing' | 'done' | 'error'>('idle');
   const [versionInstallMsg, setVersionInstallMsg] = useState<string | null>(null);
 
-  // Runtime Modrinth gallery fallback
-  const [runtimeGallery, setRuntimeGallery] = useState<string[]>([]);
-  const [galleryLoading, setGalleryLoading] = useState(false);
+  // Phase 7: curated annotation overlay for Modrinth-linked projects
+  const [curatedAnnotation, setCuratedAnnotation] = useState<CuratedAnnotation | null>(null);
+
+  // Full Modrinth project data (primary source when modrinth_id exists)
+  const [modrinthProject, setModrinthProject] = useState<ModrinthProjectFull | null>(null);
+  const [_modrinthProjectLoading, setModrinthProjectLoading] = useState(false);
+  const [_modrinthProjectError, setModrinthProjectError] = useState<string | null>(null);
 
   // Inline create-instance state (inside install flow)
   const [showCreateInline, setShowCreateInline] = useState(false);
@@ -170,10 +179,50 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     (async () => {
       try {
         if (!cancelled) setLoading(true);
+        setError(null);
+        // Try registry first
         const result = await getRegistryItem(itemId);
         if (!cancelled) {
-          setItem(result);
-          if (!result) setError('Mod not found in the registry.');
+          if (result) {
+            setItem(result);
+          } else {
+            // Not in registry — try as a Modrinth project ID
+            const project = await fetchModrinthProject(itemId);
+            if (!cancelled) {
+              if (project) {
+                setModrinthProject(project);
+                // Build a synthetic RegistryItem from Modrinth data so existing rendering works
+                setItem({
+                  id: project.id,
+                  name: project.title,
+                  content_type: 'mod',
+                  download_strategy: 'modrinth_id',
+                  source_identifier: project.id,
+                  sha256: '',
+                  upvotes: 0,
+                  downvotes: 0,
+                  net_score: 0,
+                  velocity: 0,
+                  status: 'active',
+                  is_immune: false,
+                  immunity_reason: null,
+                  allow_comments: true,
+                  icon_url: project.icon_url,
+                  gallery_urls_json: project.gallery_urls.length > 0 ? JSON.stringify(project.gallery_urls) : null,
+                  date_added: null,
+                  compatible_versions_json: null,
+                  description: project.description,
+                  body_markdown: project.body,
+                  page_url: project.page_url,
+                  license_id: project.license_id,
+                  source_updated_at: project.source_updated_at,
+                  modrinth_id: project.id,
+                } as any);
+              } else {
+                setError('Mod not found.');
+              }
+            }
+          }
         }
       } catch (e) {
         if (!cancelled) setError(formatError(e));
@@ -306,35 +355,38 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     return () => { cancelled = true; };
   }, [item]);
 
-  // Runtime gallery fallback: fetch from Modrinth if the registry has no gallery.
+  // Fetch curated annotation for ALL items (modrinth_id or registry id).
   useEffect(() => {
     if (!item) return;
-    // Only fetch if the registry has no gallery images.
-    let hasGallery = false;
-    if (item.gallery_urls_json) {
+    let cancelled = false;
+    (async () => {
       try {
-        const parsed = JSON.parse(item.gallery_urls_json);
-        hasGallery = Array.isArray(parsed) && parsed.some((u: unknown) => typeof u === 'string');
+        const key = item.modrinth_id || item.id;
+        const ann = await getCuratedAnnotation(key);
+        if (!cancelled) setCuratedAnnotation(ann);
       } catch {
-        // parse failure — treat as no gallery
+        // Annotation fetch failure is non-fatal.
       }
-    }
-    if (hasGallery) return;
-    if (!item.modrinth_id) return;
+    })();
+    return () => { cancelled = true; };
+  }, [item]);
 
+  // Fetch full Modrinth project data when the item has a modrinth_id.
+  useEffect(() => {
+    if (!item?.modrinth_id) return;
     let cancelled = false;
     (async () => {
       try {
         const enabled = await isModrinthEnabled();
         if (cancelled || !enabled) return;
-        setGalleryLoading(true);
+        setModrinthProjectLoading(true);
         const project = await fetchModrinthProject(item.modrinth_id!);
         if (cancelled) return;
-        setRuntimeGallery(project.gallery_urls ?? []);
-      } catch {
-        // Modrinth fetch failure (disabled, network, etc.) — silent.
+        setModrinthProject(project);
+      } catch (e) {
+        if (!cancelled) setModrinthProjectError(formatError(e));
       } finally {
-        if (!cancelled) setGalleryLoading(false);
+        if (!cancelled) setModrinthProjectLoading(false);
       }
     })();
     return () => { cancelled = true; };
@@ -421,6 +473,8 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   const velocityLabel =
     item.velocity > 0 ? `▲ ${item.velocity.toFixed(1)}` : item.velocity < 0 ? `▼ ${item.velocity.toFixed(1)}` : '0.0';
 
+  const isModrinthInstall = !!(item.modrinth_id && modrinthProject);
+
   const handleInstall = async () => {
     setShowInstallFlow(true);
     setPhase('idle');
@@ -445,11 +499,18 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     if (!selectedInstanceId) return;
     setPhase('loadingVersions');
     setCandidates([]);
+    setModrinthCandidates([]);
     setSelectedCandidate(null);
+    setSelectedModrinthCandidate(null);
     setInstallMsg(null);
     try {
-      const vers = await listModVersions(selectedInstanceId, itemId);
-      setCandidates(vers);
+      if (isModrinthInstall) {
+        const vers = await listRawModrinthVersions(selectedInstanceId, item.modrinth_id!);
+        setModrinthCandidates(vers);
+      } else {
+        const vers = await listModVersions(selectedInstanceId, itemId);
+        setCandidates(vers);
+      }
       setPhase('pickingVersion');
     } catch (e) {
       setPhase('error');
@@ -458,7 +519,28 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   };
 
   const handleConfirmInstall = async () => {
-    if (!selectedInstanceId || !selectedCandidate) return;
+    if (!selectedInstanceId || (!selectedCandidate && !selectedModrinthCandidate)) return;
+
+    if (isModrinthInstall && selectedModrinthCandidate) {
+      setPhase('installing');
+      setInstallMsg(null);
+      try {
+        await installRawModrinth(
+          selectedInstanceId,
+          item.modrinth_id!,
+          selectedModrinthCandidate,
+          item.content_type === 'pack' ? 'modpack' : 'mod',
+        );
+        setPhase('done');
+        setInstallMsg(`Installed ${selectedModrinthCandidate.filename} to ${instances.find((i) => i.instance_id === selectedInstanceId)?.name ?? selectedInstanceId}.`);
+      } catch (e) {
+        setPhase('error');
+        setInstallMsg(formatError(e));
+      }
+      return;
+    }
+
+    if (!selectedCandidate) return;
     // v1: fetch dependency plan for informational preview before install.
     // Actual auto-batch-install of deps is a future enhancement — for v1 we
     // show the plan as INFORMATIONAL and proceed with the main mod install.
@@ -501,7 +583,9 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     setInstallMsg(null);
     setSelectedInstanceId(null);
     setCandidates([]);
+    setModrinthCandidates([]);
     setSelectedCandidate(null);
+    setSelectedModrinthCandidate(null);
     setShowDepPrompt(false);
     setDepPlan(null);
   };
@@ -620,22 +704,33 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
 
       <section className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start gap-4">
-          {showIcon && (
+          {(modrinthProject?.icon_url || showIcon) && (
             <img
-              src={item.icon_url as string}
-              alt={item.name}
+              src={modrinthProject?.icon_url ?? (item.icon_url as string)}
+              alt={modrinthProject?.title ?? item.name}
               className="h-16 w-16 rounded-lg border object-contain dark:border-border"
             />
           )}
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-2xl font-bold break-words">{item.name}</h2>
-              <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-primary-foreground">
-                {item.content_type}
-              </span>
-              <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
-                {item.download_strategy}
-              </span>
+              <h2 className="text-2xl font-bold break-words">
+                {modrinthProject?.title ?? item.name}
+              </h2>
+              {modrinthProject && (
+                <span className="rounded-full bg-primary px-2 py-0.5 text-xs font-medium uppercase tracking-wide text-primary-foreground">
+                  {item.content_type}
+                </span>
+              )}
+              {curatedAnnotation && (
+                <span className="rounded-full border border-amber-500 bg-amber-50 px-2 py-0.5 text-xs font-semibold uppercase tracking-wide text-amber-800 dark:bg-amber-900/30 dark:text-amber-300 dark:border-amber-600">
+                  Agora Curated
+                </span>
+              )}
+              {!modrinthProject && (
+                <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+                  {item.download_strategy}
+                </span>
+              )}
               {item.status && item.status !== 'active' && (
                 <span className="rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
                   {item.status}
@@ -643,9 +738,15 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
               )}
             </div>
             <p className="text-xs text-muted-foreground mt-1 break-all">
-              {item.source_identifier}
+              {modrinthProject ? item.id : item.source_identifier}
             </p>
-            <p className="text-xs text-muted-foreground mt-2">
+            {modrinthProject?.description && (
+              <p className="text-sm text-foreground mt-2">{modrinthProject.description}</p>
+            )}
+            {!modrinthProject && item.description && (
+              <p className="text-sm text-foreground mt-2">{item.description}</p>
+            )}
+            <p className="text-xs text-muted-foreground mt-3">
               ↑ {item.upvotes} · ↓ {item.downvotes} · net {item.net_score} · velocity {velocityLabel}
             </p>
             {item.date_added && (
@@ -653,25 +754,20 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                 Added {item.date_added}
               </p>
             )}
-            {item.description && (
-              <p className="text-sm text-foreground mt-3">{item.description}</p>
-            )}
-            {(item.license_id || item.source_updated_at || item.page_url) && (
-              <p className="text-xs text-muted-foreground mt-2 flex flex-wrap gap-x-3 gap-y-1">
-                {item.license_id && <span>License: {item.license_id}</span>}
-                {item.source_updated_at && <span>Source updated {item.source_updated_at.slice(0, 10)}</span>}
-                {item.page_url && (
-                  <a
-                    href={item.page_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-primary hover:underline dark:text-primary"
-                  >
-                    View on Modrinth ↗
-                  </a>
-                )}
-              </p>
-            )}
+            <p className="text-xs text-muted-foreground mt-2 flex flex-wrap gap-x-3 gap-y-1">
+              {modrinthProject?.license_id ? <span>License: {modrinthProject.license_id}</span> : item.license_id ? <span>License: {item.license_id}</span> : null}
+              {modrinthProject?.source_updated_at ? <span>Updated {modrinthProject.source_updated_at.slice(0, 10)}</span> : item.source_updated_at ? <span>Source updated {item.source_updated_at.slice(0, 10)}</span> : null}
+              {(modrinthProject?.page_url || item.page_url) && (
+                <a
+                  href={modrinthProject?.page_url ?? item.page_url!}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary hover:underline dark:text-primary"
+                >
+                  View on Modrinth ↗
+                </a>
+              )}
+            </p>
           </div>
         </div>
 
@@ -892,6 +988,43 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     </svg>
                     <p className="text-xs text-muted-foreground mt-2">Loading versions…</p>
                   </div>
+                ) : isModrinthInstall ? (
+                  <ul className="space-y-2 max-h-48 overflow-y-auto">
+                    {modrinthCandidates.map((cand) => (
+                      <li
+                        key={cand.version_id}
+                        className={`rounded-lg border px-3 py-2 text-sm cursor-pointer transition-colors ${
+                          selectedModrinthCandidate?.version_id === cand.version_id
+                            ? 'border-brand-600 bg-card/50 dark:bg-card/20'
+                            : 'border-border hover:bg-accent'
+                        }`}
+                        onClick={() => setSelectedModrinthCandidate(cand)}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium truncate">{cand.version}</span>
+                          {cand.primary && (
+                            <span className="text-[10px] uppercase tracking-wide text-muted-foreground">primary</span>
+                          )}
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-0.5 truncate">{cand.filename}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {cand.mc_versions.join(', ') || '—'}
+                          {' · '}
+                          {cand.loaders.join(', ') || '—'}
+                          {cand.release_date ? ` · ${cand.release_date.slice(0, 10)}` : ''}
+                        </p>
+                        {cand.sha1 ? (
+                          <p className="text-[10px] text-green-600 dark:text-green-400 mt-0.5">
+                            SHA-1: {cand.sha1.slice(0, 12)}…
+                          </p>
+                        ) : (
+                          <p className="text-[10px] text-destructive mt-0.5">
+                            No SHA-1 published — install refused
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
                 ) : (
                   <ul className="space-y-2 max-h-48 overflow-y-auto">
                     {candidates.map((cand, idx) => (
@@ -921,20 +1054,29 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                     ))}
                   </ul>
                 )}
-                {selectedCandidate && (
+                {(selectedCandidate || selectedModrinthCandidate) && (
                   <button
                     onClick={handleConfirmInstall}
-                    className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                    disabled={!!(isModrinthInstall && selectedModrinthCandidate && !selectedModrinthCandidate.sha1)}
+                    className="mt-3 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                   >
-                    Install {selectedCandidate.filename}
+                    Install {(selectedCandidate ?? selectedModrinthCandidate)!.filename}
                   </button>
                 )}
               </div>
             )}
 
             {/* Empty versions */}
-            {selectedInstanceId && candidates.length === 0 && phase === 'pickingVersion' && (
-              <p className="text-sm text-muted-foreground">No compatible versions found.</p>
+            {selectedInstanceId && phase === 'pickingVersion' && (
+              isModrinthInstall ? (
+                modrinthCandidates.length === 0 && (
+                  <p className="text-sm text-muted-foreground">No compatible versions found.</p>
+                )
+              ) : (
+                candidates.length === 0 && (
+                  <p className="text-sm text-muted-foreground">No compatible versions found.</p>
+                )
+              )
             )}
 
             {/* Step 3: Installing */}
@@ -971,11 +1113,10 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-border">
         {([
-          { key: 'about' as const, label: 'About' },
-          { key: 'versions' as const, label: 'Versions' },
+          { key: 'description' as const, label: 'About' },
           { key: 'gallery' as const, label: 'Gallery' },
-          { key: 'links' as const, label: 'Links' },
-          { key: 'reviews' as const, label: 'Reviews' },
+          { key: 'versions' as const, label: 'Versions' },
+          ...(curatedAnnotation ? [{ key: 'agora' as const, label: 'Agora' }] : []),
         ] as const).map((tab) => (
           <button
             key={tab.key}
@@ -984,7 +1125,7 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
               activeTab === tab.key
                 ? 'border-brand-600 text-primary dark:border-primary dark:text-primary'
                 : 'border-transparent text-muted-foreground hover:text-foreground hover:border-border'
-            }`}
+            } ${tab.key === 'agora' ? 'text-amber-700 dark:text-amber-400' : ''}`}
           >
             {tab.label}
           </button>
@@ -992,53 +1133,97 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
       </div>
 
       {/* Tab content */}
-      {activeTab === 'about' && (
+      {activeTab === 'description' && (
         <section className="rounded-xl border border-border bg-card p-4 space-y-4">
-          {curatorNotes && (
-            <div>
-              <h3 className="font-semibold text-sm mb-2">Curator Notes</h3>
-              <p className="text-sm whitespace-pre-wrap text-muted-foreground">{curatorNotes}</p>
-            </div>
+          {modrinthProject && (
+            <>
+              {/* Modrinth body markdown */}
+              {modrinthProject.body ? (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-semibold text-sm">About</h3>
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Source: Modrinth
+                    </span>
+                  </div>
+                  <div className="prose prose-sm dark:prose-invert max-w-none text-foreground">
+                    <ReactMarkdown
+                      rehypePlugins={[[rehypeRaw, { passThrough: ['html'] }], [rehypeSanitize, SANITIZE_SCHEMA]]}
+                      components={{
+                        a: ({ node, ...props }) => (
+                          <a {...props} target="_blank" rel="noopener noreferrer" />
+                        ),
+                        img: ({ node, ...props }) => (
+                          <img {...props} loading="lazy" className="max-w-full h-auto rounded-lg" />
+                        ),
+                      }}
+                    >
+                      {modrinthProject.body}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No description available from Modrinth.</p>
+              )}
+            </>
           )}
-          {item.body_markdown && (
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-semibold text-sm">About</h3>
-                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
-                  Source: upstream
-                </span>
-              </div>
-              {/*
-                body_markdown is community-authored content baked into the signed
-                registry.db by the nightly compiler. It is rendered with
-                react-markdown + rehype-raw + rehype-sanitize: rehype-raw parses
-                upstream HTML (e.g. Modrinth <details>/<summary>, tables) into the
-                hast tree, then rehype-sanitize strips <script>, on* handlers,
-                javascript:/data: URLs, <iframe>, and `style` attributes via an
-                allowlist BEFORE React renders — so no unsafe nodes ever reach the
-                DOM. This satisfies the AGENTS.md prohibition on
-                dangerouslySetInnerHTML for community content. Links open in a new
-                tab with safe rel attributes.
-              */}
-              <div className="prose prose-sm dark:prose-invert max-w-none text-foreground">
-                <ReactMarkdown
-                  rehypePlugins={[[rehypeRaw, { passThrough: ['html'] }], [rehypeSanitize, SANITIZE_SCHEMA]]}
-                  components={{
-                    a: ({ node, ...props }) => (
-                      <a {...props} target="_blank" rel="noopener noreferrer" />
-                    ),
-                    img: ({ node, ...props }) => (
-                      <img {...props} loading="lazy" className="max-w-full h-auto rounded-lg" />
-                    ),
-                  }}
-                >
-                  {item.body_markdown}
-                </ReactMarkdown>
-              </div>
-            </div>
+          {!modrinthProject && (
+            <>
+              {/* Registry body markdown */}
+              {item.body_markdown ? (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="font-semibold text-sm">About</h3>
+                    <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Source: upstream
+                    </span>
+                  </div>
+                  <div className="prose prose-sm dark:prose-invert max-w-none text-foreground">
+                    <ReactMarkdown
+                      rehypePlugins={[[rehypeRaw, { passThrough: ['html'] }], [rehypeSanitize, SANITIZE_SCHEMA]]}
+                      components={{
+                        a: ({ node, ...props }) => (
+                          <a {...props} target="_blank" rel="noopener noreferrer" />
+                        ),
+                        img: ({ node, ...props }) => (
+                          <img {...props} loading="lazy" className="max-w-full h-auto rounded-lg" />
+                        ),
+                      }}
+                    >
+                      {item.body_markdown}
+                    </ReactMarkdown>
+                  </div>
+                </div>
+              ) : item.description ? (
+                <div>
+                  <h3 className="font-semibold text-sm mb-2">About</h3>
+                  <p className="text-sm text-foreground whitespace-pre-wrap">{item.description}</p>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">No information available.</p>
+              )}
+            </>
           )}
-          {!curatorNotes && !item.body_markdown && (
-            <p className="text-sm text-muted-foreground">No information available.</p>
+        </section>
+      )}
+
+      {activeTab === 'gallery' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
+          <h3 className="font-semibold text-sm">Gallery</h3>
+          {((modrinthProject && modrinthProject.gallery_urls.length > 0) || galleryUrls.length > 0) ? (
+            <div className="grid grid-cols-2 gap-3">
+              {(modrinthProject ? modrinthProject.gallery_urls : galleryUrls).map((url, index) => (
+                <img
+                  key={index}
+                  src={url}
+                  alt={`${item.name} screenshot ${index + 1}`}
+                  className="rounded-lg border border-border w-full h-48 object-cover"
+                  loading="lazy"
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No gallery images available.</p>
           )}
         </section>
       )}
@@ -1178,162 +1363,153 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
         </section>
       )}
 
-      {activeTab === 'gallery' && (
-        <section className="rounded-xl border border-border bg-card p-4">
-          <h3 className="font-semibold text-sm mb-3">Gallery</h3>
-          {(() => {
-            const urls = galleryUrls.length > 0 ? galleryUrls : runtimeGallery;
-            if (urls.length === 0) {
-              return galleryLoading ? (
-                <p className="text-sm text-muted-foreground">Loading gallery…</p>
-              ) : (
-                <p className="text-sm text-muted-foreground">No gallery images available.</p>
-              );
-            }
-            return (
-              <div className="grid grid-cols-2 gap-3">
-                {urls.map((url, index) => (
-                  <img
-                    key={index}
-                    src={url}
-                    alt={`${item.name} screenshot ${index + 1}`}
-                    className="rounded-lg border border-border w-full h-40 object-cover"
-                    loading="lazy"
-                  />
-                ))}
-              </div>
-            );
-          })()}
-        </section>
-      )}
-
-      {activeTab === 'links' && (
-        <section className="rounded-xl border border-border bg-card p-4">
-          <h3 className="font-semibold text-sm mb-3">External Links</h3>
-          <ul className="space-y-2 text-sm">
-            {(item.page_url || item.modrinth_id) && (
-              <li>
-                <a
-                  href={item.page_url || `https://modrinth.com/${item.content_type === 'pack' ? 'project' : 'mod'}/${item.modrinth_id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-primary hover:underline dark:text-primary flex items-center gap-1"
-                >
-                  View on Modrinth ↗
-                </a>
-              </li>
-            )}
-            {item.download_strategy === 'github_release' && item.source_identifier && !item.source_identifier.includes('://') && item.source_identifier.includes('/') && (
-              <li>
-                <a
-                  href={`https://github.com/${item.source_identifier}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-primary hover:underline dark:text-primary flex items-center gap-1"
-                >
-                  View on GitHub ↗
-                </a>
-              </li>
-            )}
-            {!item.page_url && !item.modrinth_id && !(item.download_strategy === 'github_release' && item.source_identifier && !item.source_identifier.includes('://') && item.source_identifier.includes('/')) && (
-              <p className="text-sm text-muted-foreground">No external links available.</p>
-            )}
-          </ul>
-        </section>
-      )}
-
-      {activeTab === 'reviews' && (
-        <section className="rounded-xl border border-border bg-card p-4">
-          <h3 className="font-semibold text-sm mb-3">Reviews</h3>
-          {item.allow_comments ? (
-            !authed ? (
-              <>
-                <p className="text-sm text-muted-foreground mb-2">
-                  Reviews are disabled for this mod.
+      {activeTab === 'agora' && (
+        <section className="rounded-xl border border-amber-200/50 bg-card p-4 space-y-5 dark:border-amber-800/30">
+          {/* Curator Note */}
+          {curatedAnnotation && (
+            <div>
+              <h3 className="font-semibold text-sm flex items-center gap-2 mb-2">
+                <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
+                  Agora Curated
+                </span>
+                {curatedAnnotation.net_score != null && (
+                  <span className="text-xs text-muted-foreground">
+                    net score: {curatedAnnotation.net_score.toFixed(1)}
+                  </span>
+                )}
+              </h3>
+              {curatedAnnotation.curator_note && (
+                <p className="text-sm whitespace-pre-wrap text-foreground bg-amber-50/50 dark:bg-amber-900/10 rounded-lg border border-amber-200/50 dark:border-amber-800/30 p-3">
+                  {curatedAnnotation.curator_note}
                 </p>
-                <p className="text-xs text-muted-foreground">
-                  Sign in to flag reviews.
-                </p>
-              </>
-            ) : reviewsLoading ? (
-              <div className="text-center py-2">
-                <p className="text-sm text-muted-foreground">Loading reviews…</p>
-              </div>
-            ) : reviews.length === 0 ? (
-              <p className="text-sm text-muted-foreground">
-                No community reviews yet.
-              </p>
-            ) : (
-              <>
-                {flagResult && (
-                  <p className="text-sm text-green-600 dark:text-green-400 mb-3">
-                    Flag submitted.{' '}
-                    <a
-                      href={flagResult}
-                      onClick={(e) => {
-                        if (!flagResult.startsWith('https://')) {
-                          e.preventDefault();
-                        }
-                      }}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline"
+              )}
+              {curatedAnnotation.base_categories.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {curatedAnnotation.base_categories.map((cat) => (
+                    <span
+                      key={cat}
+                      className="rounded-full border border-amber-300/50 dark:border-amber-700/50 px-2 py-0.5 text-xs text-muted-foreground"
                     >
-                      View admin alert ↗
-                    </a>
-                  </p>
-                )}
-                {flagError && (
-                  <p className="text-sm text-destructive mb-3">
-                    {flagError}
-                  </p>
-                )}
-                <ul className="space-y-3">
-                  {reviews.map((review) => {
-                    const rl = rateLimit;
-                    const disabledFlag = rl && !rl.can_flag;
-                    const resetTime = disabledFlag
-                      ? new Date(
-                          rl.reset_hour_at_unix * 1000,
-                        ).toLocaleString()
-                      : '';
-                    return (
-                      <li
-                        key={review.issue_number}
-                        className="rounded-lg border border-border px-3 py-2"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-xs font-medium text-muted-foreground">
-                            {review.author ?? 'Anonymous'}
-                          </span>
-                          {review.created_at && (
-                            <span className="text-xs text-muted-foreground">
-                              {new Date(review.created_at).toLocaleString()}
-                            </span>
-                          )}
-                          <button
-                            onClick={() => handleFlagReview(review)}
-                            disabled={disabledFlag || flaggingId === review.issue_number}
-                            title={disabledFlag ? `Flag limit reached — resets at ${resetTime}` : ''}
-                            className="text-xs text-muted-foreground hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed"
-                          >
-                            🚩 Flag
-                          </button>
-                        </div>
-                        <p className="text-sm mt-1 whitespace-pre-wrap text-foreground">
-                          {review.text}
-                        </p>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </>
-            )
-          ) : (
-            <p className="text-sm text-muted-foreground">
-              Reviews are disabled for this mod.
-            </p>
+                      {cat}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
           )}
+
+          {curatorNotes && (
+            <div>
+              <h3 className="font-semibold text-sm mb-2">Registry Curator Notes</h3>
+              <p className="text-sm whitespace-pre-wrap text-muted-foreground">{curatorNotes}</p>
+            </div>
+          )}
+
+          {/* Known conflicts (placeholder — no conflicts data source yet) */}
+          <div>
+            <h3 className="font-semibold text-sm mb-2">Known Conflicts</h3>
+            <p className="text-sm text-muted-foreground">No known conflicts reported by curators.</p>
+          </div>
+
+          {/* Curated score */}
+          <div>
+            <h3 className="font-semibold text-sm mb-2">Curated Score</h3>
+            <p className="text-xs text-muted-foreground">
+              ↑ {item.upvotes} · ↓ {item.downvotes} · net {item.net_score} · velocity {velocityLabel}
+            </p>
+          </div>
+
+          {/* Reviews */}
+          <div className="pt-2 border-t border-border">
+            <h3 className="font-semibold text-sm mb-3">Community Reviews</h3>
+            {item.allow_comments ? (
+              !authed ? (
+                <>
+                  <p className="text-sm text-muted-foreground mb-2">
+                    Reviews require GitHub authentication.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Sign in to flag reviews.
+                  </p>
+                </>
+              ) : reviewsLoading ? (
+                <div className="text-center py-2">
+                  <p className="text-sm text-muted-foreground">Loading reviews…</p>
+                </div>
+              ) : reviews.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No community reviews yet.
+                </p>
+              ) : (
+                <>
+                  {flagResult && (
+                    <p className="text-sm text-green-600 dark:text-green-400 mb-3">
+                      Flag submitted.{' '}
+                      <a
+                        href={flagResult}
+                        onClick={(e) => {
+                          if (!flagResult.startsWith('https://')) {
+                            e.preventDefault();
+                          }
+                        }}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        View admin alert ↗
+                      </a>
+                    </p>
+                  )}
+                  {flagError && (
+                    <p className="text-sm text-destructive mb-3">
+                      {flagError}
+                    </p>
+                  )}
+                  <ul className="space-y-3">
+                    {reviews.map((review) => {
+                      const rl = rateLimit;
+                      const disabledFlag = rl && !rl.can_flag;
+                      const resetTime = disabledFlag
+                        ? new Date(rl.reset_hour_at_unix * 1000).toLocaleString()
+                        : '';
+                      return (
+                        <li
+                          key={review.issue_number}
+                          className="rounded-lg border border-border px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-medium text-muted-foreground">
+                              {review.author ?? 'Anonymous'}
+                            </span>
+                            {review.created_at && (
+                              <span className="text-xs text-muted-foreground">
+                                {new Date(review.created_at).toLocaleString()}
+                              </span>
+                            )}
+                            <button
+                              onClick={() => handleFlagReview(review)}
+                              disabled={disabledFlag || flaggingId === review.issue_number}
+                              title={disabledFlag ? `Flag limit reached — resets at ${resetTime}` : ''}
+                              className="text-xs text-muted-foreground hover:text-destructive disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              🚩 Flag
+                            </button>
+                          </div>
+                          <p className="text-sm mt-1 whitespace-pre-wrap text-foreground">
+                            {review.text}
+                          </p>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </>
+              )
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Reviews are disabled for this mod.
+              </p>
+            )}
+          </div>
         </section>
       )}
     </div>

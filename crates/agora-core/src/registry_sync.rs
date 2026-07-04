@@ -70,6 +70,15 @@ pub async fn check_and_download_update(
     local_state_path: &std::path::PathBuf,
     force: bool,
 ) -> LauncherResult<RegistryStatus> {
+    let conn = db::local_state_connection(local_state_path)
+        .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?;
+    if !db::is_network_enabled(&conn, "network_registry_sync_enabled") {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: "Registry sync is disabled in Privacy settings.".into(),
+        });
+    }
+    drop(conn);
     let cached_tag = get_cached_tag(local_state_path)?;
     let has_cached_db = paths::registry_db_path(app_data_dir)
         .map(|p| p.exists())

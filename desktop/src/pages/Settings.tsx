@@ -3,8 +3,8 @@ import { useTranslation } from 'react-i18next';
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import {
-  aiGetDefaultModel,
-  aiGetModels,
+  copilotStatus,
+  copilotLogout,
   formatError,
   getMcpSkillContent,
   getMcpStatus,
@@ -15,8 +15,9 @@ import {
   startMcpServer,
   stopMcpServer,
 } from '../lib/tauri';
-import type { AvailableModel, InstanceRow, McpStatus } from '../lib/tauri';
+import type { CopilotToken, InstanceRow, McpStatus } from '../lib/tauri';
 import { Privacy } from './Privacy';
+import { useAdvancedMode } from '../components/AdvancedModeContext';
 
 // --- CopyButton helper ---
 
@@ -56,10 +57,10 @@ export function Settings() {
   const [skillLoading, setSkillLoading] = useState(false);
   const [skillCopied, setSkillCopied] = useState(false);
 
-  // AI Model selector state
-  const [aiModels, setAiModels] = useState<AvailableModel[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('');
-  const [modelLoading, setModelLoading] = useState(false);
+  // AI Copilot state
+  const [copilotToken, setCopilotToken] = useState<CopilotToken | null>(null);
+  const [copilotLoading, setCopilotLoading] = useState(true);
+  const { advancedMode, toggleAdvanced } = useAdvancedMode();
   const isWindows = typeof navigator !== 'undefined' && navigator.platform.includes('Win');
 
   const fetchMcpStatus = async () => {
@@ -132,28 +133,17 @@ export function Settings() {
     };
   }, [aiMcp]);
 
-  // Load AI models on mount
+  // Check Copilot connection status on mount
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setModelLoading(true);
       try {
-        const [models, defaultModel] = await Promise.all([
-          aiGetModels(),
-          aiGetDefaultModel(),
-        ]);
-        if (cancelled) return;
-        setAiModels(models);
-        const stored = await getSetting('ai_model');
-        if (!cancelled) {
-          if (typeof stored === 'string' && stored) {
-            setSelectedModel(stored);
-          } else {
-            setSelectedModel(defaultModel);
-          }
-        }
+        const token = await copilotStatus();
+        if (!cancelled) setCopilotToken(token);
+      } catch {
+        if (!cancelled) setCopilotToken(null);
       } finally {
-        if (!cancelled) setModelLoading(false);
+        if (!cancelled) setCopilotLoading(false);
       }
     })();
     return () => {
@@ -237,10 +227,10 @@ export function Settings() {
     }
   };
 
-  const handleModelChange = async (modelId: string) => {
-    setSelectedModel(modelId);
+  const handleCopilotLogout = async () => {
     try {
-      await setSetting('ai_model', modelId);
+      await copilotLogout();
+      setCopilotToken(null);
     } catch (e) {
       alert(formatError(e));
     }
@@ -287,6 +277,23 @@ export function Settings() {
             <option value="pl">{t('language.pl')}</option>
           </select>
         </label>
+      </div>
+
+      {/* Advanced Mode Toggle */}
+      <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+        <h3 className="font-semibold">Advanced mode</h3>
+        <label className="flex items-center justify-between">
+          <span className="text-sm">Show advanced settings</span>
+          <input
+            type="checkbox"
+            checked={advancedMode}
+            onChange={toggleAdvanced}
+            className="h-5 w-5 accent-brand-600"
+          />
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Reveal JVM arguments, garbage collector settings, custom commands, and other power-user options.
+        </p>
       </div>
 
       {loading ? (
@@ -339,13 +346,13 @@ export function Settings() {
               />
             </label>
              {(aiMcp || aiChatEnabled) && (
-              <div className="rounded-lg bg-gray-50 dark:bg-gray-900/50 p-3 space-y-2">
+              <div className="rounded-lg bg-muted p-3 space-y-2">
                 <h4 className="text-xs font-semibold">Two ways to use AI with Agora</h4>
                 <p className="text-xs text-muted-foreground">
                   <strong>MCP Server</strong> — Lets your external AI tool (Claude Desktop, Kilo Code, Opencode, etc.) control Agora directly. The agent can list instances, disable mods, and analyze crashes on its own. Best for users who already have an AI agent set up. No cost — uses your agent's AI provider.
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  <strong>Integrated AI</strong> — A built-in chat in Agora. Quick questions, crash analysis, mod help. No external setup needed — uses free GitHub Models with your account. Simpler but less powerful than an external agent.
+                  <strong>Integrated AI</strong> — A built-in chat in Agora powered by GitHub Copilot. Quick questions, crash analysis, mod help. 50 free chats/month with your GitHub account.
                 </p>
               </div>
             )}
@@ -353,90 +360,32 @@ export function Settings() {
             {aiChatEnabled && (
               <div className="pt-2 border-t border-border space-y-3">
                 <div className="space-y-1">
-                  <label htmlFor="ai-model-select-chat" className="text-sm">
-                    Model
-                  </label>
-                  {modelLoading ? (
-                    <p className="text-xs text-muted-foreground">Loading models…</p>
+                  <label className="text-sm font-medium">GitHub Copilot</label>
+                  {copilotLoading ? (
+                    <p className="text-xs text-muted-foreground">Checking connection…</p>
+                  ) : copilotToken ? (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-green-600 dark:text-green-400">● Connected as {copilotToken.username} ({copilotToken.plan})</span>
+                      <button
+                        onClick={handleCopilotLogout}
+                        className="text-xs text-muted-foreground hover:text-foreground underline"
+                      >
+                        Sign out
+                      </button>
+                    </div>
                   ) : (
-                    <select
-                      id="ai-model-select-chat"
-                      value={selectedModel}
-                      onChange={(e) => handleModelChange(e.target.value)}
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
-                    >
-                      {aiModels.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name}
-                        </option>
-                      ))}
-                    </select>
+                    <p className="text-xs text-muted-foreground">
+                      Not connected. Open the AI Assistant chat and click "Connect with GitHub" to activate. 50 free chats/month with any GitHub account.
+                    </p>
                   )}
-                  
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  GPT-4.1 Mini is recommended — free (limited usage from GitHub), fast, and probably good enough for crash diagnosis. GPT-4.1 is also available for free and offers a bit more intelligence, but with less available usage. Both models are free with your GitHub account.
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  For newer, smarter, more advanced AI with much higher usage limits and more capabilities to customize Agora, connect an AI agent like Claude Code, Codex, Opencode or countless others via the MCP server above. If you're curious, my personal recommendation is Opencode desktop, which is free, open-source, includes a few free models, and is fairly easy to use, though almost any agent will work for Agora. I personally use Kilo Code (VS Code extension) for Agora development.
+                  GitHub Copilot provides free AI diagnostics — no API key needed. For higher limits or custom models, connect an external AI agent via the MCP server above.
                 </p>
               </div>
             )}
 
-            {/* {(aiMcp || aiChatEnabled) && (
-              <div className="rounded-lg bg-gray-50 dark:bg-gray-900/50 p-3 mt-2 space-y-1">
-                <p className="text-xs font-semibold">Two ways to use AI with Agora</p>
-                <p className="text-xs text-muted-foreground">
-                  <strong>MCP Server</strong> — Lets your external AI tool (Claude Desktop, Kilo Code, Opencode) control Agora directly. Best for users who already have an AI agent. No cost — uses your agent's AI provider.
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  <strong>Integrated AI</strong> — A built-in chat in Agora. Quick questions, crash analysis, mod help. No external setup — uses free GitHub Models. Simpler but less powerful than an external agent.
-                </p>
-              </div>
-            )} */}
-
-            {/* <label className="flex items-center justify-between pt-2 border-t border-border">
-              <div>
-                <span className="text-sm">Integrated AI Assistant</span>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Built-in AI chat powered by GitHub Models (GPT-4.1 Mini). Free with your GitHub account — no separate API key needed. Use this for quick crash analysis and mod questions.
-                </p>
-              </div>
-              <input
-                type="checkbox"
-                checked={aiChatEnabled}
-                onChange={(e) => toggleAiChat(e.target.checked)}
-                className="h-5 w-5 accent-brand-600"
-              />
-            </label> */}
-
-            {/* {aiChatEnabled && (
-              <div className="pt-2 border-t border-border space-y-3">
-                <div className="space-y-1">
-                  <label htmlFor="ai-model-select-chat" className="text-sm">
-                    Model
-                  </label>
-                  {modelLoading ? (
-                    <p className="text-xs text-muted-foreground">Loading models…</p>
-                  ) : (
-                    <select
-                      id="ai-model-select-chat"
-                      value={selectedModel}
-                      onChange={(e) => handleModelChange(e.target.value)}
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
-                    >
-                      {aiModels.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.name}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                </div>
-              </div>
-            )} */}
-
-            {aiMcp && (
+            {advancedMode && aiMcp && (
               <div className="pt-2 border-t border-border space-y-3">
                 {/* MCP Status */}
                 <div className="rounded-lg bg-muted px-3 py-2.5 space-y-2">
@@ -771,7 +720,12 @@ export function Settings() {
             </p>
           </div>
 
-          <Privacy />
+          {advancedMode && (
+            <Privacy />
+          )}
+          {!advancedMode && (
+            <p className="text-xs text-muted-foreground">Enable Advanced mode in Settings to see JVM, network, and MCP options.</p>
+          )}
         </>
       )}
     </div>

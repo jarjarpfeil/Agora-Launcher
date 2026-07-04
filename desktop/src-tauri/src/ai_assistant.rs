@@ -1,10 +1,12 @@
-use crate::db;
-use crate::error::{LauncherError, LauncherResult};
+use crate::error::LauncherResult;
 
 pub use crate::mcp::MCP_SKILL_CONTENT;
 pub use agora_core::ai_assistant::{
-    AiContext, AvailableModel, AVAILABLE_MODELS, ChatMessage, ChatResponse, DEFAULT_AI_MODEL,
-    build_context_message,
+    AiContext, ChatMessage, ChatResponse, CopilotDeviceFlowResponse, CopilotToken,
+    build_context_message, build_system_prompt as core_build_system_prompt,
+    chat_completion as core_chat_completion,
+    clear_copilot_token, load_copilot_token, poll_copilot_flow,
+    resolve_copilot_endpoint, start_copilot_flow, store_copilot_token,
 };
 
 pub fn build_system_prompt() -> String {
@@ -12,24 +14,10 @@ pub fn build_system_prompt() -> String {
 }
 
 pub async fn chat_completion(
-    app: &tauri::AppHandle,
     messages: Vec<ChatMessage>,
-    model: Option<String>,
+    token: &CopilotToken,
 ) -> LauncherResult<ChatResponse> {
-    let token = crate::auth::get_token(app).ok_or(LauncherError::AuthRequired)?;
-    let model = match model {
-        Some(m) if !m.is_empty() => m,
-        _ => {
-            let conn = crate::db::local_state_connection(app).ok();
-            conn.as_ref()
-                .and_then(|c| db::get_setting(c, "ai_model").ok())
-                .flatten()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| agora_core::ai_assistant::DEFAULT_AI_MODEL.to_string())
-        }
-    };
-    agora_core::ai_assistant::chat_completion(token, messages, model).await
+    agora_core::ai_assistant::chat_completion(messages, token).await
 }
 
 pub fn build_context_message_with_app(app: &tauri::AppHandle, context: &AiContext) -> String {

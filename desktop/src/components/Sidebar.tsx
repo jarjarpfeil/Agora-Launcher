@@ -1,4 +1,4 @@
-type Tab = 'home' | 'browse' | 'modrinth' | 'instances' | 'governance' | 'ai' | 'settings';
+type Tab = 'home' | 'browse' | 'instances' | 'governance' | 'ai' | 'settings';
 
 interface SidebarProps {
   tabs: { id: Tab; label: string; icon: string }[];

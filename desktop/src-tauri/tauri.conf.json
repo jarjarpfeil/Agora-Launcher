@@ -24,12 +24,32 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://api.github.com https://github.com https://api.modrinth.com https://*.modrinthcdn.com https://meta.fabricmc.net https://maven.fabricmc.net https://meta.quiltmc.org https://maven.quiltmc.org https://neoforged.net https://maven.neoforged.net https://minecraftforge.net https://files.minecraftforge.net https://raw.githubusercontent.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://raw.githubusercontent.com https://*.githubusercontent.com https://cdn.modrinth.com https://*.modrinthcdn.com"
+      "csp": "default-src 'self'; connect-src 'self' https://api.github.com https://github.com https://api.individual.githubcopilot.com https://api.githubcopilot.com https://login.live.com https://device.auth.xboxlive.com https://user.auth.xboxlive.com https://xsts.auth.xboxlive.com https://api.minecraftservices.com https://piston-meta.mojang.com https://launchermeta.mojang.com https://api.modrinth.com https://*.modrinthcdn.com https://meta.fabricmc.net https://maven.fabricmc.net https://meta.quiltmc.org https://maven.quiltmc.org https://neoforged.net https://maven.neoforged.net https://minecraftforge.net https://files.minecraftforge.net https://raw.githubusercontent.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://raw.githubusercontent.com https://*.githubusercontent.com https://cdn.modrinth.com https://*.modrinthcdn.com"
     }
   },
   "plugins": {
     "shell": {
       "open": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "nsis": {
+        "displayLanguageSelector": false,
+        "languages": ["English"]
+      }
     }
   }
 }

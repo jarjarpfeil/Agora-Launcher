@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import { useAdvancedMode } from '../components/AdvancedModeContext';
 import { DependencyPrompt } from '../components/DependencyPrompt';
+import { ConsoleView } from '../components/ConsoleView';
 import {
   getInstanceDetail,
   removeModFromInstance,
@@ -55,8 +57,10 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const [removeBusy, setRemoveBusy] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
 
+  const { advancedMode } = useAdvancedMode();
+
   // Sub-sidebar active tab
-  const [activeTab, setActiveTab] = useState<'mods' | 'snapshots' | 'loadout-profiles' | 'import'>('mods');
+  const [activeTab, setActiveTab] = useState<'mods' | 'snapshots' | 'loadout-profiles' | 'import' | 'console' | 'java-args' | 'advanced'>('mods');
 
   // Snapshots state (Phase 6)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -593,7 +597,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
       {/* Sub-sidebar tabs */}
       <div className="flex border-b border-border gap-0">
-        {(['mods', 'snapshots', 'loadout-profiles', 'import'] as const).map((tab) => (
+        {(['mods', 'snapshots', 'loadout-profiles', 'import', 'console'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -604,9 +608,37 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             ].join(' ')}
           >
-            {tab === 'mods' ? 'Mods' : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : 'Import'}
+            {tab === 'mods' ? 'Mods' : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : tab === 'import' ? 'Import' : 'Console'}
           </button>
         ))}
+        {advancedMode && (
+          <>
+            <button
+              key="java-args"
+              onClick={() => setActiveTab('java-args')}
+              className={[
+                'px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px',
+                activeTab === 'java-args'
+                  ? 'border-primary text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
+              ].join(' ')}
+            >
+              Java & Args
+            </button>
+            <button
+              key="advanced"
+              onClick={() => setActiveTab('advanced')}
+              className={[
+                'px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px',
+                activeTab === 'advanced'
+                  ? 'border-primary text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground',
+              ].join(' ')}
+            >
+              Advanced
+            </button>
+          </>
+        )}
       </div>
 
       {activeTab === 'mods' && (
@@ -1253,6 +1285,34 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
           >
             {importBusy ? 'Importing…' : 'Select File & Import'}
           </button>
+        </section>
+      )}
+
+      {activeTab === 'console' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
+          <h3 className="font-semibold text-sm">Game Console</h3>
+          <p className="text-xs text-muted-foreground">
+            Live stdout/stderr from the launched Minecraft process. Logs stream here when the instance is running via Agora's direct launcher.
+          </p>
+          <ConsoleView instanceId={instanceId} className="mt-2" />
+        </section>
+      )}
+
+      {activeTab === 'java-args' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
+          <h3 className="font-semibold text-sm">Java & Args</h3>
+          <p className="text-xs text-muted-foreground">
+            Configure per-instance Java path, JVM arguments, and GC profile. (Full GC architect UI coming soon — for now, settings are controlled via the Settings page.)
+          </p>
+        </section>
+      )}
+
+      {activeTab === 'advanced' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
+          <h3 className="font-semibold text-sm">Advanced</h3>
+          <p className="text-xs text-muted-foreground">
+            Instance-level advanced settings: custom launch commands, environment variables, wrapper scripts. (Coming soon.)
+          </p>
         </section>
       )}
     </div>

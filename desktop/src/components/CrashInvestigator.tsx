@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import {
   confirmCrashFix,
   disableModForTest,
@@ -275,6 +276,10 @@ export function CrashInvestigator({
   } | null>(null);
   // AI assistant panel
   const [showAiAssistant, setShowAiAssistant] = useState(false);
+  // AI crash explanation
+  const [aiExplanation, setAiExplanation] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   // Run investigation on mount
   useEffect(() => {
@@ -468,6 +473,34 @@ export function CrashInvestigator({
     onClose();
   }, [onClose]);
 
+  const handleAiExplain = useCallback(async () => {
+    setAiLoading(true);
+    setAiError(null);
+    setAiExplanation(null);
+    const logText = crashLogText || manualLogText || '';
+    if (!logText) {
+      setAiError('No crash log available to analyze.');
+      setAiLoading(false);
+      return;
+    }
+    try {
+      const explanation = await invoke<string>('explain_crash', {
+        instanceId: instanceId,
+        crashLog: logText,
+      });
+      setAiExplanation(explanation);
+    } catch (e) {
+      const msg = formatError(e);
+      if (msg.includes('ERR_AI_NOT_AUTHENTICATED') || msg.toLowerCase().includes('not authenticated') || msg.toLowerCase().includes('not connected')) {
+        setAiError('connect-github');
+      } else {
+        setAiError(msg);
+      }
+    } finally {
+      setAiLoading(false);
+    }
+  }, [instanceId, crashLogText, manualLogText]);
+
   if (loading && !result) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
@@ -584,6 +617,53 @@ export function CrashInvestigator({
 
               {/* Ruled out */}
               <RuledOutList ruledOut={ruled_out} />
+
+              {/* AI Explain toggle */}
+              {!aiExplanation && !aiLoading && !aiError && (
+                <button
+                  onClick={handleAiExplain}
+                  className="w-full rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                >
+                  Explain with AI
+                </button>
+              )}
+
+              {aiLoading && (
+                <div className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground">
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                  Analyzing crash with AI…
+                </div>
+              )}
+
+              {aiError === 'connect-github' && (
+                <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 text-sm text-muted-foreground">
+                  Copilot is not connected.{' '}
+                  <span className="text-primary">Connect with GitHub</span> to get AI-powered crash explanations.
+                </div>
+              )}
+
+              {aiError && aiError !== 'connect-github' && (
+                <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+                  {aiError}
+                </div>
+              )}
+
+              {aiExplanation && (
+                <div className="rounded-xl border border-primary/20 bg-primary/5 p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      AI Explanation
+                    </p>
+                    <button
+                      onClick={() => setAiExplanation(null)}
+                      className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  <p className="text-sm whitespace-pre-wrap">{aiExplanation}</p>
+                </div>
+              )}
 
               {/* Post-launch confirmation */}
               {postLaunch && (

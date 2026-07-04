@@ -3,7 +3,6 @@ import { Sidebar } from './components/Sidebar';
 import { CommandPalette } from './components/command-palette';
 import { Home } from './pages/Home';
 import { Browse } from './pages/Browse';
-import { ModrinthRaw } from './pages/ModrinthRaw';
 import { Instances } from './pages/Instances';
 import { Governance } from './pages/Governance';
 import { Settings } from './pages/Settings';
@@ -14,7 +13,7 @@ import { InstanceEditor } from './pages/InstanceEditor';
 import { getSetting } from './lib/tauri';
 import { OfflineBanner } from './components/offline-banner';
 
-type Tab = 'home' | 'browse' | 'modrinth' | 'instances' | 'governance' | 'ai' | 'settings';
+type Tab = 'home' | 'browse' | 'instances' | 'governance' | 'ai' | 'settings';
 
 const BASE_TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'home', label: 'Home', icon: '🏠' },
@@ -23,12 +22,6 @@ const BASE_TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'governance', label: 'Community Governance', icon: '🗳️' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
 ];
-
-const MODRINTH_TAB: { id: Tab; label: string; icon: string } = {
-  id: 'modrinth',
-  label: 'Modrinth',
-  icon: '🌐',
-};
 
 const AI_TAB: { id: Tab; label: string; icon: string } = {
   id: 'ai',
@@ -41,7 +34,6 @@ export default function App() {
   const [selectedModId, setSelectedModId] = useState<string | null>(null);
   const [editingInstanceId, setEditingInstanceId] = useState<string | null>(null);
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
-  const [modrinthEnabled, setModrinthEnabled] = useState<boolean>(false);
   const [aiChatEnabled, setAiChatEnabled] = useState<boolean>(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   // Telemetry upload prompt disabled — no aggregation endpoint exists yet ($0/month footprint). Local crash learning runs regardless. The crash_telemetry_opt_in setting is preserved for future shared-data use.
@@ -62,18 +54,15 @@ export default function App() {
     };
   }, []);
 
-  // Re-read the modrinth_enabled toggle whenever returning to a top-level tab
+  // Re-read the ai_chat_enabled toggle whenever returning to a top-level tab
   // so the sidebar reflects the current setting without an app restart.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const m = await getSetting('modrinth_enabled');
-        if (!cancelled) setModrinthEnabled(m === true);
         const ai = await getSetting('ai_chat_enabled');
-        if (!cancelled) setAiChatEnabled(ai === true);
+        if (!cancelled) setAiChatEnabled(ai === true || ai === 'true');
       } catch {
-        if (!cancelled) setModrinthEnabled(false);
         if (!cancelled) setAiChatEnabled(false);
       }
     })();
@@ -144,33 +133,25 @@ export default function App() {
 
   if (!onboardingComplete) {
     return (
-      <div className="h-screen w-screen overflow-hidden surface">
+      <div className="h-screen w-screen overflow-hidden bg-card">
         <Onboarding onComplete={() => setOnboardingComplete(true)} />
       </div>
     );
   }
 
-  // Build the tab list; the Modrinth tab only appears when the toggle is on.
   // The AI Assistant tab appears between Governance and Settings when enabled.
-  const tabs = modrinthEnabled
-    ? [
-        BASE_TABS[0],
-        BASE_TABS[1],
-        MODRINTH_TAB,
-        BASE_TABS[2],
-        BASE_TABS[3],
-        ...(aiChatEnabled ? [AI_TAB] : []),
-        BASE_TABS[4],
-      ]
-    : [
-        ...BASE_TABS,
-        ...(aiChatEnabled ? [AI_TAB] : []),
-      ];
+  const tabs = [
+    BASE_TABS[0],
+    BASE_TABS[1],
+    BASE_TABS[2],
+    BASE_TABS[3],
+    ...(aiChatEnabled ? [AI_TAB] : []),
+    BASE_TABS[4],
+  ];
 
-  // If the user disables Modrinth or AI while on those tabs, bounce back home.
+  // If the user disables AI while on that tab, bounce back home.
   const effectiveTab: Tab =
-    (activeTab === 'modrinth' && !modrinthEnabled) ||
-    (activeTab === 'ai' && !aiChatEnabled)
+    activeTab === 'ai' && !aiChatEnabled
       ? 'home' : activeTab;
 
   return (
@@ -200,7 +181,7 @@ export default function App() {
           </div>
         )} */}
         <Sidebar tabs={tabs} activeTab={effectiveTab} onSelectTab={(t) => { setSelectedModId(null); setEditingInstanceId(null); setActiveTab(t); }} />
-        <main className="flex-1 overflow-y-auto p-6 surface">
+        <main className="flex-1 overflow-y-auto p-6 bg-background">
           {editingInstanceId !== null ? (
             <InstanceEditor instanceId={editingInstanceId} onBack={() => setEditingInstanceId(null)} onOpenInstanceEditor={(id) => setEditingInstanceId(id)} />
           ) : selectedModId !== null ? (
@@ -211,11 +192,7 @@ export default function App() {
               {effectiveTab === 'browse' && (
                 <Browse
                   onSelectMod={(id) => setSelectedModId(id)}
-                  onOpenModrinth={modrinthEnabled ? () => setActiveTab('modrinth') : undefined}
                 />
-              )}
-              {effectiveTab === 'modrinth' && modrinthEnabled && (
-                <ModrinthRaw onOpenInstanceEditor={(id) => setEditingInstanceId(id)} />
               )}
               {effectiveTab === 'instances' && <Instances onEditInstance={(id) => setEditingInstanceId(id)} />}
               {effectiveTab === 'governance' && <Governance />}

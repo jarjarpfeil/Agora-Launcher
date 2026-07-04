@@ -7,14 +7,14 @@
 #   - crates/agora-core : shared library, all business logic, no tauri/clap/MCP types
 #   - desktop           : the Tauri GUI binary (`agora-tauri`), thin facades over agora-core
 #
-# Future members (Phase 9 of the plan): crates/agora-cli (standalone `agora` binary).
+# Phase 9 member: crates/agora (standalone `agora` CLI binary).
 #
 # `desktop` is kept at its existing path rather than moved under crates/ so the
 # React frontend (desktop/src) and existing tooling keep working unchanged.
 
 [workspace]
 resolver = "2"
-members = ["crates/agora-core", "desktop/src-tauri"]
+members = ["crates/agora-core", "desktop/src-tauri", "crates/agora"]
 
 [workspace.package]
 version = "0.1.0"

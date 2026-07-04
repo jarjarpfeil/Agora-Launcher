@@ -1,0 +1,22 @@
+[package]
+name = "agora-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Agora launcher CLI — standalone command-line interface for instance management, health checks, and MCP server"
+
+[[bin]]
+name = "agora"
+path = "src/main.rs"
+
+[dependencies]
+agora-core = { path = "../agora-core" }
+clap = { version = "4", features = ["derive"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+dirs = { workspace = true }
+anyhow = { workspace = true }

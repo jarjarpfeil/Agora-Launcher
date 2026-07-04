@@ -736,6 +736,93 @@ pub fn resolve_alias(conn: &Connection, alias: &str) -> LauncherResult<Option<St
     }
 }
 
+/// A lightweight annotation for Modrinth projects that have a curated entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CuratedAnnotation {
+    pub id: String,
+    pub name: String,
+    pub curator_note: Option<String>,
+    pub net_score: Option<f64>,
+    pub is_immune: bool,
+    pub base_categories: Vec<String>,
+}
+
+/// Look up a curated annotation for a Modrinth project.
+///
+/// Queries `registry_items` by `modrinth_id`, then fetches the item's
+/// categories from `item_categories`. Returns `None` when no curated entry
+/// exists for the given Modrinth project ID.
+pub fn get_curated_annotation(
+    conn: &Connection,
+    modrinth_id: &str,
+) -> LauncherResult<Option<CuratedAnnotation>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, net_score, is_immune, description \
+             FROM registry_items WHERE modrinth_id = ?1",
+        )
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let mut rows = stmt
+        .query_map([modrinth_id], |row| {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let net_score: i64 = row.get(2)?;
+            let is_immune: bool = row.get(3)?;
+            let curator_note: Option<String> = row.get(4)?;
+            Ok((id, name, net_score, is_immune, curator_note))
+        })
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let (id, name, net_score, is_immune, curator_note) = match rows.next() {
+        Some(Ok(r)) => r,
+        Some(Err(e)) => {
+            return Err(LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })
+        }
+        None => return Ok(None),
+    };
+
+    // Fetch base categories for this curated item.
+    let mut cat_stmt = conn
+        .prepare("SELECT category_id FROM item_categories WHERE item_id = ?1")
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+    let cat_rows = cat_stmt
+        .query_map([&id], |row| row.get::<_, String>(0))
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
+
+    let mut base_categories: Vec<String> = Vec::new();
+    for r in cat_rows {
+        base_categories.push(r.map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?);
+    }
+
+    Ok(Some(CuratedAnnotation {
+        id,
+        name,
+        curator_note,
+        net_score: Some(net_score as f64),
+        is_immune,
+        base_categories,
+    }))
+}
+
 /// List known conflicts from the `known_conflicts` table.
 ///
 /// Defensively returns an empty vec if the `known_conflicts` table does not
@@ -1088,5 +1175,80 @@ mod tests {
     fn test_sort_option_default() {
         let sort = SortOption::default();
         assert!(matches!(sort, SortOption::NetScore));
+    }
+
+    #[test]
+    fn test_get_curated_annotation_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE registry_items (
+                id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                velocity REAL, status TEXT, is_immune INTEGER,
+                immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                gallery_urls_json TEXT, date_added TEXT,
+                compatible_versions_json TEXT, description TEXT,
+                body_markdown TEXT, page_url TEXT, license_id TEXT,
+                source_updated_at TEXT, modrinth_id TEXT
+            );
+            CREATE TABLE item_categories (
+                item_id TEXT, category_id TEXT
+            );
+            INSERT INTO registry_items VALUES (
+                'curated-mod', 'Curated Mod', 'mod', 'modrinth_id',
+                'mr-id-123', 'abc', 100, 5, 85, 2.0, 'approved',
+                1, NULL, 1, NULL, NULL, '2024-06-01T00:00:00Z', NULL,
+                'A curated mod description', NULL, NULL, NULL, NULL, 'mr-id-123'
+            );
+            INSERT INTO item_categories VALUES ('curated-mod', 'fabric');
+            INSERT INTO item_categories VALUES ('curated-mod', 'adventure');
+            ",
+        )
+        .unwrap();
+
+        let annotation = get_curated_annotation(&conn, "mr-id-123")
+            .unwrap()
+            .expect("Expected some annotation");
+        assert_eq!(annotation.id, "curated-mod");
+        assert_eq!(annotation.name, "Curated Mod");
+        assert!(annotation.is_immune);
+        assert_eq!(annotation.net_score, Some(85.0));
+        assert_eq!(annotation.curator_note, Some("A curated mod description".to_string()));
+        assert_eq!(annotation.base_categories.len(), 2);
+        assert!(annotation.base_categories.contains(&"fabric".to_string()));
+        assert!(annotation.base_categories.contains(&"adventure".to_string()));
+    }
+
+    #[test]
+    fn test_get_curated_annotation_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE registry_items (
+                id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                velocity REAL, status TEXT, is_immune INTEGER,
+                immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                gallery_urls_json TEXT, date_added TEXT,
+                compatible_versions_json TEXT, description TEXT,
+                body_markdown TEXT, page_url TEXT, license_id TEXT,
+                source_updated_at TEXT, modrinth_id TEXT
+            );
+            CREATE TABLE item_categories (
+                item_id TEXT, category_id TEXT
+            );
+            ",
+        )
+        .unwrap();
+
+        let result = get_curated_annotation(&conn, "nonexistent-id").unwrap();
+        assert!(result.is_none());
     }
 }

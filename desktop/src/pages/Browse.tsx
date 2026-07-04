@@ -1,16 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
+import { List, LayoutGrid } from 'lucide-react';
 import {
-  browseItems,
+  browseSearch,
+  browseLoadMore,
   forYouItems,
   formatError,
   getSetting,
   listCategories,
   listManifestLoaders,
   listManifestMcVersions,
-  setSetting,
+  type BrowseItemCached,
   type CategoryInfo,
   type RegistryItem,
   type SortOption,
+  type ModrinthSearchResult,
 } from '../lib/tauri';
 
 const SORTS: { label: string; value: SortOption }[] = [
@@ -24,51 +27,106 @@ const SORTS: { label: string; value: SortOption }[] = [
 
 const CONTENT_TYPES = ['mod', 'pack', 'shader', 'resourcepack', 'server', 'datapack', 'world'];
 
-export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: string) => void; onOpenModrinth?: () => void }) {
-  const [items, setItems] = useState<RegistryItem[]>([]);
+type BrowseItem = BrowseItemCached;
+
+function mergeItems(
+  registryItems: RegistryItem[],
+  modrinthResults: ModrinthSearchResult[],
+): BrowseItem[] {
+  const registryByModrinthId = new Map<string, RegistryItem>();
+  for (const ri of registryItems) {
+    if (ri.modrinth_id) {
+      registryByModrinthId.set(ri.modrinth_id, ri);
+    }
+  }
+
+  const matchedRegistryIds = new Set<string>();
+  const merged: BrowseItem[] = [];
+
+  for (const mr of modrinthResults) {
+    const matched = registryByModrinthId.get(mr.project_id);
+    if (matched) {
+      matchedRegistryIds.add(matched.id);
+      merged.push({
+        id: matched.id,
+        source: 'curated',
+        registryItem: matched,
+        modrinthResult: mr,
+        name: matched.name,
+        iconUrl: matched.icon_url ?? mr.icon_url,
+        description: matched.description ?? mr.description,
+        contentType: matched.content_type,
+      });
+    } else {
+      merged.push({
+        id: mr.project_id,
+        source: 'modrinth',
+        registryItem: null,
+        modrinthResult: mr,
+        name: mr.title,
+        iconUrl: mr.icon_url,
+        description: mr.description,
+        contentType: mr.project_type,
+      });
+    }
+  }
+
+  for (const ri of registryItems) {
+    if (!matchedRegistryIds.has(ri.id)) {
+      merged.push({
+        id: ri.id,
+        source: 'curated',
+        registryItem: ri,
+        modrinthResult: null,
+        name: ri.name,
+        iconUrl: ri.icon_url,
+        description: ri.description,
+        contentType: ri.content_type,
+      });
+    }
+  }
+
+  return merged;
+}
+
+export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) {
+  console.log('[RENDER] Browse component rendering');
+
+  const [items, setItems] = useState<BrowseItemCached[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [categories, setCategories] = useState<CategoryInfo[]>([]);
-  // Default to 'net_score' so existing users don't see a silent ordering
-  // shift on upgrade; the persisted preference (if any) is loaded below.
-  const [sort, setSort] = useState<SortOption>('net_score');
+  const [sort, setSort] = useState<SortOption>(() => {
+    try {
+      const saved = localStorage.getItem('browse_sort');
+      if (saved && SORTS.some((s) => s.value === saved)) return saved as SortOption;
+    } catch { /* ignore */ }
+    return 'net_score';
+  });
   const [category, setCategory] = useState<string | null>(null);
   const [contentType, setContentType] = useState<string | null>(null);
   const [mcVersion, setMcVersion] = useState<string | null>(null);
   const [loader, setLoader] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [layout, setLayout] = useState<'list' | 'grid'>(() => {
+    try {
+      const saved = localStorage.getItem('browse_layout');
+      if (saved === 'list' || saved === 'grid') return saved;
+    } catch { /* ignore */ }
+    return 'list';
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loaders, setLoaders] = useState<string[]>([]);
   const [mcVersions, setMcVersions] = useState<string[]>([]);
 
-  // Load the persisted sort preference once on mount. Defaults to 'net_score'
-  // when unset so no upgrade silently shifts ordering; users opt into "For You".
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const saved = await getSetting('browse_sort');
-        if (!cancelled && typeof saved === 'string') {
-          setSort(saved as SortOption);
-        }
-      } catch {
-        // Setting read failure: keep the safe 'net_score' default.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   const handleSortChange = (next: SortOption) => {
     setSort(next);
-    // "For You" is a recommendation sort and does not filter by category;
-    // clear any stale category selection so the UI stays consistent.
     if (next === 'for_you') setCategory(null);
-    void setSetting('browse_sort', next).catch(() => {
-      // Persist failure is non-fatal; the in-memory sort still applies.
-    });
+    try { localStorage.setItem('browse_sort', next); } catch { /* ignore */ }
   };
 
+  // --- Load categories ---
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -87,6 +145,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
     };
   }, []);
 
+  // --- Load loaders and MC versions ---
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -97,7 +156,7 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
           setMcVersions(v);
         }
       } catch {
-        // Fetch failure: dropdowns render empty — acceptable degraded behavior.
+        // degraded behavior
       }
     })();
     return () => {
@@ -105,34 +164,52 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
     };
   }, []);
 
+  // --- Main search effect ---
   useEffect(() => {
+    console.log('[BROWSE] search effect firing: sort=', sort, 'category=', category, 'contentType=', contentType);
+
     let cancelled = false;
     (async () => {
       try {
         if (!cancelled) setLoading(true);
-        // Re-read the modrinth_enabled setting on every refresh so toggling
-        // it in Settings is reflected on the next browse without a remount.
-        let modrinthEnabled = false;
-        try {
-          const m = await getSetting('modrinth_enabled');
-          modrinthEnabled = m === true;
-        } catch {
-          // Setting read failure should not block browsing; default to safe
-          // (Modrinth-hidden) behaviour.
-          modrinthEnabled = false;
+
+        if (sort === 'for_you') {
+          console.log('[BROWSE] for_you path');
+          let modrinthEnabled = false;
+          try {
+            const m = await getSetting('modrinth_enabled');
+            modrinthEnabled = m === true || m === 'true';
+          } catch { /* default false */ }
+          const registryItems = await forYouItems(modrinthEnabled, mcVersion ?? undefined, loader ?? undefined, undefined, undefined);
+          console.log('[BROWSE] forYouItems returned', registryItems.length, 'items');
+          if (!cancelled) {
+            setItems(mergeItems(registryItems, []));
+            setHasMore(false);
+          }
+        } else {
+          console.log('[BROWSE] browseSearch path');
+          const page = await browseSearch(
+            query.trim() || undefined,
+            contentType ?? undefined,
+            category ?? undefined,
+            sort,
+            mcVersion ?? undefined,
+            loader ?? undefined,
+          );
+          console.log('[BROWSE] browseSearch returned', page.items.length, 'items, hasMore=', page.hasMore, 'total=', page.total);
+          page.items.forEach((item, i) => {
+            console.log(`[BROWSE]   item[${i}]: source=${item.source} name=${item.name} id=${item.id} regItem=${!!item.registryItem} mrResult=${!!item.modrinthResult}`);
+          });
+          if (!cancelled) {
+            console.log('[BROWSE] setting items (not cancelled)');
+            setItems(page.items);
+            setHasMore(page.hasMore);
+          } else {
+            console.log('[BROWSE] SKIPPED: result cancelled');
+          }
         }
-        const result = sort === 'for_you'
-          ? await forYouItems(modrinthEnabled, mcVersion ?? undefined, loader ?? undefined)
-          : await browseItems(
-              contentType ?? undefined,
-              category ?? undefined,
-              sort,
-              modrinthEnabled,
-              mcVersion ?? undefined,
-              loader ?? undefined,
-            );
-        if (!cancelled) setItems(result);
       } catch (e) {
+        console.error('[BROWSE] error:', e);
         if (!cancelled) {
           setError(formatError(e));
           setItems([]);
@@ -142,16 +219,54 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
       }
     })();
     return () => {
+      console.log('[BROWSE] search effect cleanup (cancelling)');
       cancelled = true;
     };
-  }, [sort, category, contentType, mcVersion, loader]);
+  }, [sort, category, contentType, mcVersion, loader, query]);
 
+  // --- Infinite scroll ---
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || !hasMore || loading) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && hasMore && !loadingMore) {
+          console.log('[BROWSE] loading more...');
+          setLoadingMore(true);
+          browseLoadMore()
+            .then((page) => {
+              console.log('[BROWSE] loadMore returned', page.items.length, 'items');
+              page.items.forEach((item, i) => {
+                console.log(`[BROWSE]   loadMore item[${i}]: source=${item.source} name=${item.name}`);
+              });
+              setItems((prev) => [...prev, ...page.items]);
+              setHasMore(page.hasMore);
+            })
+            .catch((e) => console.error('[BROWSE] loadMore error:', e))
+            .finally(() => setLoadingMore(false));
+        }
+      },
+      { rootMargin: '600px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, loading, loadingMore]);
+
+  // --- Filtered list ---
   const filtered = query.trim()
-    ? items.filter((item) =>
-        item.name.toLowerCase().includes(query.toLowerCase()) ||
-        item.id.toLowerCase().includes(query.toLowerCase())
-      )
+    ? items.filter((item) => {
+        const searchable = `${item.name} ${item.registryItem?.id ?? ''} ${item.modrinthResult?.title ?? ''} ${item.modrinthResult?.author ?? ''}`;
+        return searchable.toLowerCase().includes(query.toLowerCase());
+      })
     : items;
+
+  console.log('[RENDER] sort=', sort, 'loading=', loading, 'items.length=', items.length, 'filtered.length=', filtered.length, 'hasMore=', hasMore);
+  if (filtered.length > 0) {
+    filtered.forEach((item, i) => {
+      console.log(`[RENDER]   item[${i}]: source=${item.source} name=${item.name} id=${item.id}`);
+    });
+  }
 
   return (
     <div className="space-y-6">
@@ -197,9 +312,31 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search items..."
+          placeholder="Search mods, packs, and more…"
           className="flex-1 rounded-lg border border-input bg-background px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
         />
+        <div className="flex items-center gap-1 rounded-lg border border-input bg-background p-0.5">
+          <button
+            onClick={() => {
+              setLayout('list');
+              try { localStorage.setItem('browse_layout', 'list'); } catch { /* ignore */ }
+            }}
+            className={`rounded-md p-1.5 transition-colors ${layout === 'list' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            title="List view"
+          >
+            <List size={18} />
+          </button>
+          <button
+            onClick={() => {
+              setLayout('grid');
+              try { localStorage.setItem('browse_layout', 'grid'); } catch { /* ignore */ }
+            }}
+            className={`rounded-md p-1.5 transition-colors ${layout === 'grid' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            title="Grid view"
+          >
+            <LayoutGrid size={18} />
+          </button>
+        </div>
         <select
           value={contentType ?? ''}
           onChange={(e) => setContentType(e.target.value || null)}
@@ -308,53 +445,172 @@ export function Browse({ onSelectMod, onOpenModrinth }: { onSelectMod?: (id: str
         </div>
       ) : filtered.length === 0 ? (
         <div className="rounded-xl p-6 border border-dashed border-border text-center">
-          <p className="text-muted-foreground">No curated items to display.</p>
-          {onOpenModrinth && (
-            <button
-              onClick={onOpenModrinth}
-              className="mt-3 text-sm font-medium text-primary hover:underline"
-            >
-              Not finding what you need? Search all of Modrinth →
-            </button>
-          )}
+          <p className="text-muted-foreground">No items to display.</p>
+        </div>
+      ) : layout === 'grid' ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {filtered.map((item) => (
+            <GridCard key={item.id} item={item} onSelectMod={onSelectMod} />
+          ))}
         </div>
       ) : (
         <ul className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {filtered.map((item) => (
-            <li
-              key={item.id}
-              className="rounded-xl border border-border bg-card p-4"
-            >
-              <div className="flex items-start gap-3">
-                {item.icon_url && (
-                  <img
-                    src={item.icon_url}
-                    alt={item.name}
-                    className="h-12 w-12 rounded-lg border object-contain border-border"
-                  />
-                )}
-                <div className="flex-1 min-w-0">
-                  <h3 className="font-semibold truncate">{item.name}</h3>
-                  <p className="text-xs text-muted-foreground">
-                    {item.content_type} · {item.download_strategy}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    ↑ {item.upvotes} · ↓ {item.downvotes} · net {item.net_score}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3">
-                <button
-                  onClick={() => onSelectMod?.(item.id)}
-                  className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-                >
-                  View Details
-                </button>
-              </div>
-            </li>
+            <ListCard key={item.id} item={item} onSelectMod={onSelectMod} />
           ))}
         </ul>
       )}
+
+      {/* Infinite scroll sentinel */}
+      {hasMore && !loading && (
+        <div ref={sentinelRef} className="py-6 text-center text-sm text-muted-foreground">
+          {loadingMore ? 'Loading more…' : ''}
+        </div>
+      )}
+      {!hasMore && filtered.length > 0 && (
+        <p className="py-4 text-center text-xs text-muted-foreground">All results loaded</p>
+      )}
     </div>
+  );
+}
+
+function CuratedBadge() {
+  return (
+    <span className="shrink-0 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-400 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide">
+      Curated
+    </span>
+  );
+}
+
+function GridCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: string) => void }) {
+  return (
+    <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col">
+      {item.iconUrl && (
+        <div className="aspect-video bg-muted flex items-center justify-center p-4">
+          <img
+            src={item.iconUrl}
+            alt={item.name}
+            className="h-full w-full object-contain"
+          />
+        </div>
+      )}
+      <div className="flex flex-col gap-2 p-4 flex-1">
+        <div className="flex items-center gap-2">
+          <h3 className="font-semibold truncate">{item.name}</h3>
+          {item.source === 'curated' && <CuratedBadge />}
+        </div>
+        {item.registryItem ? (
+          <>
+            <p className="text-xs text-muted-foreground">
+              {item.registryItem.content_type} · {item.registryItem.download_strategy}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              ↑ {item.registryItem.upvotes} · ↓ {item.registryItem.downvotes}
+            </p>
+          </>
+        ) : item.modrinthResult ? (
+          <>
+            <p className="text-xs text-muted-foreground">by {item.modrinthResult.author}</p>
+            <p className="text-xs text-muted-foreground">
+              ↓ {item.modrinthResult.downloads.toLocaleString()} · ★ {item.modrinthResult.follows.toLocaleString()}
+            </p>
+          </>
+        ) : null}
+        {item.description && (
+          <p className="text-xs text-muted-foreground line-clamp-2">{item.description}</p>
+        )}
+        {item.modrinthResult && item.modrinthResult.versions.length > 0 && (
+          <p className="text-[10px] text-muted-foreground">
+            MC: {item.modrinthResult.versions.slice(0, 3).join(', ')}
+            {item.modrinthResult.versions.length > 3 ? ` +${item.modrinthResult.versions.length - 3}` : ''}
+          </p>
+        )}
+        <div className="mt-auto pt-2">
+          <button
+            onClick={() => onSelectMod?.(item.id)}
+            className="w-full rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            View Details
+          </button>
+          {item.modrinthResult && (
+            <a
+              href={`https://modrinth.com/${item.modrinthResult.project_type}/${item.modrinthResult.slug}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="block mt-1 text-[10px] text-muted-foreground hover:text-foreground text-center"
+            >
+              View on Modrinth ↗
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ListCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: string) => void }) {
+  return (
+    <li className="rounded-xl border border-border bg-card p-4">
+      <div className="flex items-start gap-3">
+        {item.iconUrl ? (
+          <img
+            src={item.iconUrl}
+            alt={item.name}
+            className="h-12 w-12 rounded-lg border object-contain border-border"
+          />
+        ) : (
+          <div className="h-12 w-12 rounded-lg border border-dashed border-border flex items-center justify-center text-xs text-muted-foreground">
+            ?
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h3 className="font-semibold truncate">{item.name}</h3>
+            {item.source === 'curated' && <CuratedBadge />}
+          </div>
+          {item.registryItem ? (
+            <>
+              <p className="text-xs text-muted-foreground">
+                {item.registryItem.content_type} · {item.registryItem.download_strategy}
+              </p>
+              <p className="text-xs text-muted-foreground mt-1">
+                ↑ {item.registryItem.upvotes} · ↓ {item.registryItem.downvotes} · net {item.registryItem.net_score}
+              </p>
+            </>
+          ) : item.modrinthResult ? (
+            <>
+              <p className="text-xs text-muted-foreground">by {item.modrinthResult.author}</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                ↓ {item.modrinthResult.downloads.toLocaleString()} · ★ {item.modrinthResult.follows.toLocaleString()}
+              </p>
+            </>
+          ) : null}
+          {item.modrinthResult && item.modrinthResult.versions.length > 0 && (
+            <p className="text-[10px] text-muted-foreground mt-2">
+              MC: {item.modrinthResult.versions.slice(0, 4).join(', ')}
+              {item.modrinthResult.versions.length > 4 ? ` +${item.modrinthResult.versions.length - 4}` : ''}
+            </p>
+          )}
+        </div>
+      </div>
+      <div className="mt-3">
+        <button
+          onClick={() => onSelectMod?.(item.id)}
+          className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+        >
+          View Details
+        </button>
+        {item.modrinthResult && (
+          <a
+            href={`https://modrinth.com/${item.modrinthResult.project_type}/${item.modrinthResult.slug}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-2 text-[10px] text-muted-foreground hover:text-foreground"
+          >
+            View on Modrinth ↗
+          </a>
+        )}
+      </div>
+    </li>
   );
 }

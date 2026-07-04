@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { getWindowsAccentColor } from "@/lib/tauri";
 
 type Theme = "light" | "dark" | "system";
 
@@ -31,19 +32,12 @@ function storeStored(data: { theme: Theme; accentColor: string | null }) {
   }
 }
 
-/* Tauri invoke helper — wrapped in try/catch because the Rust command
-   does not exist yet. Falls back to a warm-amber default (beer branding). */
-async function getWindowsAccentColor(): Promise<string | null> {
+/* Tauri invoke helper — wrapped in try/catch. Falls back to null (amber default). */
+async function fetchWindowsAccentColor(): Promise<string | null> {
   try {
-    // TODO(phase-10): wire to real Rust command `get_windows_accent_color`
-    // Once the Rust side is implemented, replace this stub with:
-    //   const { invoke } = await import("@tauri-apps/api/core");
-    //   const result = await invoke<string>("get_windows_accent_color");
-    //   return result;
-    return null;
+    return await getWindowsAccentColor();
   } catch {
-    // Rust command not yet available — fall back to warm amber accent
-    return "hsl(35 90% 55%)";
+    return null;
   }
 }
 
@@ -90,10 +84,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     storeStored({ theme, accentColor });
   }, [theme, accentColor]);
 
-  // Fetch Windows accent color once on mount
+  // Fetch Windows accent color once on mount and apply as CSS variable
   useEffect(() => {
     let cancelled = false;
-    getWindowsAccentColor().then((color) => {
+    fetchWindowsAccentColor().then((color) => {
       if (!cancelled) {
         setAccentColorState(color);
         setMounted(true);
@@ -103,6 +97,16 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       cancelled = true;
     };
   }, []);
+
+  // Sync accent color to CSS variable --accent
+  useEffect(() => {
+    const root = document.documentElement;
+    if (accentColor) {
+      root.style.setProperty("--accent", accentColor);
+    } else {
+      root.style.removeProperty("--accent");
+    }
+  }, [accentColor]);
 
   const setTheme = (t: Theme) => setThemeState(t);
   const setAccentColor = (c: string | null) => setAccentColorState(c);

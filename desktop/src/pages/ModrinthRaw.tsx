@@ -383,7 +383,7 @@ export function ModrinthRaw({ onOpenInstanceEditor }: { onOpenInstanceEditor?: (
 
 function ModrinthCard({ result, onView }: { result: ModrinthSearchResult; onView: () => void }) {
   return (
-    <li className="rounded-xl border border-border surface p-4 flex flex-col">
+    <li className="rounded-xl border border-border bg-card p-4 flex flex-col">
       <div className="flex items-start gap-3">
         {result.icon_url ? (
           <img
@@ -916,7 +916,7 @@ function ModrinthProjectDetail({
 
       <RawModrinthBanner />
 
-      <section className="rounded-xl border border-border surface p-6">
+      <section className="rounded-xl border border-border bg-card p-6">
         <div className="flex items-start gap-4">
           {project.icon_url && (
             <img
@@ -951,11 +951,11 @@ function ModrinthProjectDetail({
       </section>
 
       {projectFullLoading && !projectFull ? (
-        <section className="rounded-xl border border-border surface p-6">
+        <section className="rounded-xl border border-border bg-card p-6">
           <p className="text-sm text-muted-foreground">Loading details…</p>
         </section>
       ) : projectFull?.body ? (
-        <section className="rounded-xl border border-border surface p-6">
+        <section className="rounded-xl border border-border bg-card p-6">
           <h3 className="text-lg font-semibold mb-3">About</h3>
           <div className="prose prose-sm dark:prose-invert max-w-none">
             <ReactMarkdown
@@ -965,7 +965,7 @@ function ModrinthProjectDetail({
         </section>
       ) : null}
 
-      <section className="rounded-xl border border-border surface p-4 space-y-4">
+      <section className="rounded-xl border border-border bg-card p-4 space-y-4">
         <h3 className="font-semibold text-sm">Install to Instance</h3>
 
         {phase === 'error' && statusMsg && (

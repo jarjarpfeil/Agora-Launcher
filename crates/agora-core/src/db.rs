@@ -37,6 +37,24 @@ pub fn init_local_state_db(db_path: &std::path::PathBuf) -> anyhow::Result<()> {
     let conn = Connection::open(db_path)?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     run_migrations(&conn)?;
+
+    for key in [
+        "network_modrinth_enabled",
+        "network_modrinth_cdn_enabled",
+        "network_registry_sync_enabled",
+        "network_github_oauth_enabled",
+        "network_msa_enabled",
+        "network_adoptium_enabled",
+        // Feature toggles (default ON so tabs appear on fresh install)
+        "modrinth_enabled",
+        "ai_chat_enabled",
+        "ai_mcp_enabled",
+    ] {
+        if get_setting(&conn, key).ok().flatten().is_none() {
+            set_setting(&conn, key, &serde_json::Value::String("true".to_string()))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -182,6 +200,20 @@ pub fn get_setting(conn: &Connection, key: &str) -> anyhow::Result<Option<serde_
     } else {
         Ok(None)
     }
+}
+
+/// Check if a specific network feature is enabled in settings.
+/// Returns `true` if enabled (or setting not found, for backward compatibility),
+/// `false` if explicitly disabled.
+/// Setting keys: `network_modrinth_enabled`, `network_modrinth_cdn_enabled`,
+/// `network_registry_sync_enabled`, `network_github_oauth_enabled`,
+/// `network_msa_enabled`, `network_adoptium_enabled`.
+pub fn is_network_enabled(conn: &Connection, key: &str) -> bool {
+    get_setting(conn, key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_str().map(|s| s == "true"))
+        .unwrap_or(true)
 }
 
 /// Upsert a JSON-encoded setting into `user_settings`.

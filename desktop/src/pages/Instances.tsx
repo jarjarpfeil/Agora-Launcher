@@ -530,7 +530,7 @@ function PasteLogModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-gray-200 dark:border-gray-700 surface p-6 shadow-xl">
+      <div className="w-full max-w-lg rounded-2xl border border-border bg-card p-6 shadow-xl">
         <h3 className="text-lg font-bold mb-4">Paste Crash Log</h3>
         <textarea
           value={text}

@@ -227,12 +227,14 @@ export const forYouItems = (
   mcVersion?: string,
   loader?: string,
   limit?: number,
+  modrinthCategories?: string[],
 ) =>
   invoke<RegistryItem[]>('for_you_items', {
     modrinthEnabled,
     mcVersion,
     loader,
     limit,
+    modrinthCategories,
   });
 
 export const browseItems = (
@@ -471,6 +473,20 @@ export interface ModrinthProjectFull {
 export const fetchModrinthProject = (projectId: string) =>
   invoke<ModrinthProjectFull>('fetch_modrinth_project', { projectId });
 
+// --- Phase 7: Curated annotation overlay for Modrinth projects ---
+
+export interface CuratedAnnotation {
+  id: string;
+  name: string;
+  curator_note: string | null;
+  net_score: number | null;
+  is_immune: boolean;
+  base_categories: string[];
+}
+
+export const getCuratedAnnotation = (modrinthId: string) =>
+  invoke<CuratedAnnotation | null>('get_curated_annotation', { modrinthId });
+
 // --- Governance / Triage ---
 
 export interface UnderReviewItem {
@@ -677,12 +693,10 @@ export interface AvailableModel {
 export const aiChat = (
   messages: ChatMessage[],
   context?: AiContext | null,
-  model?: string | null,
 ) =>
   invoke<ChatResponse>('ai_chat', {
     messages,
     context: context ?? null,
-    model: model ?? null,
   });
 
 export const aiGetModels = () =>
@@ -690,6 +704,40 @@ export const aiGetModels = () =>
 
 export const aiGetDefaultModel = () =>
   invoke<string>('ai_get_default_model');
+
+export const getWindowsAccentColor = () =>
+  invoke<string | null>('get_windows_accent_color');
+
+// --- AI Copilot auth ---
+
+export interface CopilotDeviceFlowResponse {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  expires_in: number;
+  interval: number;
+}
+
+export interface CopilotToken {
+  access_token: string;
+  copilot_token: string | null;
+  endpoint: string;
+  plan: string;
+  username: string;
+  stored_at: string;
+}
+
+export const copilotLogin = () =>
+  invoke<CopilotDeviceFlowResponse>('copilot_login');
+
+export const copilotLoginPoll = (deviceCode: string, interval: number) =>
+  invoke<CopilotToken>('copilot_login_poll', { deviceCode, interval });
+
+export const copilotStatus = () =>
+  invoke<CopilotToken | null>('copilot_status');
+
+export const copilotLogout = () =>
+  invoke<void>('copilot_logout');
 
 // ---------------------------------------------------------------------------
 // Phase 5: MSA auth + GC architect
@@ -832,3 +880,84 @@ export const cloneInstance = (instanceId: string, newName: string, prefs: CloneP
 
 export const exportServerEnvironment = (instanceId: string, destPath: string) =>
   invoke<ExportResult>('export_server_environment', { instanceId, destPath });
+
+// ---------------------------------------------------------------------------
+// Phase 8: Pack install
+// ---------------------------------------------------------------------------
+
+export interface PackManifest {
+  name: string;
+  minecraft_version: string;
+  loader: string;
+  loader_version: string;
+  mods: PackModEntry[];
+  override_source?: OverrideSource;
+}
+
+export interface PackModEntry {
+  id: string;
+  source: string;
+  version?: string;
+  status: string;
+}
+
+export interface OverrideSource {
+  type: string;
+  identifier: string;
+  release_tag: string;
+  asset_name: string;
+  sha256?: string;
+}
+
+export interface PackInstallResult {
+  instance_id: string;
+  name: string;
+  mods_installed: number;
+  overrides_extracted: boolean;
+}
+
+export const installPack = (manifestJson: string, instanceId: string) =>
+  invoke<PackInstallResult>('install_pack', { manifestJson, instanceId });
+
+// --- Browse cache (Rust-backed, paginated) ---
+
+export interface BrowseItemCached {
+  id: string;
+  source: string;
+  registryItem: RegistryItem | null;
+  modrinthResult: ModrinthSearchResult | null;
+  name: string;
+  iconUrl: string | null;
+  description: string | null;
+  contentType: string;
+}
+
+export interface BrowsePage {
+  items: BrowseItemCached[];
+  total: number;
+  page: number;
+  hasMore: boolean;
+}
+
+export const browseSearch = (
+  query?: string,
+  contentType?: string,
+  category?: string,
+  sort?: string,
+  mcVersion?: string,
+  loader?: string,
+) =>
+  invoke<BrowsePage>('browse_search', {
+    query: query ?? null,
+    contentType: contentType ?? null,
+    category: category ?? null,
+    sort: sort ?? null,
+    mcVersion: mcVersion ?? null,
+    loader: loader ?? null,
+  });
+
+export const browseLoadMore = () =>
+  invoke<BrowsePage>('browse_load_more');
+
+export const browsePage = (page: number) =>
+  invoke<BrowsePage>('browse_page', { page });

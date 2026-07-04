@@ -325,8 +325,26 @@ pub async fn search_modrinth(
     conn: &rusqlite::Connection,
     params: &ModrinthSearchParams,
 ) -> LauncherResult<ModrinthSearchPage> {
-    require_modrinth_enabled(conn)?;
+    // Sync DB checks — connection only needed here
+    {
+        if !db::is_network_enabled(conn, "network_modrinth_enabled") {
+            return Err(LauncherError::Generic {
+                code: "ERR_NETWORK_DISABLED".into(),
+                message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+            });
+        }
+        require_modrinth_enabled(conn)?;
+    }
+    // Proceed with async HTTP — connection no longer borrowed
+    search_modrinth_http(params).await
+}
 
+/// Async HTTP-only search — no DB connection needed. Callers that already
+/// validated the modrinth_enabled + network_enabled settings can call this
+/// directly to avoid holding a `!Send` Connection across `.await` points.
+pub async fn search_modrinth_http(
+    params: &ModrinthSearchParams,
+) -> LauncherResult<ModrinthSearchPage> {
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let offset = params.offset.unwrap_or(0);
     let sort = params.sort.unwrap_or_default();
@@ -448,6 +466,12 @@ pub async fn search_modrinth(
 pub async fn list_modrinth_categories(
     conn: &rusqlite::Connection,
 ) -> LauncherResult<Vec<ModrinthCategoryInfo>> {
+    if !db::is_network_enabled(conn, "network_modrinth_enabled") {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+        });
+    }
     require_modrinth_enabled(conn)?;
     modrinth_get_json::<Vec<ModrinthCategoryTag>>(
         "https://api.modrinth.com/v2/tag/category",
@@ -469,6 +493,12 @@ pub async fn list_modrinth_categories(
 pub async fn list_modrinth_loaders(
     conn: &rusqlite::Connection,
 ) -> LauncherResult<Vec<ModrinthLoaderInfo>> {
+    if !db::is_network_enabled(conn, "network_modrinth_enabled") {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+        });
+    }
     require_modrinth_enabled(conn)?;
     modrinth_get_json::<Vec<ModrinthLoaderTag>>(
         "https://api.modrinth.com/v2/tag/loader",
@@ -493,6 +523,12 @@ pub async fn list_modrinth_loaders(
 pub async fn list_modrinth_game_versions(
     conn: &rusqlite::Connection,
 ) -> LauncherResult<Vec<ModrinthGameVersionInfo>> {
+    if !db::is_network_enabled(conn, "network_modrinth_enabled") {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+        });
+    }
     require_modrinth_enabled(conn)?;
     modrinth_get_json::<Vec<ModrinthGameVersionTag>>(
         "https://api.modrinth.com/v2/tag/game_version",
@@ -569,6 +605,12 @@ pub async fn fetch_project_full(
     conn: &rusqlite::Connection,
     project_id: &str,
 ) -> LauncherResult<ModrinthProjectFull> {
+    if !db::is_network_enabled(conn, "network_modrinth_enabled") {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+        });
+    }
     require_modrinth_enabled(conn)?;
 
     let client = reqwest::Client::builder()
@@ -707,6 +749,12 @@ pub async fn list_raw_modrinth_versions(
     instance: Option<&InstanceRow>,
     project_id: &str,
 ) -> LauncherResult<Vec<RawModrinthVersionCandidate>> {
+    if !db::is_network_enabled(conn, "network_modrinth_enabled") {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK_DISABLED".into(),
+            message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+        });
+    }
     require_modrinth_enabled(conn)?;
 
     // If an instance is provided, scope the request to its MC version + loader

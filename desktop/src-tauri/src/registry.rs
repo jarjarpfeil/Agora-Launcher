@@ -20,9 +20,10 @@ pub use agora_core::registry::{
     browse_items, get_item_by_id, list_categories, pack_mods_for_pack, list_audit_log,
     list_under_review_items, list_recent_resolutions, list_mod_reviews,
     get_manifest_dependencies, get_all_mod_aliases, resolve_alias, get_known_conflicts,
+    get_curated_annotation,
     row_to_item, REGISTRY_ITEM_COLUMNS,
     RegistryItem, SortOption, CategoryInfo, PackModRow, AuditLogEntry, UnderReviewItem,
-    ModReview, KnownConflict, ManifestDeps,
+    ModReview, KnownConflict, ManifestDeps, CuratedAnnotation,
 };
 
 // ---------------------------------------------------------------------------
@@ -90,46 +91,51 @@ pub fn for_you_items<R: tauri::Runtime>(
     mc_version: Option<&str>,
     loader: Option<&str>,
     limit: i64,
+    modrinth_categories: Option<&[String]>,
 ) -> LauncherResult<Vec<RegistryItem>> {
     let installed = collect_installed_registry_ids(app)?;
     let conn = open_registry(app)?;
 
-    // No installed items → no interest signal → degrade to net_score browse.
-    if installed.is_empty() {
-        let sort = SortOption::NetScore;
-        return browse_items(&conn, None, None, &sort, modrinth_enabled, mc_version, loader, limit);
-    }
-
-    // Derive the user's interest categories from the installed-item ids.
-    let installed_ph = installed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let interest_sql = format!(
-        "SELECT DISTINCT category_id FROM item_categories WHERE item_id IN ({installed_ph})"
-    );
-    let mut stmt = conn.prepare(&interest_sql).map_err(|e| LauncherError::Generic {
-        code: "ERR_INVALID_QUERY".to_string(),
-        message: e.to_string(),
-    })?;
-    let interest_params: Vec<Box<dyn rusqlite::ToSql>> =
-        installed.iter().map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>).collect();
-    let interest_rows = stmt
-        .query_map(rusqlite::params_from_iter(interest_params.iter()), |row| {
-            let cat: String = row.get(0)?;
-            Ok(cat)
-        })
-        .map_err(|e| LauncherError::Generic {
+    // Derive interest categories from installed items.
+    let mut interest: Vec<String> = Vec::new();
+    if !installed.is_empty() {
+        let installed_ph = installed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let interest_sql = format!(
+            "SELECT DISTINCT category_id FROM item_categories WHERE item_id IN ({installed_ph})"
+        );
+        let mut stmt = conn.prepare(&interest_sql).map_err(|e| LauncherError::Generic {
             code: "ERR_INVALID_QUERY".to_string(),
             message: e.to_string(),
         })?;
-    let mut interest: Vec<String> = Vec::new();
-    for r in interest_rows {
-        interest.push(r.map_err(|e| LauncherError::Generic {
-            code: "ERR_INVALID_QUERY".to_string(),
-            message: e.to_string(),
-        })?);
+        let interest_params: Vec<Box<dyn rusqlite::ToSql>> =
+            installed.iter().map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>).collect();
+        let interest_rows = stmt
+            .query_map(rusqlite::params_from_iter(interest_params.iter()), |row| {
+                let cat: String = row.get(0)?;
+                Ok(cat)
+            })
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?;
+        for r in interest_rows {
+            interest.push(r.map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?);
+        }
     }
-    drop(stmt);
 
-    // No resolvable interest categories → degrade.
+    // Merge Modrinth category facets from the Browse page filter state.
+    if let Some(mr_cats) = modrinth_categories {
+        for cat in mr_cats {
+            if !interest.contains(cat) {
+                interest.push(cat.clone());
+            }
+        }
+    }
+
+    // No interest signal at all → degrade to net_score browse.
     if interest.is_empty() {
         let sort = SortOption::NetScore;
         return browse_items(&conn, None, None, &sort, modrinth_enabled, mc_version, loader, limit);
@@ -137,6 +143,8 @@ pub fn for_you_items<R: tauri::Runtime>(
 
     // Candidate items: uninstalled items sharing >=1 interest category, ranked
     // by number of interest categories matched then net_score.
+    // Normalized score formula: score = overlap_count * 10 + net_score * 0.5 + log(downloads + 1) * 0.3
+    // (downloads term requires a future schema addition)
     let interest_ph = interest.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let mut where_parts: Vec<String> = Vec::new();
     if !modrinth_enabled {
