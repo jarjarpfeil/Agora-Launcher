@@ -786,23 +786,32 @@ pub async fn read_crash_log_cmd(
 pub async fn list_mod_versions(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
-    instance_id: String,
+    instance_id: Option<String>,
     item_id: String,
 ) -> LauncherResult<ModVersionPage> {
-    let instance = mod_install::load_instance_info(&app, &instance_id)?;
+    // When no instance is provided (e.g. the Versions tab browsing without
+    // an instance selected), use empty strings so all releases are fetched
+    // without compatibility filtering.
+    let (mc_ver, loader) = match &instance_id {
+        Some(id) => {
+            let inst = mod_install::load_instance_info(&app, id)?;
+            (inst.minecraft_version, inst.loader)
+        }
+        None => (String::new(), String::new()),
+    };
     let item = mod_install::load_registry_item(&app, &item_id)?;
 
     match item.download_strategy.as_str() {
         "github_release" => {
             let (all_versions, total_pages, pages_fetched) =
-                mod_install::resolve_github_releases_initial(&app, &item, &instance.minecraft_version, &instance.loader).await?;
+                mod_install::resolve_github_releases_initial(&app, &item, &mc_ver, &loader).await?;
             let pages_set: BTreeSet<u32> = pages_fetched.into_iter().collect();
             let total = all_versions.len();
             version_cache::load_versions(
                 &VERSION_CACHE,
                 &item_id,
-                &instance.minecraft_version,
-                &instance.loader,
+                &mc_ver,
+                &loader,
                 &item.source_identifier,
                 &item.download_strategy,
                 all_versions,
@@ -810,21 +819,28 @@ pub async fn list_mod_versions(
                 pages_set,
             )
             .await;
-            let page = version_cache::get_page(&VERSION_CACHE, &item_id, &instance.minecraft_version, &instance.loader, 0)
+            let page = version_cache::get_page(&VERSION_CACHE, &item_id, &mc_ver, &loader, 0)
                 .await
                 .unwrap_or_else(|| ModVersionPage { items: Vec::new(), has_more: false, total });
             Ok(page)
         }
         // For Modrinth strategy, fetch all versions (no pagination needed)
         _ => {
-            let all_versions = mod_install::list_mod_versions(&app, &instance_id, &item_id).await?;
+            let iid = match &instance_id {
+                Some(id) => id.as_str(),
+                None => return Err(LauncherError::Generic {
+                    code: "ERR_INSTANCE_REQUIRED".to_string(),
+                    message: "An instance is required for this download strategy.".to_string(),
+                }),
+            };
+            let all_versions = mod_install::list_mod_versions(&app, iid, &item_id).await?;
             let total = all_versions.len();
             let pages_set: BTreeSet<u32> = [1].into_iter().collect();
             version_cache::load_versions(
                 &VERSION_CACHE,
                 &item_id,
-                &instance.minecraft_version,
-                &instance.loader,
+                &mc_ver,
+                &loader,
                 &item.source_identifier,
                 &item.download_strategy,
                 all_versions,
@@ -832,7 +848,7 @@ pub async fn list_mod_versions(
                 pages_set,
             )
             .await;
-            let page = version_cache::get_page(&VERSION_CACHE, &item_id, &instance.minecraft_version, &instance.loader, 0)
+            let page = version_cache::get_page(&VERSION_CACHE, &item_id, &mc_ver, &loader, 0)
                 .await
                 .unwrap_or_else(|| ModVersionPage { items: Vec::new(), has_more: false, total });
             Ok(page)
@@ -847,17 +863,20 @@ pub async fn list_mod_versions(
 pub async fn list_mod_versions_load_more(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
-    instance_id: String,
+    instance_id: Option<String>,
     item_id: String,
     page: usize,
 ) -> LauncherResult<ModVersionPage> {
-    let instance = mod_install::load_instance_info(&app, &instance_id)?;
+    let (mc_ver, loader) = match &instance_id {
+        Some(id) => {
+            let inst = mod_install::load_instance_info(&app, id)?;
+            (inst.minecraft_version, inst.loader)
+        }
+        None => (String::new(), String::new()),
+    };
 
     // Check if the cache already has enough data for this page.
-    if let Some(page_data) = version_cache::get_page(&VERSION_CACHE, &item_id, &instance.minecraft_version, &instance.loader, page).await {
-        // We have the data — return it.
-        // If the page was empty but we know there are more GitHub pages,
-        // we should try to fetch more before returning.
+    if let Some(page_data) = version_cache::get_page(&VERSION_CACHE, &item_id, &mc_ver, &loader, page).await {
         let need_more = page_data.items.is_empty()
             && page_data.has_more;
         if !need_more {
@@ -868,11 +887,8 @@ pub async fn list_mod_versions_load_more(
     // Cache miss or empty page — fetch more GitHub pages.
     let item = mod_install::load_registry_item(&app, &item_id)?;
 
-    let mc_ver = &instance.minecraft_version;
-    let loader = &instance.loader;
-
     // Figure out which pages are still missing.
-    let entry = version_cache::get_entry(&VERSION_CACHE, &item_id, mc_ver, loader).await;
+    let entry = version_cache::get_entry(&VERSION_CACHE, &item_id, &mc_ver, &loader).await;
     let (pages_fetched, total_pages) = match &entry {
         Some(e) => (e.pages_fetched.clone(), e.total_pages),
         None => {
@@ -892,7 +908,7 @@ pub async fn list_mod_versions_load_more(
 
     if to_fetch.is_empty() {
         // All pages already fetched — nothing more to load.
-        return version_cache::get_page(&VERSION_CACHE, &item_id, mc_ver, loader, page)
+        return version_cache::get_page(&VERSION_CACHE, &item_id, &mc_ver, &loader, page)
             .await
             .ok_or_else(|| LauncherError::Generic {
                 code: "ERR_VERSION_CACHE_MISS".to_string(),
@@ -906,8 +922,8 @@ pub async fn list_mod_versions_load_more(
     let results = mod_install::fetch_github_versions_batch(
         &app,
         &item.source_identifier,
-        mc_ver,
-        loader,
+        &mc_ver,
+        &loader,
         &batch,
     )
     .await?;
@@ -921,15 +937,15 @@ pub async fn list_mod_versions_load_more(
     version_cache::extend_versions(
         &VERSION_CACHE,
         &item_id,
-        mc_ver,
-        loader,
+        &mc_ver,
+        &loader,
         all_more,
         &page_nums,
     )
     .await;
 
     // Now try again for the requested page.
-    version_cache::get_page(&VERSION_CACHE, &item_id, mc_ver, loader, page)
+    version_cache::get_page(&VERSION_CACHE, &item_id, &mc_ver, &loader, page)
         .await
         .ok_or_else(|| LauncherError::Generic {
             code: "ERR_VERSION_CACHE_MISS".to_string(),

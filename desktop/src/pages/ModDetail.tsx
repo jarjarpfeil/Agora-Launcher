@@ -37,8 +37,6 @@ import {
   type ModrinthProjectFull,
 } from '../lib/tauri';
 
-type CompatibleVersionEntry = Record<string, unknown> | string;
-
 // Allowlist schema for rendering community/upstream markdown (Modrinth body).
 // Built on rehype-sanitize's default (already strips <script>, on* handlers,
 // javascript:/data: URLs, <iframe>). Additionally allows richer structural tags
@@ -73,36 +71,6 @@ const SANITIZE_SCHEMA: Schema = {
     poster: ['https'],
   },
 };
-
-function parseCompatibleVersions(json: string | null): CompatibleVersionEntry[] {
-  if (!json) return [];
-  try {
-    const parsed = JSON.parse(json);
-    if (Array.isArray(parsed)) {
-      return parsed.filter((entry): entry is CompatibleVersionEntry =>
-        typeof entry === 'object' && entry !== null ? true : typeof entry === 'string',
-      );
-    }
-    if (parsed && typeof parsed === 'object') {
-      return [parsed as CompatibleVersionEntry];
-    }
-    return [];
-  } catch {
-    return [];
-  }
-}
-
-function renderVersionEntry(entry: CompatibleVersionEntry): string {
-  if (typeof entry === 'string') return entry;
-  const fields = ['mc_version', 'minecraft_version', 'loader', 'loader_version', 'version', 'game_version'];
-  const parts: string[] = [];
-  for (const field of fields) {
-    const value = (entry as Record<string, unknown>)[field];
-    if (value != null && value !== '') parts.push(`${field}: ${String(value)}`);
-  }
-  if (parts.length > 0) return parts.join(' · ');
-  return JSON.stringify(entry);
-}
 
 type CuratorNotesRegistryItem = RegistryItem & { curator_notes?: string | null };
 
@@ -160,6 +128,16 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   const [versionsTabInstanceId, setVersionsTabInstanceId] = useState<string | null>(null);
   const [versionInstallPhase, setVersionInstallPhase] = useState<'idle' | 'installing' | 'done' | 'error'>('idle');
   const [versionInstallMsg, setVersionInstallMsg] = useState<string | null>(null);
+
+  // Versions tab: GitHub release version list (for mods without modrinth_id)
+  const [githubTabVersions, setGithubTabVersions] = useState<ModVersionCandidate[]>([]);
+  const [githubTabLoading, setGithubTabLoading] = useState(false);
+  const [githubTabError, setGithubTabError] = useState<string | null>(null);
+  const [githubTabHasMore, setGithubTabHasMore] = useState(false);
+  const [githubTabPage, setGithubTabPage] = useState(1);
+  const [githubTabLoadingMore, setGithubTabLoadingMore] = useState(false);
+  const githubTabSentinelRef = useRef<HTMLDivElement>(null);
+  const [selectedGithubTabVersion, setSelectedGithubTabVersion] = useState<ModVersionCandidate | null>(null);
 
   // Phase 7: curated annotation overlay for Modrinth-linked projects
   const [curatedAnnotation, setCuratedAnnotation] = useState<CuratedAnnotation | null>(null);
@@ -481,6 +459,64 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     return () => observer.disconnect();
   }, [hasMoreVersions, loadingMoreVersions, isModrinthInstall, loadMoreVersions]);
 
+  // --- Versions tab: GitHub release fetching (for mods without modrinth_id) ---
+  // Fetches real GitHub release versions instead of showing the static
+  // compatible_versions_json "guess" from the registry.
+  const loadMoreGithubTabVersions = useCallback(async () => {
+    if (githubTabLoadingMore || !githubTabHasMore) return;
+    setGithubTabLoadingMore(true);
+    try {
+      const nextPage = await listModVersionsLoadMore(null, itemId, githubTabPage);
+      setGithubTabVersions((prev) => [...prev, ...nextPage.items]);
+      setGithubTabHasMore(nextPage.hasMore);
+      setGithubTabPage((prev) => prev + 1);
+    } catch {
+      // Silently stop loading on error
+    } finally {
+      setGithubTabLoadingMore(false);
+    }
+  }, [itemId, githubTabPage, githubTabLoadingMore, githubTabHasMore]);
+
+  useEffect(() => {
+    if (activeTab !== 'versions' || !item || item.modrinth_id) return;
+    let cancelled = false;
+    (async () => {
+      setGithubTabLoading(true);
+      setGithubTabError(null);
+      setGithubTabVersions([]);
+      setGithubTabHasMore(false);
+      setGithubTabPage(1);
+      setSelectedGithubTabVersion(null);
+      try {
+        const page = await listModVersions(null, itemId);
+        if (cancelled) return;
+        setGithubTabVersions(page.items);
+        setGithubTabHasMore(page.hasMore);
+      } catch (e) {
+        if (!cancelled) setGithubTabError(formatError(e));
+      } finally {
+        if (!cancelled) setGithubTabLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [activeTab, item, itemId]);
+
+  // Infinite scroll for GitHub tab versions
+  useEffect(() => {
+    const sentinel = githubTabSentinelRef.current;
+    if (!sentinel || !githubTabHasMore || githubTabLoadingMore) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting && githubTabHasMore && !githubTabLoadingMore) {
+          loadMoreGithubTabVersions();
+        }
+      },
+      { rootMargin: '400px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [githubTabHasMore, githubTabLoadingMore, loadMoreGithubTabVersions]);
+
   if (loading) {
     return (
       <div className="space-y-6">
@@ -504,7 +540,6 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   }
 
   const curatorNotes = (item as CuratorNotesRegistryItem).curator_notes ?? null;
-  const compatibleVersions = parseCompatibleVersions(item.compatible_versions_json);
   const galleryUrls: string[] = (() => {
     if (!item.gallery_urls_json) return [];
     try {
@@ -709,9 +744,27 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     }
   };
 
-  // Versions tab install handler
+  // Versions tab install handler (supports both Modrinth and GitHub versions)
   const handleInstallVersionFromTab = async () => {
-    if (!selectedVersion || !versionsTabInstanceId || !item?.modrinth_id) return;
+    if (!versionsTabInstanceId) return;
+
+    // GitHub release version path
+    if (selectedGithubTabVersion && item) {
+      setVersionInstallPhase('installing');
+      setVersionInstallMsg(null);
+      try {
+        await installModVersion(versionsTabInstanceId, itemId, selectedGithubTabVersion);
+        setVersionInstallPhase('done');
+        setVersionInstallMsg(`Installed ${selectedGithubTabVersion.filename}.`);
+      } catch (e) {
+        setVersionInstallPhase('error');
+        setVersionInstallMsg(formatError(e));
+      }
+      return;
+    }
+
+    // Modrinth version path
+    if (!selectedVersion || !item?.modrinth_id) return;
     setVersionInstallPhase('installing');
     setVersionInstallMsg(null);
     try {
@@ -1315,7 +1368,10 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                         return (
                           <tr
                             key={v.version_id}
-                            onClick={() => setSelectedVersion(v)}
+                            onClick={() => {
+                              setSelectedVersion(v);
+                              setSelectedGithubTabVersion(null);
+                            }}
                             className={`cursor-pointer border-b border-border/50 transition-colors ${
                               isSelected
                                 ? 'bg-brand-50 dark:bg-brand-900/20'
@@ -1401,20 +1457,107 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
               </div>
             )
           ) : (
-            // Fallback: no modrinth_id; show the curated compatible_versions_json list
-            compatibleVersions.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No version information available.</p>
+            // No modrinth_id — fetch real GitHub release versions
+            githubTabLoading ? (
+              <p className="text-sm text-muted-foreground">Loading versions…</p>
+            ) : githubTabError ? (
+              <p className="text-sm text-muted-foreground">{githubTabError}</p>
+            ) : githubTabVersions.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No versions published.</p>
             ) : (
-              <ul className="space-y-1.5 text-sm">
-                {compatibleVersions.map((entry, index) => (
-                  <li
-                    key={index}
-                    className="rounded-md border border-border px-3 py-1.5 break-words"
-                  >
-                    {renderVersionEntry(entry)}
-                  </li>
-                ))}
-              </ul>
+              <div className="flex flex-col lg:flex-row gap-4">
+                {/* GitHub versions table */}
+                <div className="flex-1 overflow-x-auto">
+                  <table className="w-full text-sm border-collapse">
+                    <thead>
+                      <tr className="border-b border-border text-left text-xs text-muted-foreground">
+                        <th className="py-2 pr-3 font-medium">Version</th>
+                        <th className="py-2 pr-3 font-medium">MC Version</th>
+                        <th className="py-2 pr-3 font-medium">Loader</th>
+                        <th className="py-2 pr-3 font-medium">Released</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {githubTabVersions.map((v, idx) => {
+                        const isSelected = selectedGithubTabVersion?.filename === v.filename
+                          && selectedGithubTabVersion?.version === v.version;
+                        return (
+                          <tr
+                            key={`${v.version}-${idx}`}
+                            onClick={() => {
+                              setSelectedGithubTabVersion(v);
+                              setSelectedVersion(null);
+                            }}
+                            className={`cursor-pointer border-b border-border/50 transition-colors ${
+                              isSelected
+                                ? 'bg-brand-50 dark:bg-brand-900/20'
+                                : 'hover:bg-accent'
+                            }`}
+                          >
+                            <td className="py-2 pr-3 font-medium break-all">{v.version}</td>
+                            <td className="py-2 pr-3 text-xs text-muted-foreground">{v.mc_version || '—'}</td>
+                            <td className="py-2 pr-3 text-xs text-muted-foreground">{v.loader || '—'}</td>
+                            <td className="py-2 pr-3 text-xs text-muted-foreground">{v.release_date ? v.release_date.slice(0, 10) : '—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {githubTabHasMore && (
+                    <div ref={githubTabSentinelRef} className="py-3 text-center text-xs text-muted-foreground">
+                      {githubTabLoadingMore ? 'Loading more versions…' : ''}
+                    </div>
+                  )}
+                </div>
+
+                {/* Selected version detail panel */}
+                {selectedGithubTabVersion && (
+                  <div className="lg:w-80 lg:flex-shrink-0 rounded-lg border border-border p-3 space-y-3">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Selected version</p>
+                      <p className="font-semibold text-sm break-all">{selectedGithubTabVersion.version}</p>
+                    </div>
+                    <div className="text-xs text-muted-foreground space-y-1">
+                      <p className="break-all">File: {selectedGithubTabVersion.filename}</p>
+                      <p>MC: {selectedGithubTabVersion.mc_version || '—'}</p>
+                      <p>Loader: {selectedGithubTabVersion.loader || '—'}</p>
+                      {selectedGithubTabVersion.release_date && (
+                        <p>Released: {selectedGithubTabVersion.release_date.slice(0, 10)}</p>
+                      )}
+                    </div>
+
+                    {/* Install controls */}
+                    <div className="pt-2 border-t border-border">
+                      <label className="block text-xs font-medium mb-1">Install to instance</label>
+                      <select
+                        value={versionsTabInstanceId ?? ''}
+                        onChange={(e) => setVersionsTabInstanceId(e.target.value || null)}
+                        className="w-full rounded-lg border border-border bg-background px-2 py-1.5 text-xs mb-2"
+                      >
+                        <option value="">Choose an instance…</option>
+                        {versionsTabInstances.map((inst) => (
+                          <option key={inst.instance_id} value={inst.instance_id}>
+                            {inst.name} ({inst.loader} · MC {inst.minecraft_version})
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        onClick={handleInstallVersionFromTab}
+                        disabled={!versionsTabInstanceId || versionInstallPhase === 'installing'}
+                        className="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                      >
+                        {versionInstallPhase === 'installing' ? 'Installing…' : 'Install this version'}
+                      </button>
+                      {versionInstallPhase === 'done' && versionInstallMsg && (
+                        <p className="mt-2 text-xs text-green-600 dark:text-green-400">{versionInstallMsg}</p>
+                      )}
+                      {versionInstallPhase === 'error' && versionInstallMsg && (
+                        <p className="mt-2 text-xs text-destructive">{versionInstallMsg}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             )
           )}
         </section>

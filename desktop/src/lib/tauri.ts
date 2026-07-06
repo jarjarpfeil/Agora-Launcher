@@ -349,10 +349,10 @@ export interface ModVersionPage {
   total: number;
 }
 
-export const listModVersions = (instanceId: string, itemId: string) =>
+export const listModVersions = (instanceId: string | null, itemId: string) =>
   invoke<ModVersionPage>('list_mod_versions', { instanceId, itemId });
 
-export const listModVersionsLoadMore = (instanceId: string, itemId: string, page: number) =>
+export const listModVersionsLoadMore = (instanceId: string | null, itemId: string, page: number) =>
   invoke<ModVersionPage>('list_mod_versions_load_more', { instanceId, itemId, page });
 
 /// Quick compat probe for the browse page — returns
