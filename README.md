@@ -5,7 +5,7 @@
 A decentralized, ad-free, open-source Minecraft mod launcher and discovery platform built to return platform control to the community. Curated mods, packs, shaders, and more are delivered as a signed SQLite database compiled nightly from flat JSON manifests stored directly in this repository.
 
 ## Links
-- Discord -
+- Discord - https://discord.gg/56tpsa2sTZ
 - Site - https://agoramc.com/
 
 ## Mission
