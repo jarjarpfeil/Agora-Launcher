@@ -47,6 +47,22 @@ export function formatError(e: unknown): string {
   return String(e);
 }
 
+/** Check whether a thrown error is an expired-GitHub-session error. */
+export function isAuthExpired(e: unknown): boolean {
+  if (e == null || typeof e !== 'object') return false;
+  const obj = e as Record<string, unknown>;
+  if (obj.code === 'ERR_AUTH_EXPIRED') return true;
+  // Tauri serialized struct variant: { AuthExpired: { code: "ERR_AUTH_EXPIRED", ... } }
+  for (const key of Object.keys(obj)) {
+    const inner = obj[key];
+    if (inner && typeof inner === 'object') {
+      const innerObj = inner as Record<string, unknown>;
+      if (innerObj.code === 'ERR_AUTH_EXPIRED') return true;
+    }
+  }
+  return false;
+}
+
 export interface InstanceRow {
   instance_id: string;
   name: string;
@@ -754,6 +770,11 @@ export interface CopilotToken {
 
 export const copilotLogin = () =>
   invoke<CopilotDeviceFlowResponse>('copilot_login');
+
+/** Try to use the existing governance GitHub token for Copilot, skipping the
+ *  device flow if the token works and the user has a Copilot subscription. */
+export const copilotTryGovernanceToken = () =>
+  invoke<CopilotToken | null>('copilot_try_governance_token');
 
 export const copilotLoginPoll = (deviceCode: string, interval: number) =>
   invoke<CopilotToken>('copilot_login_poll', { deviceCode, interval });

@@ -61,6 +61,8 @@ pub async fn fetch_triage_poll(app: &AppHandle, mod_id: String) -> LauncherResul
         .map_err(|_| LauncherError::NetworkOffline)?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        crate::auth::log_line("GitHub token expired during triage poll search; clearing token");
+        let _ = auth::clear_token(app);
         return Err(LauncherError::AuthExpired);
     }
     if agora_core::github_ratelimit::is_rate_limit_response(&resp) {
@@ -151,6 +153,8 @@ pub async fn fetch_triage_poll(app: &AppHandle, mod_id: String) -> LauncherResul
         .map_err(|_| LauncherError::NetworkOffline)?;
 
     if resp2.status() == reqwest::StatusCode::UNAUTHORIZED {
+        crate::auth::log_line("GitHub token expired during triage poll reactions; clearing token");
+        let _ = auth::clear_token(app);
         return Err(LauncherError::AuthExpired);
     }
     if agora_core::github_ratelimit::is_rate_limit_response(&resp2) {
@@ -311,6 +315,8 @@ pub async fn flag_review(
         .map_err(|_| LauncherError::NetworkOffline)?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        crate::auth::log_line("GitHub token expired during flag submission; clearing token");
+        let _ = auth::clear_token(app);
         return Err(LauncherError::AuthExpired);
     }
     if agora_core::github_ratelimit::is_rate_limit_response(&resp) {

@@ -711,11 +711,17 @@ pub async fn get_auth_status(app: tauri::AppHandle) -> bool {
 }
 
 /// Fetch the authenticated user's GitHub profile, if signed in.
+/// Stale tokens are automatically cleared from storage on AuthExpired.
 #[tauri::command]
 pub async fn get_github_profile(app: tauri::AppHandle) -> LauncherResult<Option<GithubProfile>> {
-    match crate::auth::get_token(&app) {
-        Some(token) => Ok(Some(crate::auth::get_github_user(token).await?)),
-        None => Ok(None),
+    match crate::auth::get_validated_github_profile(&app).await {
+        Ok(p) => Ok(Some(p)),
+        Err(crate::error::LauncherError::AuthExpired) => {
+            // Token was cleared in get_validated_github_profile.
+            // Propagate so the frontend can show the sign-in prompt.
+            Err(crate::error::LauncherError::AuthExpired)
+        }
+        Err(_) => Ok(None),
     }
 }
 
@@ -1777,6 +1783,33 @@ pub async fn copilot_login(
 ) -> LauncherResult<ai_assistant::CopilotDeviceFlowResponse> {
     let client = reqwest::Client::new();
     ai_assistant::start_copilot_flow(&client).await
+}
+
+/// Try to use the existing governance GitHub token for Copilot, skipping the
+/// device flow if the token is valid and the user has a Copilot subscription.
+/// Returns `Some(CopilotToken)` on success, or `None` if the user needs to
+/// go through the device flow instead.
+#[tauri::command]
+pub async fn copilot_try_governance_token(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<Option<ai_assistant::CopilotToken>> {
+    let ghu_token = match crate::auth::get_token(&app) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let client = reqwest::Client::new();
+    match ai_assistant::resolve_copilot_endpoint(&client, &ghu_token).await {
+        Ok(copilot_token) => {
+            ai_assistant::store_copilot_token(&copilot_token)?;
+            Ok(Some(copilot_token))
+        }
+        Err(_) => {
+            // Token either doesn't have a Copilot subscription or belongs to a
+            // different OAuth app — fall through to the device flow.
+            Ok(None)
+        }
+    }
 }
 
 /// Poll the Copilot device flow. On success, resolves endpoint + stores token.

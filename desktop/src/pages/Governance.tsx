@@ -9,6 +9,7 @@ import {
   TriagePoll,
   listRecentResolutions,
   getAuthStatus,
+  isAuthExpired,
 } from '../lib/tauri';
 
 export function Governance() {
@@ -91,11 +92,13 @@ export function Governance() {
       const results: Record<string, TriagePoll | null> = {};
       const errors: string[] = [];
 
+      let sawAuthExpired = false;
       await Promise.all(
         underReviewItems.map(async (item) => {
           try {
             results[item.id] = await fetchTriagePoll(item.id);
           } catch (e) {
+            if (isAuthExpired(e)) sawAuthExpired = true;
             errors.push(formatError(e));
             results[item.id] = null;
           }
@@ -103,6 +106,10 @@ export function Governance() {
       );
 
       if (!cancelled) {
+        if (sawAuthExpired) {
+          // Token was cleared by the backend; re-check auth state.
+          setAuthenticated(false);
+        }
         setPolls(results);
         if (errors.length > 0) {
           setPollsError(errors.join('; '));

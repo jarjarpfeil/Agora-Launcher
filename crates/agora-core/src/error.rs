@@ -192,6 +192,9 @@ impl serde::Serialize for LauncherError {
             LauncherError::NetworkOffline => {
                 Some("Check your internet connection and try again.")
             }
+            LauncherError::AuthExpired => {
+                Some("Sign in again via Settings to continue.")
+            }
             LauncherError::AuthRequired => {
                 Some("Sign in via Settings to use this feature.")
             }

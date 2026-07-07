@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
@@ -9,20 +10,33 @@ const COPILOT_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_USER_URL: &str = "https://api.github.com/user";
 const COPILOT_INTERNAL_USER_URL: &str = "https://api.github.com/copilot_internal/user";
 const COPILOT_TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/token";
-const COPILOT_INDIVIDUAL_ENDPOINT: &str = "https://api.individual.githubcopilot.com/chat/completions";
-const COPILOT_ENTERPRISE_ENDPOINT: &str = "https://api.githubcopilot.com/chat/completions";
+const COPILOT_INDIVIDUAL_API_BASE: &str = "https://api.individual.githubcopilot.com";
+const COPILOT_ENTERPRISE_API_BASE: &str = "https://api.githubcopilot.com";
 const COPILOT_KEYRING_SERVICE: &str = "agora.copilot";
 const COPILOT_KEYRING_ACCOUNT: &str = "token";
+/// Conservative fallback for how long a Copilot session token (from the
+/// `copilot_internal/v2/token` exchange) stays valid, used only when the
+/// exchange response doesn't include its own `expires_at`. Real tokens are
+/// typically good for ~25-30 minutes; we refresh a little early to be safe.
+const COPILOT_SESSION_TOKEN_TTL_MINUTES: i64 = 20;
 
 /// Check a network enable setting from the local state DB.
+/// If the DB file doesn't exist yet, the feature is allowed (default-enabled).
 fn check_network_enabled(setting_key: &str, disabled_msg: &str) -> LauncherResult<()> {
-    let app_data_dir = dirs::data_local_dir()
-        .ok_or_else(|| LauncherError::Generic {
-            code: "ERR_NO_DATA_DIR".into(),
-            message: "Could not determine local data directory.".into(),
-        })?
-        .join("agora");
+    let app_data_dir = match dirs::data_local_dir() {
+        Some(d) => d.join("agora"),
+        None => {
+            return Err(LauncherError::Generic {
+                code: "ERR_NO_DATA_DIR".into(),
+                message: "Could not determine local data directory.".into(),
+            })
+        }
+    };
     let db_path = app_data_dir.join("local_state.db");
+    if !db_path.exists() {
+        // DB hasn't been initialised yet — feature is enabled by default.
+        return Ok(());
+    }
     let conn = db::local_state_connection(&db_path).map_err(|e| LauncherError::Generic {
         code: "ERR_DB".into(),
         message: e.to_string(),
@@ -73,6 +87,12 @@ pub struct CopilotToken {
     pub plan: String,
     pub username: String,
     pub stored_at: chrono::DateTime<chrono::Utc>,
+    /// When `copilot_token` stops being valid, if known. `None` for tokens
+    /// stored by a pre-patch version of Agora (hence `serde(default)`), or
+    /// when we fell back to the raw OAuth token, which doesn't expire on
+    /// this timescale.
+    #[serde(default)]
+    pub copilot_token_expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl std::fmt::Debug for CopilotToken {
@@ -84,6 +104,7 @@ impl std::fmt::Debug for CopilotToken {
             .field("plan", &self.plan)
             .field("username", &self.username)
             .field("stored_at", &self.stored_at)
+            .field("copilot_token_expires_at", &self.copilot_token_expires_at)
             .finish()
     }
 }
@@ -237,6 +258,21 @@ pub async fn poll_copilot_flow(
 }
 
 /// Detect which Copilot endpoint to use and resolve the full token.
+///
+/// This mirrors the handshake Copilot's own editor integrations perform:
+/// 1. `GET copilot_internal/user` to read the account's plan, its
+///    entitlement API host, and whether Copilot Chat is enabled at all.
+/// 2. Exchange the long-lived GitHub OAuth token for a short-lived Copilot
+///    session token via `GET copilot_internal/v2/token`.
+///
+/// Step 2 used to only run for Business/Enterprise plans here, which is why
+/// Free/individual accounts never ended up with a usable token: the
+/// chat/completions endpoints reject a raw GitHub OAuth token on every
+/// plan, not just the paid org ones. We now attempt the exchange
+/// unconditionally. A handful of individual-plan users have reported this
+/// endpoint 404ing for their account while GitHub reworks its Copilot plan
+/// structure — if that happens, we fall back to the raw OAuth token against
+/// the account's own entitlement endpoint instead of failing outright.
 pub async fn resolve_copilot_endpoint(
     client: &reqwest::Client,
     ghu_token: &str,
@@ -247,6 +283,7 @@ pub async fn resolve_copilot_endpoint(
         .header("Authorization", format!("Bearer {}", ghu_token))
         .header("Accept", "application/json")
         .header("User-Agent", "Agora-Launcher/1.0")
+        .header("Editor-Version", "vscode/1.95.0")
         .send()
         .await
         .map_err(|_| LauncherError::NetworkOffline)?;
@@ -270,40 +307,87 @@ pub async fn resolve_copilot_endpoint(
         .unwrap_or("free")
         .to_string();
 
-    let (endpoint, copilot_token) = match plan.as_str() {
-        "business" | "enterprise" => {
-            let resp = client
-                .post(COPILOT_TOKEN_EXCHANGE_URL)
-                .header("Authorization", format!("Bearer {}", ghu_token))
-                .header("Accept", "application/json")
-                .header("User-Agent", "Agora-Launcher/1.0")
-                .send()
-                .await
-                .map_err(|_| LauncherError::NetworkOffline)?;
+    // A brand-new Free-tier signup may not have accepted the Copilot Chat
+    // terms yet. Catch that here with an actionable message instead of
+    // letting it surface later as a confusing 401/403 from completions.
+    if internal_user.get("chat_enabled").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(LauncherError::Generic {
+            code: "ERR_COPILOT_CHAT_DISABLED".to_string(),
+            message: "Copilot Chat isn't enabled for this GitHub account yet. Enable it at github.com/settings/copilot, then try again.".to_string(),
+        });
+    }
 
-            let status = resp.status();
-            if !status.is_success() {
-                return Err(LauncherError::Generic {
-                    code: "ERR_COPILOT_TOKEN_EXCHANGE".to_string(),
-                    message: format!("Token exchange returned HTTP {}", status.as_u16()),
-                });
-            }
+    // Prefer the host GitHub actually hands us for this account over a
+    // hardcoded guess — plan-to-domain mapping has shifted before, and
+    // GitHub is actively restructuring individual plans as of 2026.
+    let api_base = internal_user
+        .get("endpoints")
+        .and_then(|e| e.get("api"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_end_matches('/').to_string())
+        .unwrap_or_else(|| match plan.as_str() {
+            "business" | "enterprise" => COPILOT_ENTERPRISE_API_BASE.to_string(),
+            _ => COPILOT_INDIVIDUAL_API_BASE.to_string(),
+        });
 
-            let token_json: serde_json::Value = resp.json().await.map_err(|e| LauncherError::Generic {
-                code: "ERR_COPILOT_TOKEN_EXCHANGE_PARSE".to_string(),
-                message: format!("Failed to parse token exchange response: {}", e),
-            })?;
+    eprintln!("[copilot] plan={plan} api_base={api_base}");
 
-            let session_token = token_json
-                .get("token")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+    // Always attempt the session-token exchange, regardless of plan — see
+    // the doc comment above.
+    let exchange_resp = client
+        .post(COPILOT_TOKEN_EXCHANGE_URL)
+        .header("Authorization", format!("token {}", ghu_token))
+        .header("Accept", "application/json")
+        .header("User-Agent", "GitHubCopilotChat/1.95.0")
+        .header("Editor-Version", "vscode/1.95.0")
+        .send()
+        .await
+        .map_err(|_| LauncherError::NetworkOffline)?;
 
-            (COPILOT_ENTERPRISE_ENDPOINT.to_string(), Some(session_token))
+    let exchange_status = exchange_resp.status();
+    let (copilot_token, copilot_token_expires_at) = if exchange_status.is_success() {
+        eprintln!("[copilot] token exchange OK — using Copilot session token");
+        let token_json: serde_json::Value = exchange_resp.json().await.map_err(|e| LauncherError::Generic {
+            code: "ERR_COPILOT_TOKEN_EXCHANGE_PARSE".to_string(),
+            message: format!("Failed to parse token exchange response: {}", e),
+        })?;
+
+        let session_token = token_json
+            .get("token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if session_token.is_empty() {
+            return Err(LauncherError::Generic {
+                code: "ERR_COPILOT_TOKEN_EXCHANGE_EMPTY".to_string(),
+                message: "Copilot token exchange succeeded but returned no token.".to_string(),
+            });
         }
-        _ => (COPILOT_INDIVIDUAL_ENDPOINT.to_string(), None),
+
+        let expires_at = token_json
+            .get("expires_at")
+            .and_then(|v| v.as_i64())
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+            .unwrap_or_else(|| {
+                chrono::Utc::now() + chrono::Duration::minutes(COPILOT_SESSION_TOKEN_TTL_MINUTES)
+            });
+
+        (Some(session_token), Some(expires_at))
+    } else if exchange_status == reqwest::StatusCode::NOT_FOUND {
+        let body_text = exchange_resp.text().await.unwrap_or_default();
+        eprintln!("[copilot] token exchange returned 404 body={}", body_text);
+        (None, None)
+    } else {
+        let body_text = exchange_resp.text().await.unwrap_or_default();
+        eprintln!("[copilot] token exchange returned {} body={}", exchange_status.as_u16(), body_text);
+        return Err(LauncherError::Generic {
+            code: "ERR_COPILOT_TOKEN_EXCHANGE".to_string(),
+            message: format!("Token exchange returned HTTP {}", exchange_status.as_u16()),
+        });
     };
+
+    let endpoint = format!("{}/chat/completions", api_base);
 
     let resp = client
         .get(COPILOT_USER_URL)
@@ -313,6 +397,14 @@ pub async fn resolve_copilot_endpoint(
         .send()
         .await
         .map_err(|_| LauncherError::NetworkOffline)?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(LauncherError::Generic {
+            code: "ERR_COPILOT_USER".to_string(),
+            message: format!("GitHub user endpoint returned HTTP {}", status.as_u16()),
+        });
+    }
 
     let user_json: serde_json::Value = resp.json().await.map_err(|e| LauncherError::Generic {
         code: "ERR_COPILOT_USER_PARSE".to_string(),
@@ -332,6 +424,7 @@ pub async fn resolve_copilot_endpoint(
         plan,
         username,
         stored_at: chrono::Utc::now(),
+        copilot_token_expires_at,
     })
 }
 
@@ -407,29 +500,66 @@ pub fn clear_copilot_token() -> LauncherResult<()> {
 pub async fn chat_completion(
     messages: Vec<ChatMessage>,
     token: &CopilotToken,
+    model_override: Option<&str>, // Added to allow flexible model selection
 ) -> LauncherResult<ChatResponse> {
     check_network_enabled("network_github_oauth_enabled", "GitHub Copilot is disabled in Privacy settings.")?;
-    let body = serde_json::json!({
-        "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 2000,
-    });
 
-    let auth_token = token.copilot_token.as_deref().unwrap_or(&token.access_token);
+    // Modernize the client version headers to match 2026 proxy expectations
+    let client_version = "vscode/1.115.0";
+    let user_agent = "GitHubCopilotChat/1.115.0";
 
     let client = reqwest::Client::builder()
-        .user_agent("Agora-Launcher/1.0")
+        .user_agent(user_agent)
         .build()
         .map_err(|_| LauncherError::Generic {
             code: "ERR_AI_HTTP_CLIENT".to_string(),
             message: "Failed to build HTTP client for Copilot.".to_string(),
         })?;
 
+    let mut token = token.clone();
+    let needs_refresh = token.copilot_token.is_some()
+        && token
+            .copilot_token_expires_at
+            .map(|exp| chrono::Utc::now() + chrono::Duration::minutes(2) >= exp)
+            .unwrap_or(false);
+
+    if needs_refresh {
+        if let Ok(refreshed) = resolve_copilot_endpoint(&client, &token.access_token).await {
+            let _ = store_copilot_token(&refreshed);
+            token = refreshed;
+        }
+    }
+
+    // Default to "auto" for dynamic server-side routing and credit optimization
+    let model = model_override.unwrap_or("auto");
+    let auth_token = token.copilot_token.as_deref().unwrap_or(&token.access_token);
+    let auth_source = if token.copilot_token.is_some() { "session" } else { "oauth" };
+
+    let body = serde_json::json!({
+        "messages": messages,
+        "model": model,
+        "temperature": 0.3,
+        "max_tokens": 2000,
+    });
+
+    eprintln!(
+        "[copilot] POST {} model={} plan={} auth={} token_age={}s",
+        token.endpoint,
+        model,
+        token.plan,
+        auth_source,
+        chrono::Utc::now()
+            .signed_duration_since(token.stored_at)
+            .num_seconds(),
+    );
+
     let resp = client
         .post(&token.endpoint)
         .header("Authorization", format!("Bearer {}", auth_token))
-        .header("Editor-Version", "vscode/1.95.0")
-        .header("User-Agent", "Agora-Launcher/1.0")
+        .header("Editor-Version", client_version)
+        .header("User-Agent", user_agent)
+        .header("Openai-Intent", "conversation-edits")
+        .header("X-Initiator", "agent")
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -437,11 +567,15 @@ pub async fn chat_completion(
         .map_err(|_| LauncherError::NetworkOffline)?;
 
     let status = resp.status();
+    eprintln!("[copilot] response status={}", status.as_u16());
 
     if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         return Err(LauncherError::Generic {
             code: "ERR_AI_RATE_LIMIT".to_string(),
-            message: "You've reached 50 free Copilot requests/month.".to_string(),
+            message: format!(
+                "You've reached the usage limit for your Copilot {} plan for this billing period.",
+                token.plan
+            ),
         });
     }
 
@@ -452,40 +586,43 @@ pub async fn chat_completion(
         });
     }
 
-    if !status.is_success() {
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(LauncherError::Generic {
-            code: "ERR_AI_REQUEST".to_string(),
-            message: format!("Copilot returned status {}: {}", status.as_u16(), body_text),
+    if status.is_success() {
+        let parsed = resp
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| LauncherError::Generic {
+                code: "ERR_AI_PARSE".to_string(),
+                message: "Failed to parse Copilot response.".to_string(),
+            })?;
+
+        let content = parsed
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // The API returns the actual resolved model here (e.g., "gpt-5-mini" or "claude-sonnet-4.5")
+        let response_model = parsed
+            .get("model")
+            .and_then(|m| m.as_str())
+            .unwrap_or("copilot")
+            .to_string();
+
+        return Ok(ChatResponse {
+            content,
+            model: response_model,
         });
     }
 
-    let parsed = resp
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_AI_PARSE".to_string(),
-            message: "Failed to parse Copilot response.".to_string(),
-        })?;
+    let body_text = resp.text().await.unwrap_or_default();
+    eprintln!("[copilot] error body: {}", body_text);
 
-    let content = parsed
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let response_model = parsed
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("copilot")
-        .to_string();
-
-    Ok(ChatResponse {
-        content,
-        model: response_model,
+    Err(LauncherError::Generic {
+        code: "ERR_AI_REQUEST".to_string(),
+        message: format!("Copilot returned status {}: {}", status.as_u16(), body_text),
     })
 }
 

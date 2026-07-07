@@ -10,6 +10,7 @@ import {
   copilotLoginPoll,
   copilotLogout,
   copilotStatus,
+  copilotTryGovernanceToken,
   CopilotDeviceFlowResponse,
   CopilotToken,
   formatError,
@@ -51,13 +52,23 @@ export function AiAssistant({
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // --- Check Copilot status on mount ---
+  // --- Check Copilot status on mount, silently trying the governance token ---
   useEffect(() => {
     (async () => {
       setCopilotLoading(true);
       try {
         const token = await copilotStatus();
-        setCopilotToken(token);
+        if (token) {
+          setCopilotToken(token);
+        } else {
+          // No stored Copilot token — try reusing the governance token.
+          try {
+            const govToken = await copilotTryGovernanceToken();
+            setCopilotToken(govToken);
+          } catch {
+            setCopilotToken(null);
+          }
+        }
       } catch { setCopilotToken(null); }
       setCopilotLoading(false);
     })();

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useTranslation } from 'react-i18next';
+// import { useTranslation } from 'react-i18next'; // commented out: i18n deferred post-v1
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
@@ -15,6 +15,7 @@ import {
   githubLogin,
   githubLoginPoll,
   githubLogout,
+  isAuthExpired,
   listInstances,
   setMcpApproval,
   setSetting,
@@ -47,7 +48,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 }
 
 export function Settings() {
-  const { t, i18n } = useTranslation();
+  // const { t, i18n } = useTranslation(); // commented out: i18n deferred post-v1
   const [modrinth, setModrinth] = useState(false);
   const [aiMcp, setAiMcp] = useState(false);
   const [aiChatEnabled, setAiChatEnabled] = useState(false);
@@ -192,8 +193,15 @@ export function Settings() {
           try {
             const profile = await getGithubProfile();
             if (!cancelled) setGithubProfile(profile);
-          } catch {
-            // Profile fetch failed; auth status is still valid
+          } catch (e) {
+            if (isAuthExpired(e)) {
+              // Token expired and was cleared; show signed-out state.
+              if (!cancelled) {
+                setGithubAuth(false);
+                setGhError('Your GitHub session has expired. Sign in again to continue.');
+              }
+            }
+            // Other transient errors: auth status is still valid.
           }
         }
       } catch {
@@ -351,39 +359,7 @@ export function Settings() {
         </p>
       </section>
 
-      {/* Language Selector */}
-      <div className="rounded-xl border border-border bg-card p-4 space-y-3">
-        <h3 className="font-semibold">{t('language.label')}</h3>
-        <label className="flex items-center justify-between">
-          <span className="text-sm">{t('language.label')}</span>
-          <select
-            value={i18n.language}
-            onChange={(e) => i18n.changeLanguage(e.target.value)}
-            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
-          >
-            <option value="en">{t('language.en')}</option>
-            <option value="es">{t('language.es')}</option>
-            <option value="zh">{t('language.zh')}</option>
-            <option value="hi">{t('language.hi')}</option>
-            <option value="bn">{t('language.bn')}</option>
-            <option value="pt">{t('language.pt')}</option>
-            <option value="ru">{t('language.ru')}</option>
-            <option value="ja">{t('language.ja')}</option>
-            <option value="ar">{t('language.ar')}</option>
-            <option value="de">{t('language.de')}</option>
-            <option value="ko">{t('language.ko')}</option>
-            <option value="tr">{t('language.tr')}</option>
-            <option value="vi">{t('language.vi')}</option>
-            <option value="fr">{t('language.fr')}</option>
-            <option value="ta">{t('language.ta')}</option>
-            <option value="te">{t('language.te')}</option>
-            <option value="ur">{t('language.ur')}</option>
-            <option value="it">{t('language.it')}</option>
-            <option value="nl">{t('language.nl')}</option>
-            <option value="pl">{t('language.pl')}</option>
-          </select>
-        </label>
-      </div>
+      {/* Language Selector — commented out: i18n deferred post-v1 */}
 
       {/* Advanced Mode Toggle */}
       <div className="rounded-xl border border-border bg-card p-4 space-y-3">

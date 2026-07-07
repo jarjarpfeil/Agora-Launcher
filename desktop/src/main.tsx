@@ -1,4 +1,4 @@
-import './i18n';
+// import './i18n'; // commented out: i18n deferred post-v1
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';

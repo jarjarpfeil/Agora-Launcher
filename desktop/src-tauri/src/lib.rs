@@ -129,6 +129,7 @@ pub fn run() {
             commands::get_mcp_skill_content,
             commands::set_mcp_approval,
             commands::copilot_login,
+            commands::copilot_try_governance_token,
             commands::copilot_login_poll,
             commands::copilot_status,
             commands::copilot_logout,

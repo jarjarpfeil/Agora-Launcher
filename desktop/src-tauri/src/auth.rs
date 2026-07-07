@@ -1,4 +1,4 @@
-﻿use crate::error::LauncherResult;
+﻿use crate::error::{LauncherError, LauncherResult};
 
 pub use agora_core::auth::{
     start_device_flow, poll_device_flow, get_github_user,
@@ -23,5 +23,22 @@ pub fn clear_token<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> Result<(), 
 
 pub fn is_authenticated<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> bool {
     agora_core::auth::is_authenticated()
+}
+
+/// Fetch the GitHub profile for the stored token. If the token has expired
+/// (GitHub returns 401), clear it automatically so the launcher recognises
+/// itself as signed out.
+pub async fn get_validated_github_profile<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> LauncherResult<GithubProfile> {
+    let token = get_token(app).ok_or(LauncherError::AuthRequired)?;
+    match get_github_user(token).await {
+        Ok(profile) => Ok(profile),
+        Err(LauncherError::AuthExpired) => {
+            let _ = clear_token(app);
+            Err(LauncherError::AuthExpired)
+        }
+        Err(e) => Err(e),
+    }
 }
 
