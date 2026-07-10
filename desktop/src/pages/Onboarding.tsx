@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
-  checkRegistryUpdate,
   formatError,
   githubLogin,
   githubLoginPoll,
   setSetting,
   type DeviceFlowResponse,
-  type RegistryStatus,
 } from '../lib/tauri';
+import { useRegistryState } from '../lib/useRegistryState';
+import { RegistryStatusView } from '../components/registry-status-view';
 
 type Step = 'welcome' | 'services' | 'github' | 'registry';
 
@@ -381,27 +381,14 @@ function RegistryStep({
   onFinish: () => void;
   onBack: () => void;
 }) {
-  const [status, setStatus] = useState<RegistryStatus | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const [done, setDone] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { state, status, loading, error, actions } = useRegistryState();
 
-  const download = async () => {
-    setDownloading(true);
-    setError(null);
-    try {
-      const result = await checkRegistryUpdate(true);
-      setStatus(result);
-      setDone(true);
-    } catch (e) {
-      setError(formatError(e));
-    } finally {
-      setDownloading(false);
-    }
-  };
-
+  // Auto-download on mount only if no cached database exists.
+  // If we have a cache, the fullscreen view lets the user Continue Offline.
   useEffect(() => {
-    download();
+    if (!status?.has_cached_db && !loading && state === 'missing') {
+      actions.sync();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -413,36 +400,24 @@ function RegistryStep({
         Agora needs the curated registry database to show mods, packs, shaders, and more.
       </p>
 
-    <div className="rounded-xl border border-border bg-card p-4">
-        {downloading && <p className="text-sm">Downloading the latest registry…</p>}
-        {!downloading && status && (
-          <>
-            <p className="text-sm font-medium">Registry ready.</p>
-            <p className="text-xs text-muted-foreground mt-1">{status.message}</p>
-            {status.cached_tag && (
-              <p className="text-xs text-muted-foreground">Version: {status.cached_tag}</p>
-            )}
-          </>
-        )}
-        {!downloading && error && (
-          <p className="text-xs text-destructive">{error}</p>
-        )}
-      </div>
+      <RegistryStatusView
+        variant="fullscreen"
+        state={state}
+        status={status}
+        error={error}
+        actions={actions}
+        onContinue={onFinish}
+        allowMissingContinue
+        missingWarning="The registry is required to browse curated content. You can continue but the catalog will be empty until the registry is downloaded."
+      />
 
       <div className="mt-8 flex justify-between">
         <button
           onClick={onBack}
-          disabled={downloading}
+          disabled={loading}
           className="rounded-lg px-4 py-2 text-sm font-medium text-muted-foreground hover:underline disabled:opacity-50"
         >
           Back
-        </button>
-        <button
-          onClick={onFinish}
-          disabled={downloading}
-          className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-        >
-          {done ? 'Finish' : 'Skip & Finish'}
         </button>
       </div>
     </div>

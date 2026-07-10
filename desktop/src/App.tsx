@@ -29,6 +29,38 @@ const AI_TAB: { id: Tab; label: string; icon: string } = {
   icon: '\u{1F916}',
 };
 
+/**
+ * Parse a stored boolean setting strictly.
+ * - `true` / `false` → as-is
+ * - `"true"` / `"1"` → true
+ * - `"false"` / `"0"` → false
+ * - Everything else (including `null`, missing, corrupt) → fallback
+ */
+function parseStoredBoolean(value: unknown, fallback: boolean): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (value === 'true' || value === '1') return true;
+    if (value === 'false' || value === '0') return false;
+  }
+  if (typeof value === 'number') return value === 1;
+  return fallback;
+}
+
+/** Minimal branded loading shell shown while async initialization runs. */
+function BrandedSplash() {
+  return (
+    <div className="flex h-screen w-screen items-center justify-center bg-background">
+      <div className="text-center">
+        <h1 className="text-3xl font-bold text-foreground">Agora</h1>
+        <p className="mt-2 text-sm text-muted-foreground">Loading…</p>
+        <div className="mt-4 flex justify-center">
+          <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [selectedModId, setSelectedModId] = useState<string | null>(null);
@@ -47,8 +79,9 @@ export default function App() {
     (async () => {
       try {
         const value = await getSetting('onboarding_complete');
-        if (!cancelled) setOnboardingComplete(Boolean(value));
+        if (!cancelled) setOnboardingComplete(parseStoredBoolean(value, false));
       } catch {
+        // On transient read failure, assume completed (safe for non-Tauri dev).
         if (!cancelled) setOnboardingComplete(true);
       }
     })();
@@ -86,7 +119,7 @@ export default function App() {
   }, [handleNavigate]);
 
   if (onboardingComplete === null) {
-    return null;
+    return <BrandedSplash />;
   }
 
   if (!onboardingComplete) {

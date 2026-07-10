@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useState } from "react";
 import { getWindowsAccentColor } from "@/lib/tauri";
 
 type Theme = "light" | "dark" | "system";
@@ -42,55 +42,51 @@ async function fetchWindowsAccentColor(): Promise<string | null> {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
+  // Synchronous initialization from localStorage (runs before first paint).
   const [theme, setThemeState] = useState<Theme>(() => {
     const stored = loadStored();
     return stored?.theme ?? "system";
   });
 
-  const [accentColor, setAccentColorState] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
-
-  // Hydrate from localStorage on mount
-  useEffect(() => {
+  const [accentColor, setAccentColorState] = useState<string | null>(() => {
     const stored = loadStored();
-    if (stored) {
-      setThemeState(stored.theme);
-      if (stored.accentColor) {
-        setAccentColorState(stored.accentColor);
-      }
-    }
-  }, []);
+    return stored?.accentColor ?? null;
+  });
 
-  // Apply light/dark class to <html> based on theme + OS preference
+  // Apply light/dark class before first paint so there is no flash.
+  useLayoutEffect(() => {
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const isDark =
+      theme === "dark" ||
+      (theme === "system" && mediaQuery.matches);
+    document.documentElement.classList.toggle("dark", isDark);
+  }, [theme]);
+
+  // Listen for OS theme changes after mount.
   useEffect(() => {
     const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-
-    function applyTheme() {
-      const isDark =
-        theme === "dark" ||
-        (theme === "system" && mediaQuery.matches);
-      document.documentElement.classList.toggle("dark", isDark);
-    }
-
-    applyTheme();
-
-    const handler = () => applyTheme();
+    const handler = () => {
+      if (theme === "system") {
+        document.documentElement.classList.toggle("dark", mediaQuery.matches);
+      }
+    };
     mediaQuery.addEventListener("change", handler);
     return () => mediaQuery.removeEventListener("change", handler);
   }, [theme]);
 
-  // Persist theme + accent changes to localStorage
+  // Persist theme + accent changes to localStorage.
   useEffect(() => {
     storeStored({ theme, accentColor });
   }, [theme, accentColor]);
 
-  // Fetch Windows accent color once on mount and apply as CSS variable
+  // Fetch Windows accent color as optional enhancement — never blocks rendering
+  // and never overwrites a stored custom accent.
   useEffect(() => {
     let cancelled = false;
     fetchWindowsAccentColor().then((color) => {
-      if (!cancelled) {
-        setAccentColorState(color);
-        setMounted(true);
+      if (!cancelled && color) {
+        // Use functional updater so a stored custom accent is never overwritten.
+        setAccentColorState((prev) => prev ?? color);
       }
     });
     return () => {
@@ -98,7 +94,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Sync accent color to CSS variable --accent
+  // Sync accent color to CSS variable --accent.
   useEffect(() => {
     const root = document.documentElement;
     if (accentColor) {
@@ -110,11 +106,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
   const setTheme = (t: Theme) => setThemeState(t);
   const setAccentColor = (c: string | null) => setAccentColorState(c);
-
-  // Prevent flash of wrong theme
-  if (!mounted) {
-    return null;
-  }
 
   return (
     <ThemeContext.Provider

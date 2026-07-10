@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { List, LayoutGrid } from 'lucide-react';
 import {
   browseSearch,
@@ -15,6 +15,8 @@ import {
   type SortOption,
   type ModrinthSearchResult,
 } from '../lib/tauri';
+import { useRegistryState } from '../lib/useRegistryState';
+import { RegistryStatusView } from '../components/registry-status-view';
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -100,10 +102,55 @@ function mergeItems(
   return merged;
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic query-key — stable string identity for the current filter set.
+// ---------------------------------------------------------------------------
+function computeQueryKey(params: {
+  sort: SortOption;
+  category: string | null;
+  contentType: string | null;
+  mcVersion: string | null;
+  loader: string | null;
+  query: string;
+}): string {
+  return JSON.stringify({
+    sort: params.sort,
+    category: params.category,
+    contentType: params.contentType,
+    mcVersion: params.mcVersion,
+    loader: params.loader,
+    query: params.query,
+  });
+}
+
 export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) {
+  // Registry availability — show recovery panel when missing
+  const { state: regState, status: regStatus, error: regError, actions: regActions } = useRegistryState();
+
+  // If registry is missing, show full-page recovery panel instead of browse UI
+  if (regState === 'missing' || (regState === 'unknown' && regError !== null)) {
+    return (
+      <div className="space-y-6">
+        <section>
+          <h2 className="text-2xl font-bold mb-2">Browse</h2>
+          <p className="text-muted-foreground">
+            Curated mods, packs, shaders, resource packs, and more.
+          </p>
+        </section>
+        <RegistryStatusView
+          variant="fullscreen"
+          state={regState}
+          status={regStatus}
+          error={regError}
+          actions={regActions}
+        />
+      </div>
+    );
+  }
+
+  // ---- Filter state ----
   const [items, setItems] = useState<BrowseItemCached[]>([]);
   const [hasMore, setHasMore] = useState(false);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [categories, setCategories] = useState<CategoryInfo[]>([]);
   const [sort, setSort] = useState<SortOption>(() => {
     try {
@@ -125,8 +172,19 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
     } catch { /* ignore */ }
     return 'list';
   });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+
+  // ---- Separate loading/error state for metadata vs search ----
+  const [, setMetaLoading] = useState(true);
+  const [metaError, setMetaError] = useState<string | null>(null);
+  const [searchLoading, setSearchLoading] = useState(true);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [loadMoreLoading, setLoadMoreLoading] = useState(false);
+
+  // ---- Request generation counter ----
+  const generationRef = useRef(0);
+  const inFlightSearchRef = useRef<number | null>(null);
+  const inFlightLoadMoreRef = useRef<number | null>(null);
+
   const [loaders, setLoaders] = useState<string[]>([]);
   const [mcVersions, setMcVersions] = useState<string[]>([]);
 
@@ -136,26 +194,54 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
     try { localStorage.setItem('browse_sort', next); } catch { /* ignore */ }
   };
 
-  // --- Load categories ---
+  // ---- Clear all filters ----
+  const clearFilters = useCallback(() => {
+    setCategory(null);
+    setContentType(null);
+    setMcVersion(null);
+    setLoader(null);
+    setQuery('');
+    setSearchError(null);
+    generationRef.current += 1;
+  }, []);
+
+  const hasActiveFilters = category !== null || contentType !== null || mcVersion !== null || loader !== null || query.trim() !== '';
+
+  // ---- Build a stable query key from active filter params ----
+  const queryKey = useMemo(
+    () =>
+      computeQueryKey({
+        sort,
+        category,
+        contentType,
+        mcVersion,
+        loader,
+        query: debouncedQuery,
+      }),
+    [sort, category, contentType, mcVersion, loader, debouncedQuery],
+  );
+
+  // ---- Load categories (metadata only — separate from search) ----
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        if (!cancelled) setLoading(true);
+        if (!cancelled) setMetaLoading(true);
+        setMetaError(null);
         const cats = await listCategories();
         if (!cancelled) setCategories(cats);
       } catch (e) {
-        if (!cancelled) setError(formatError(e));
+        if (!cancelled) setMetaError(formatError(e));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setMetaLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [contentType]);
 
-  // --- Load loaders and MC versions ---
+  // ---- Load loaders and MC versions (static metadata) ----
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -174,22 +260,36 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
     };
   }, []);
 
-  // --- Main search effect ---
+  // ---- Main search effect — uses generation counter for stale-response protection ----
   useEffect(() => {
+    const generation = ++generationRef.current;
+    inFlightSearchRef.current = generation;
+    setSearchError(null);
+    setSearchLoading(true);
+    // Reset items immediately so stale results are never visible
+    setItems([]);
+    setHasMore(false);
+
     let cancelled = false;
+
     (async () => {
       try {
-        if (!cancelled) setLoading(true);
-
         if (sort === 'for_you') {
           let modrinthEnabled = false;
           try {
             const m = await getSetting('modrinth_enabled');
             modrinthEnabled = m === true || m === 'true';
           } catch { /* default false */ }
-          const registryItems = await forYouItems(modrinthEnabled, mcVersion ?? undefined, loader ?? undefined, undefined, undefined);
-          console.log('[BROWSE] forYouItems returned', registryItems.length, 'items');
-          if (!cancelled) {
+
+          const registryItems = await forYouItems(
+            modrinthEnabled,
+            mcVersion ?? undefined,
+            loader ?? undefined,
+            undefined,
+            undefined,
+          );
+
+          if (!cancelled && inFlightSearchRef.current === generation) {
             setItems(mergeItems(registryItems, []));
             setHasMore(false);
           }
@@ -202,62 +302,72 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
             mcVersion ?? undefined,
             loader ?? undefined,
           );
-          console.log('[BROWSE] browseSearch returned', page.items.length, 'items, hasMore=', page.hasMore, 'total=', page.total);
-          if (!cancelled) {
+
+          if (!cancelled && inFlightSearchRef.current === generation) {
             setItems(page.items);
             setHasMore(page.hasMore);
           }
         }
       } catch (e) {
-        console.error('[BROWSE] error:', e);
-        if (!cancelled) {
-          setError(formatError(e));
+        if (!cancelled && inFlightSearchRef.current === generation) {
+          setSearchError(formatError(e));
           setItems([]);
+          setHasMore(false);
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && inFlightSearchRef.current === generation) {
+          setSearchLoading(false);
+          inFlightSearchRef.current = null;
+        }
       }
     })();
+
     return () => {
       cancelled = true;
     };
-  }, [sort, category, contentType, mcVersion, loader, debouncedQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [queryKey]);
 
-  // --- Infinite scroll ---
+  // ---- Infinite scroll — captures generation at trigger time ----
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel || !hasMore || loading) return;
+    if (!sentinel || !hasMore || searchLoading) return;
+
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting && hasMore && !loadingMore) {
-          setLoadingMore(true);
+        if (entries[0]?.isIntersecting && hasMore && !loadMoreLoading) {
+          const capturedGeneration = generationRef.current;
+          inFlightLoadMoreRef.current = capturedGeneration;
+          setLoadMoreLoading(true);
+
           browseLoadMore()
             .then((page) => {
-              console.log('[BROWSE] loadMore returned', page.items.length, 'items');
-              setItems((prev) => [...prev, ...page.items]);
-              setHasMore(page.hasMore);
+              // Only apply if the captured generation is still current
+              if (capturedGeneration === generationRef.current) {
+                setItems((prev) => [...prev, ...page.items]);
+                setHasMore(page.hasMore);
+              }
             })
-            .catch((e) => console.error('[BROWSE] loadMore error:', e))
-            .finally(() => setLoadingMore(false));
+            .catch(() => {
+              // Silently ignore stale load-more errors; the next search
+              // will reset pagination anyway.
+            })
+            .finally(() => {
+              if (capturedGeneration === generationRef.current) {
+                setLoadMoreLoading(false);
+                inFlightLoadMoreRef.current = null;
+              }
+            });
         }
       },
       { rootMargin: '600px' },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, loading, loadingMore]);
+  }, [hasMore, searchLoading, loadMoreLoading]);
 
-  // --- Filtered list ---
-  const filtered = query.trim()
-    ? items.filter((item) => {
-        const searchable = `${item.name} ${item.registryItem?.id ?? ''} ${item.modrinthResult?.title ?? ''} ${item.modrinthResult?.author ?? ''}`;
-        return searchable.toLowerCase().includes(query.toLowerCase());
-      })
-    : items;
-
-  console.log('[RENDER] Browse: items=', filtered.length, 'loading=', loading);
-
+  // ---- Render ----
   return (
     <div className="space-y-6">
       <section>
@@ -271,6 +381,15 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
           Curated mods, packs, shaders, resource packs, and more.
         </p>
       </section>
+
+      {/* Registry offline banner */}
+      <RegistryStatusView
+        variant="banner"
+        state={regState}
+        status={regStatus}
+        error={regError}
+        actions={regActions}
+      />
 
       <section className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-start gap-3">
@@ -371,6 +490,7 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
         </select>
       </div>
 
+      {/* Active filter chips */}
       {(mcVersion || loader) && (
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>Active filters:</span>
@@ -393,6 +513,7 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
         </div>
       )}
 
+      {/* Category chips */}
       {sort !== 'for_you' && categories.length > 0 && (
         <div className="flex flex-wrap gap-2">
           <button
@@ -423,41 +544,125 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
         </div>
       )}
 
-      {error && (
-        <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
-          {error}
+      {/* Metadata error (categories) — separate from search error */}
+      {metaError && (
+        <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-xs text-destructive">
+          Could not load categories: {metaError}
         </div>
       )}
 
-      {loading ? (
+      {/* Search error with Retry and Clear Filters */}
+      {searchError && (
+        <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+          <p>{searchError}</p>
+          <div className="mt-2 flex gap-2">
+            <button
+              onClick={() => {
+                setSearchError(null);
+                setSearchLoading(true);
+                // Bump generation to re-trigger the search effect
+                generationRef.current += 1;
+                const newGen = generationRef.current;
+                inFlightSearchRef.current = newGen;
+                setItems([]);
+                setHasMore(false);
+
+                // Re-run the current query
+                const run = async () => {
+                  try {
+                    if (sort === 'for_you') {
+                      // simplified for_you retry
+                      let modrinthEnabled = false;
+                      try {
+                        const m = await getSetting('modrinth_enabled');
+                        modrinthEnabled = m === true || m === 'true';
+                      } catch {}
+                      const registryItems = await forYouItems(modrinthEnabled, mcVersion ?? undefined, loader ?? undefined);
+                      if (inFlightSearchRef.current === newGen) {
+                        setItems(mergeItems(registryItems, []));
+                        setHasMore(false);
+                      }
+                    } else {
+                      const page = await browseSearch(
+                        debouncedQuery.trim() || undefined,
+                        contentType ?? undefined,
+                        category ?? undefined,
+                        sort,
+                        mcVersion ?? undefined,
+                        loader ?? undefined,
+                      );
+                      if (inFlightSearchRef.current === newGen) {
+                        setItems(page.items);
+                        setHasMore(page.hasMore);
+                      }
+                    }
+                  } catch (e) {
+                    if (inFlightSearchRef.current === newGen) {
+                      setSearchError(formatError(e));
+                    }
+                  } finally {
+                    if (inFlightSearchRef.current === newGen) {
+                      setSearchLoading(false);
+                      inFlightSearchRef.current = null;
+                    }
+                  }
+                };
+                run();
+              }}
+              className="rounded-lg bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              Retry
+            </button>
+            {hasActiveFilters && (
+              <button
+                onClick={clearFilters}
+                className="rounded-lg border border-border px-3 py-1 text-xs font-medium text-muted-foreground hover:bg-accent"
+              >
+                Clear Filters
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Loading or results */}
+      {searchLoading ? (
         <div className="rounded-xl p-6 border border-dashed border-border text-center text-muted-foreground">
           Loading items…
         </div>
-      ) : filtered.length === 0 ? (
+      ) : items.length === 0 ? (
         <div className="rounded-xl p-6 border border-dashed border-border text-center">
           <p className="text-muted-foreground">No items to display.</p>
+          {hasActiveFilters && (
+            <button
+              onClick={clearFilters}
+              className="mt-2 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              Clear Filters
+            </button>
+          )}
         </div>
       ) : layout === 'grid' ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-          {filtered.map((item) => (
+          {items.map((item) => (
             <GridCard key={item.id} item={item} onSelectMod={onSelectMod} />
           ))}
         </div>
       ) : (
         <ul className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {filtered.map((item) => (
+          {items.map((item) => (
             <ListCard key={item.id} item={item} onSelectMod={onSelectMod} />
           ))}
         </ul>
       )}
 
       {/* Infinite scroll sentinel */}
-      {hasMore && !loading && (
+      {hasMore && !searchLoading && (
         <div ref={sentinelRef} className="py-6 text-center text-sm text-muted-foreground">
-          {loadingMore ? 'Loading more…' : ''}
+          {loadMoreLoading ? 'Loading more…' : ''}
         </div>
       )}
-      {!hasMore && filtered.length > 0 && (
+      {!hasMore && items.length > 0 && (
         <p className="py-4 text-center text-xs text-muted-foreground">All results loaded</p>
       )}
     </div>

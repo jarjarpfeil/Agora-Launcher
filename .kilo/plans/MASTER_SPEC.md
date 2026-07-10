@@ -2380,6 +2380,20 @@ ead_mod_manifest, enable_mod, search_knowledge_base) per E2 superset.
 - Delete the unused crates/agora-core/src/catalog/ trait + ModrinthSource impl (zero callers) -- was speculative design from a prior planning iteration.
 - Delete the unused crates/agora-core/src/ctx.rs Ctx struct + state.rs AppState re-export (zero callers) -- replaced by ad-hoc per-module DB connection patterns; a proper Ctx struct may be reintroduced when finishing the v1 refactor.
 
+### 19.13 Desktop Reliability, UX Coherence, and Safe Operations
+
+> Approved principles for the Desktop Upgrade Execution Plan (packages A1–D5). Last updated 2026-07-10.
+
+**Architecture principles:**
+
+1. **One canonical launch orchestration path.** There is exactly one route through health preflight, user decision, launch mode selection, process spawn, PID tracking, and exit handling. Dialogs return decisions; they do not launch.
+2. **One canonical install transaction path.** Every mod/update/removal entry point resolves an `InstallIntent` → `ResolvedInstallPlan` → verified staging → atomic application → health scan → result. No page bypasses the plan.
+3. **React dialogs return user decisions and do not execute business operations.** A dialog's only side effect is calling `onConfirm()` or `onCancel()`. The parent component dispatches backend commands.
+4. **Process state survives navigation.** Running-instance identity, PID, console subscription, and exit status live in a controller that outlives page components. React may query backend state after remount.
+5. **User-changing operations are previewable and reversible.** Every manifest mutation produces a plan that shows what changes before execution. Snapshots enable rollback.
+6. **Existing snapshots become the basis of last-known-good recovery.** A successful launch establishes LKG state. Changes since LKG are visible. One-click restore returns to LKG.
+7. **Desktop UX work must include meaningful integration tests.** Mocked UI tests, Rust integration tests, and native smoke checks are separate layers. A test that only asserts the page rendered is not sufficient.
+
 ---
 
 **This MASTER_SPEC.md is the single authoritative spec. The previously-separate plan files (1782081355093-crash-investigator-plan.md, 1782611768583-agora-v1-launcher-refactor.md, dependency-aware-mod-ops-plan.md) have been deleted; their key decisions are captured in section 19 above. BACKLOG.md remains the canonical per-phase task tracker.**

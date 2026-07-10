@@ -375,3 +375,43 @@
 | 7 | ~~Crash diagnostics~~ ✅ | Phase 4 requirement for MVP |
 | 8 | ~~NeoForge/Forge installer support~~ ✅ | `inject_loader` runs `java -jar <installer> --installClient` with SHA-256 verification; neoforge+forge entries in loader manifests |
 | 9 | ~~GitHub API social metrics (steps 3-9 + §3.2)~~ ✅ | `compiler/compile.py` writes real upvotes/downvotes/velocity/status. Trust filter via GraphQL contributionsCollection, circuit-breaker response with Raid Shield + DELETE reactions + triage polls, NLP review scrubbing, audit-log rotation. 50 unit tests. |
+
+---
+
+## Desktop Reliability & UX Upgrade Execution Plan
+
+Tracking packages A1 through D5 from `Agora Desktop Upgrade.md`. Packages are completed in order within each release.
+
+### Release A — Critical Desktop Stabilization
+
+- [ ] **A0** — Baseline and specification synchronization ✅ (Baseline recorded, docs updated)
+- [ ] **A1** — Registry recovery and first-run dead end
+- [ ] **A2** — Immediate startup shell and theme precedence
+- [ ] **A3** — Browse request isolation and stale pagination
+- [ ] **A4** — Command palette reachability and actionable results
+- [ ] **A5** — Health-dialog launch-mode defect and filename correctness
+- [ ] **A6** — Onboarding and device-flow consistency
+
+### Release B — Desktop Application Infrastructure
+
+- [ ] **B1** — Typed destination and history model
+- [ ] **B2** — Canonical launch and process controller
+- [ ] **B3** — Typed settings access and settings decomposition
+- [ ] **B4** — Accessible dialogs, notifications, and sidebar
+- [ ] **B5** — Critical integration-test matrix
+
+### Release C — Canonical Safe-Install Infrastructure
+
+- [ ] **C0** — Install-transaction architecture (Sol architect)
+- [ ] **C1** — Read-only install-plan contract
+- [ ] **C2** — Transactional install execution
+- [ ] **C3** — One frontend install flow
+- [ ] **C4** — Safe batch updates
+
+### Release D — Product Differentiation and UX Coherence
+
+- [ ] **D1** — Action-oriented Home and instance-aware discovery
+- [ ] **D2** — Last-known-good recovery and reproducibility model (Sol architect)
+- [ ] **D3** — Last-known-good user flow
+- [ ] **D4** — Explainable Crash Doctor
+- [ ] **D5** — Reproducible sharing and drift detection
