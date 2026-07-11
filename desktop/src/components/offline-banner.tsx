@@ -34,7 +34,7 @@ export function OfflineBanner() {
 
   return (
     <div
-      className="fixed left-0 right-0 top-0 z-[9999] flex items-center justify-between gap-3 border-b px-4 py-2 text-sm shadow-lg"
+      className="fixed left-0 right-0 top-0 z-30 flex items-center justify-between gap-3 border-b px-4 py-2 text-sm shadow-lg"
       style={{
         backgroundColor: 'rgb(var(--amber-900))',
         borderColor: 'rgb(var(--amber-700))',

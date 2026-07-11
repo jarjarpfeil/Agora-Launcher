@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState } from 'react';
+﻿import { useEffect, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { CommandPalette } from './components/command-palette';
 import { Home } from './pages/Home';
@@ -12,8 +12,10 @@ import { ModDetail } from './pages/ModDetail';
 import { InstanceEditor } from './pages/InstanceEditor';
 import { getSetting } from './lib/tauri';
 import { OfflineBanner } from './components/offline-banner';
-
-type Tab = 'home' | 'browse' | 'instances' | 'governance' | 'ai' | 'settings';
+import { HealthDialog } from './components/HealthDialog';
+import { ToastContainer } from './components/Toast';
+import { useDestination, type Destination, type Tab } from './lib/useDestination';
+import { useProcessController } from './lib/useProcessController';
 
 const BASE_TABS: { id: Tab; label: string; icon: string }[] = [
   { id: 'home', label: 'Home', icon: '\u{1F3E0}' },
@@ -61,28 +63,35 @@ function BrandedSplash() {
   );
 }
 
+/** Derive the effective tab from a destination. */
+function destToTab(dest: Destination): Tab {
+  if (dest.type === 'tab') return dest.tab;
+  if (dest.type === 'instance-detail') return 'instances';
+  return 'home'; // mod-detail doesn't change the tab
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState<Tab>('home');
-  const [selectedModId, setSelectedModId] = useState<string | null>(null);
-  const [editingInstanceId, setEditingInstanceId] = useState<string | null>(null);
+  const {
+    destination,
+    navigateToTab,
+    navigateToModDetail,
+    navigateToInstanceDetail,
+  } = useDestination();
+
+  const processController = useProcessController();
+
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [aiChatEnabled, setAiChatEnabled] = useState<boolean>(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
-  const handleNavigate = useCallback(
-    (tab: Tab, instanceId?: string) => {
-      setSelectedModId(null);
-      if (instanceId) {
-        // Open a specific instance editor directly.
-        setEditingInstanceId(instanceId);
-        setActiveTab('instances');
-      } else {
-        setEditingInstanceId(null);
-        setActiveTab(tab);
-      }
-    },
-    [],
-  );
+  // Legacy bridge: the CommandPalette still uses (tab, instanceId?) signature.
+  const handleNavigate = (tab: Tab, instanceId?: string) => {
+    if (instanceId) {
+      navigateToInstanceDetail(instanceId);
+    } else {
+      navigateToTab(tab);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -100,7 +109,7 @@ export default function App() {
     };
   }, []);
 
-  // Re-read the ai_chat_enabled toggle whenever returning to a top-level tab
+  // Re-read the ai_chat_enabled toggle whenever the destination changes
   // so the sidebar reflects the current setting without an app restart.
   useEffect(() => {
     let cancelled = false;
@@ -115,27 +124,28 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, onboardingComplete]);
+  }, [destination]);
 
+  // React to the agora-navigate custom event (used by external code).
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail as string;
       if (detail === 'settings') {
-        handleNavigate('settings');
+        navigateToTab('settings');
       }
     };
     window.addEventListener('agora-navigate', handler);
     return () => window.removeEventListener('agora-navigate', handler);
-  }, [handleNavigate]);
+  }, [navigateToTab]);
 
   // Ctrl+K / Cmd+K opens the command palette.
-  // Prevents capture when the user is typing in a text input or textarea.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        const tag = (e.target as HTMLElement)?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement)?.isContentEditable) {
-          return; // let the native shortcut pass through
+        const target = e.target instanceof HTMLElement ? e.target : null;
+        const tag = target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable || target?.getAttribute('role') === 'textbox') {
+          return;
         }
         e.preventDefault();
         setCommandPaletteOpen((prev) => !prev);
@@ -167,29 +177,75 @@ export default function App() {
     BASE_TABS[4],
   ];
 
-  // If the user disables AI while on that tab, bounce back home.
+  // Resolve the current UI state from the destination.
   const effectiveTab: Tab =
-    activeTab === 'ai' && !aiChatEnabled
-      ? 'home' : activeTab;
+    destination.type === 'tab' && destination.tab === 'ai' && !aiChatEnabled
+      ? 'home'
+      : destToTab(destination);
+
+  const showInstanceEditor = destination.type === 'instance-detail';
+  const showModDetail = destination.type === 'mod-detail';
+
+  // Render the HealthDialog at the App level so it survives page navigation.
+  const {
+    state: processState,
+    startLaunch,
+    approveLaunch,
+    cancelLaunch,
+    kill: killProcess,
+  } = processController;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
         <OfflineBanner />
-        <Sidebar tabs={tabs} activeTab={effectiveTab} onSelectTab={(t) => { setSelectedModId(null); setEditingInstanceId(null); setActiveTab(t); }} onOpenCommandPalette={() => setCommandPaletteOpen(true)} />
+        <Sidebar
+          tabs={tabs}
+          activeTab={effectiveTab}
+          onSelectTab={navigateToTab}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+        />
+
+        {(processState.phase === 'awaiting-decision' || processState.phase === 'launching') && processState.healthReport && (
+          <HealthDialog
+            instanceId={processState.instanceId!}
+            instanceName={processState.instanceId!}
+            initialReport={processState.healthReport}
+            onConfirm={approveLaunch}
+            onCancel={cancelLaunch}
+          />
+        )}
+
         <main className="flex-1 overflow-y-auto p-6 bg-background">
-          {editingInstanceId !== null ? (
-            <InstanceEditor instanceId={editingInstanceId} onBack={() => setEditingInstanceId(null)} onOpenInstanceEditor={(id) => setEditingInstanceId(id)} />
-          ) : selectedModId !== null ? (
-            <ModDetail itemId={selectedModId} onBack={() => setSelectedModId(null)} onOpenInstanceEditor={(id) => { setSelectedModId(null); setEditingInstanceId(id); }} />
+          {showInstanceEditor ? (
+            <InstanceEditor
+              instanceId={destination.instanceId}
+              onBack={() => navigateToTab('instances')}
+              onOpenInstanceEditor={(id) => navigateToInstanceDetail(id)}
+            />
+          ) : showModDetail ? (
+            <ModDetail
+              itemId={destination.itemId}
+              onBack={() => navigateToTab('browse')}
+              onOpenInstanceEditor={(id) => {
+                navigateToInstanceDetail(id);
+              }}
+            />
           ) : (
             <>
               {effectiveTab === 'home' && <Home />}
               {effectiveTab === 'browse' && (
                 <Browse
-                  onSelectMod={(id) => setSelectedModId(id)}
+                  onSelectMod={(id) => navigateToModDetail(id)}
                 />
               )}
-              {effectiveTab === 'instances' && <Instances onEditInstance={(id) => setEditingInstanceId(id)} />}
+              {effectiveTab === 'instances' && (
+                <Instances
+                  onEditInstance={(id) => navigateToInstanceDetail(id)}
+                  processState={processState}
+                  onStartLaunch={startLaunch}
+                  onKillProcess={killProcess}
+                />
+              )}
               {effectiveTab === 'governance' && <Governance />}
               {effectiveTab === 'ai' && aiChatEnabled && <AiChatPage />}
               {effectiveTab === 'settings' && <Settings />}
@@ -202,6 +258,7 @@ export default function App() {
           onOpenChange={setCommandPaletteOpen}
           onNavigate={handleNavigate}
         />
+        <ToastContainer />
     </div>
   );
 }

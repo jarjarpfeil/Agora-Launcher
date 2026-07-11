@@ -220,7 +220,7 @@
   - **Spec:** §7.1.1
   - **Acceptance:** A pack with one broken link installs all other mods and shows a "1 mod failed" notice.
 
-- [ ] **Unlock/Revert state machine** (§6.5)
+- [x] **Unlock/Revert state machine** (§6.5)
   - **Short:** Implement the lock → unlock → revert state machine for curated pack instances.
   - **Spec:** §6.5
   - **Acceptance:** User can unlock a pack instance, add manual mods, and revert to original.
@@ -384,21 +384,30 @@ Tracking packages A1 through D5 from `Agora Desktop Upgrade.md`. Packages are co
 
 ### Release A — Critical Desktop Stabilization
 
-- [ ] **A0** — Baseline and specification synchronization ✅ (Baseline recorded, docs updated)
-- [ ] **A1** — Registry recovery and first-run dead end
-- [ ] **A2** — Immediate startup shell and theme precedence
-- [ ] **A3** — Browse request isolation and stale pagination
-- [ ] **A4** — Command palette reachability and actionable results
-- [ ] **A5** — Health-dialog launch-mode defect and filename correctness
-- [ ] **A6** — Onboarding and device-flow consistency
+- [x] **A0** — Baseline and specification synchronization
+- [x] **A1** — Registry recovery and first-run dead end
+- [x] **A2** — Immediate startup shell and theme precedence
+- [x] **A3** — Browse request isolation and stale pagination
+- [x] **A4** — Command palette reachability and actionable results
+- [x] **A5** — Health-dialog launch-mode defect and filename correctness
+- [x] **A6** — Onboarding and device-flow consistency
+
+#### A0 baseline record (2026-07-10)
+
+- Base commit: `21cf5df3778f7d66ebd99e65e82e579ab3bf84c8`.
+- `desktop/npm run build`: passed; existing Vite chunk-size and mixed static/dynamic import warnings recorded.
+- `cargo test --workspace`: passed, 379 tests total (2 CLI, 264 core, 113 desktop).
+- `cargo clippy --workspace --all-targets`: completed with pre-existing unused-import, unused-variable, dead-code, and non-snake-case warnings; no errors.
+- `cargo fmt --check`: failed on pre-existing formatting differences. Those unrelated files were not reformatted during A0.
+- Pre-existing failures are the formatting check and warnings above; runtime code was unchanged by A0.
 
 ### Release B — Desktop Application Infrastructure
 
-- [ ] **B1** — Typed destination and history model
-- [ ] **B2** — Canonical launch and process controller
-- [ ] **B3** — Typed settings access and settings decomposition
-- [ ] **B4** — Accessible dialogs, notifications, and sidebar
-- [ ] **B5** — Critical integration-test matrix
+- [x] **B1** — Typed destination and history model
+- [x] **B2** — Canonical launch and process controller
+- [x] **B3** — Typed settings access and settings decomposition
+- [x] **B4** — Accessible dialogs, notifications, and sidebar
+- [x] **B5** — Critical integration-test matrix
 
 ### Release C — Canonical Safe-Install Infrastructure
 

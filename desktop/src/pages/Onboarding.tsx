@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
   formatError,
+  getSetting,
   githubLogin,
   githubLoginPoll,
   setSetting,
@@ -9,6 +10,7 @@ import {
 } from '../lib/tauri';
 import { useRegistryState } from '../lib/useRegistryState';
 import { RegistryStatusView } from '../components/registry-status-view';
+import { DeviceFlowPanel } from '../components/DeviceFlowPanel';
 
 type Step = 'welcome' | 'services' | 'github' | 'registry';
 
@@ -18,9 +20,29 @@ interface OnboardingProps {
 
 export function Onboarding({ onComplete }: OnboardingProps) {
   const [step, setStep] = useState<Step>('welcome');
+  const [services, setServices] = useState({ modrinth: false, aiMcp: false, aiChat: false });
+  const [servicesLoading, setServicesLoading] = useState(true);
   // Persisted across Back/Forward so a registry auto-download triggered on
   // the first entry is not re-triggered when the user revisits the step.
   const registryAutoDownloaded = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.allSettled([
+      getSetting('modrinth_enabled'),
+      getSetting('ai_mcp_enabled'),
+      getSetting('ai_chat_enabled'),
+    ]).then(([modrinth, aiMcp, aiChat]) => {
+      if (cancelled) return;
+      setServices({
+        modrinth: modrinth.status === 'fulfilled' ? parseBooleanSetting(modrinth.value) : false,
+        aiMcp: aiMcp.status === 'fulfilled' ? parseBooleanSetting(aiMcp.value) : false,
+        aiChat: aiChat.status === 'fulfilled' ? parseBooleanSetting(aiChat.value) : false,
+      });
+      setServicesLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const finish = async () => {
     try {
@@ -38,7 +60,13 @@ export function Onboarding({ onComplete }: OnboardingProps) {
         <div className="p-6 sm:p-8">
           {step === 'welcome' && <WelcomeStep onContinue={() => setStep('services')} />}
           {step === 'services' && (
-            <ServicesStep onContinue={() => setStep('github')} onBack={() => setStep('welcome')} />
+            <ServicesStep
+              values={services}
+              loading={servicesLoading}
+              onChange={setServices}
+              onContinue={() => setStep('github')}
+              onBack={() => setStep('welcome')}
+            />
           )}
           {step === 'github' && (
             <GithubStep onContinue={() => setStep('registry')} onBack={() => setStep('services')} />
@@ -50,6 +78,10 @@ export function Onboarding({ onComplete }: OnboardingProps) {
       </div>
     </div>
   );
+}
+
+function parseBooleanSetting(value: unknown): boolean {
+  return value === true || value === 1 || value === 'true' || value === '1';
 }
 
 function Stepper({ current }: { current: Step }) {
@@ -95,10 +127,10 @@ function WelcomeStep({ onContinue }: { onContinue: () => void }) {
       </p>
       <p className="text-sm mb-6">
         Agora returns platform control to the community. The GitHub repository itself is the
-        database — flat-file manifests are compiled into a signed SQLite registry, and the app
-        delegates authentication and game execution to the official Mojang launcher. No backend
-        services, no Microsoft/Xbox auth inside the app, just curated quality over infinite
-        inventory.
+        database — flat-file manifests are compiled into a signed SQLite registry. Agora can launch
+        directly with optional in-app Microsoft authentication, while delegation to the official
+        Mojang launcher remains available as the default fallback. GitHub governance sign-in and
+        GitHub Copilot sign-in are separate optional accounts.
       </p>
       <div className="flex justify-end">
         <button
@@ -113,15 +145,18 @@ function WelcomeStep({ onContinue }: { onContinue: () => void }) {
 }
 
 function ServicesStep({
+  values,
+  loading,
+  onChange,
   onContinue,
   onBack,
 }: {
+  values: { modrinth: boolean; aiMcp: boolean; aiChat: boolean };
+  loading: boolean;
+  onChange: (value: { modrinth: boolean; aiMcp: boolean; aiChat: boolean }) => void;
   onContinue: () => void;
   onBack: () => void;
 }) {
-  const [modrinth, setModrinth] = useState(false);
-  const [aiMcp, setAiMcp] = useState(false);
-  const [aiChat, setAiChat] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -129,9 +164,9 @@ function ServicesStep({
     setSaving(true);
     setError(null);
     try {
-      await setSetting('modrinth_enabled', modrinth);
-      await setSetting('ai_mcp_enabled', aiMcp);
-      await setSetting('ai_chat_enabled', aiChat);
+      await setSetting('modrinth_enabled', values.modrinth);
+      await setSetting('ai_mcp_enabled', values.aiMcp);
+      await setSetting('ai_chat_enabled', values.aiChat);
       onContinue();
     } catch (e) {
       setError(formatError(e));
@@ -152,20 +187,20 @@ function ServicesStep({
         <ServiceToggle
           title="Modrinth Access"
           description="Allow live Modrinth API queries and show Modrinth-sourced curated mods alongside the Agora registry."
-          checked={modrinth}
-          onChange={setModrinth}
+          checked={values.modrinth}
+          onChange={(modrinth) => onChange({ ...values, modrinth })}
         />
         <ServiceToggle
           title="AI / MCP Server"
           description="Enable the local MCP server for external AI tools to interact with Agora."
-          checked={aiMcp}
-          onChange={setAiMcp}
+          checked={values.aiMcp}
+          onChange={(aiMcp) => onChange({ ...values, aiMcp })}
         />
         <ServiceToggle
           title="Integrated AI Assistant"
           description="Built-in AI chat using free GitHub Models. Get instant crash analysis and mod help without any external setup."
-          checked={aiChat}
-          onChange={setAiChat}
+          checked={values.aiChat}
+          onChange={(aiChat) => onChange({ ...values, aiChat })}
         />
       </div>
 
@@ -186,10 +221,10 @@ function ServicesStep({
         </button>
         <button
           onClick={handleContinue}
-          disabled={saving}
+          disabled={saving || loading}
           className="rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
-          {saving ? 'Saving…' : 'Continue'}
+          {loading ? 'Loading…' : saving ? 'Saving…' : 'Continue'}
         </button>
       </div>
     </div>
@@ -262,14 +297,9 @@ function GithubStep({
     const mySession = ++sessionIdRef.current;
     const isStale = () => sessionIdRef.current !== mySession;
     try {
-      console.log('[onboarding] signIn starting, calling githubLogin()');
       const flow = await githubLogin();
-      if (isStale()) {
-        console.log('[onboarding] session superseded after githubLogin; aborting');
-        return;
-      }
+      if (isStale()) return;
       setDevice(flow);
-      console.log('[onboarding] setDevice done, user_code=', flow.user_code);
 
       // Auto-launch the user's default browser at the verification URL.
       // Wrapped in its own try/catch AND fire-and-forget. If the shell plugin
@@ -281,15 +311,12 @@ function GithubStep({
         Promise.resolve(p).catch(() => {
           /* best-effort: URL shown in panel below */
         });
-      } catch (syncErr) {
-        console.warn('[onboarding] openUrl synchronous throw:', syncErr);
+      } catch {
+        // URL and code remain visible for manual fallback.
       }
 
       const token = await githubLoginPoll(flow.device_code, flow.interval);
-      if (isStale()) {
-        console.log('[onboarding] session superseded after poll; aborting');
-        return;
-      }
+      if (isStale()) return;
       if (token) {
         setResult('Signed in successfully.');
         setTimeout(() => {
@@ -299,11 +326,9 @@ function GithubStep({
         setResult('Authentication did not complete.');
       }
     } catch (e) {
-      console.error('[onboarding] signIn failed:', e);
       const msg = e instanceof Error ? e.message : formatError(e);
       if (!isStale()) setError(`Sign-in failed: ${msg}`);
     } finally {
-      console.log('[onboarding] signIn finally: clearing polling state');
       if (!isStale()) setPolling(false);
     }
   };
@@ -318,60 +343,16 @@ function GithubStep({
       </p>
 
       {device && (
-        <div className="rounded-xl border border-border bg-card p-4 mb-4">
-          <p className="text-sm">Opening your browser… If it didn't open, click the button below:</p>
-          <p className="mt-1 text-sm font-semibold break-all text-primary dark:text-primary">
-            {device.verification_uri}
-          </p>
-          <p className="mt-2 text-sm">
-            Code:{' '}
-            <span className="font-mono font-bold tracking-widest">{device.user_code}</span>
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard.writeText(device.user_code).catch(() => {
-                  /* best-effort */
-                });
-              }}
-              className="ml-2 rounded border border-border px-2 py-0.5 text-[10px] font-medium hover:bg-accent"
-              aria-label="Copy code to clipboard"
-            >
-              Copy
-            </button>
-          </p>
-          {device.expires_in && (
-            <p className="mt-1 text-xs text-muted-foreground">
-              Code expires in {Math.floor(device.expires_in / 60)}:{String(device.expires_in % 60).padStart(2, '0')}
-            </p>
-          )}
-          <div className="mt-3 flex gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                openUrl(device.verification_uri).catch(() => {
-                  /* best-effort: URL shown above for manual copy */
-                });
-              }}
-              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
-            >
-              Open in browser
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                navigator.clipboard.writeText(device.verification_uri).catch(() => {
-                  /* best-effort */
-                });
-              }}
-              className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
-            >
-              Copy URL
-            </button>
-          </div>
-          {polling && (
-            <p className="mt-2 text-xs text-muted-foreground">Waiting for authorization…</p>
-          )}
-        </div>
+        <DeviceFlowPanel
+          device={device}
+          polling={polling}
+          className="mb-4"
+          onCancel={() => {
+            sessionIdRef.current += 1;
+            setPolling(false);
+            setDevice(null);
+          }}
+        />
       )}
 
       {result && <p className="mb-4 text-sm text-primary">{result}</p>}
@@ -390,19 +371,6 @@ function GithubStep({
           Back
         </button>
         <div className="flex gap-2">
-          {polling && (
-            <button
-              onClick={() => {
-                // Explicit Cancel — invalidates the current session.
-                sessionIdRef.current += 1;
-                setPolling(false);
-                setDevice(null);
-              }}
-              className="rounded-lg border border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent"
-            >
-              Cancel
-            </button>
-          )}
           {!polling && (
             <button
               onClick={() => {
@@ -439,6 +407,7 @@ function RegistryStep({
   hasAutoDownloaded: { current: boolean };
 }) {
   const { state, status, loading, error, actions } = useRegistryState();
+  const syncRegistry = actions.sync;
 
   // Auto-download once when we first detect the registry is missing.
   // The effect must react to state changes because on the first render
@@ -452,9 +421,9 @@ function RegistryStep({
       !status?.has_cached_db
     ) {
       hasAutoDownloaded.current = true;
-      actions.sync();
+      syncRegistry();
     }
-  }, [state, loading, status?.has_cached_db, actions]);
+  }, [state, loading, status?.has_cached_db, syncRegistry, hasAutoDownloaded]);
 
   return (
     <div>

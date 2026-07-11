@@ -259,6 +259,7 @@ export const forYouItems = (
   loader?: string,
   limit?: number,
   modrinthCategories?: string[],
+  query?: string,
 ) =>
   invoke<RegistryItem[]>('for_you_items', {
     modrinthEnabled,
@@ -266,6 +267,7 @@ export const forYouItems = (
     loader,
     limit,
     modrinthCategories,
+    query,
   });
 
 export const browseItems = (
@@ -1009,6 +1011,7 @@ export interface BrowsePage {
 }
 
 export const browseSearch = (
+  queryKey: string,
   query?: string,
   contentType?: string,
   category?: string,
@@ -1017,6 +1020,7 @@ export const browseSearch = (
   loader?: string,
 ) =>
   invoke<BrowsePage>('browse_search', {
+    queryKey,
     query: query ?? null,
     contentType: contentType ?? null,
     category: category ?? null,
@@ -1025,8 +1029,8 @@ export const browseSearch = (
     loader: loader ?? null,
   });
 
-export const browseLoadMore = (pageIndex: number) =>
-  invoke<BrowsePage>('browse_load_more', { pageIndex });
+export const browseLoadMore = (queryKey: string, pageIndex: number) =>
+  invoke<BrowsePage>('browse_load_more', { queryKey, pageIndex });
 
-export const browsePage = (page: number) =>
-  invoke<BrowsePage>('browse_page', { page });
+export const browsePage = (queryKey: string, page: number) =>
+  invoke<BrowsePage>('browse_page', { queryKey, page });

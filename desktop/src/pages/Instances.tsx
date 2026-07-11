@@ -2,28 +2,38 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   checkInstanceCrash,
-  checkInstanceHealth,
   createInstance,
   deleteInstance,
   getSetting,
-  killProcess,
-  launchInstance,
-  launchInstanceDirect,
   listInstances,
   listLoaderVersions,
   listManifestLoaders,
   listManifestMcVersions,
   formatError,
   type CreateInstanceRequest,
-  type HealthReport,
   type InstanceRow,
   type LoaderVersionSummary,
 } from '../lib/tauri';
-import { ConsoleView } from '../components/ConsoleView';
+import { type ProcessState } from '../lib/useProcessController';
 import { CrashInvestigator } from '../components/CrashInvestigator';
-import { HealthDialog } from '../components/HealthDialog';
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
 
-export function Instances({ onEditInstance }: { onEditInstance: (id: string) => void }) {
+export function Instances({
+  onEditInstance,
+  processState,
+  onStartLaunch,
+  onKillProcess,
+}: {
+  onEditInstance: (id: string) => void;
+  processState: ProcessState;
+  onStartLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
+  onKillProcess: () => Promise<void>;
+}) {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -34,10 +44,8 @@ export function Instances({ onEditInstance }: { onEditInstance: (id: string) => 
     manualLogText: string | null;
   } | null>(null);
 
-  // Direct launch state
+  // Load direct launch mode once
   const [directLaunch, setDirectLaunch] = useState(false);
-  const [runningPid, setRunningPid] = useState<number | null>(null);
-  const [runningInstanceId, setRunningInstanceId] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -56,7 +64,6 @@ export function Instances({ onEditInstance }: { onEditInstance: (id: string) => 
   }, []);
 
   // Reactive crash detection when the tab becomes visible.
-  // Check the most recently launched instance for a crash report.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -92,15 +99,6 @@ export function Instances({ onEditInstance }: { onEditInstance: (id: string) => 
       }
     })();
     return () => { cancelled = true; };
-  }, []);
-
-  // Listen for game-exited to clear running state
-  useEffect(() => {
-    const unlisten = listen<{ instance_id: string; exit_code: number }>('game-exited', (_e) => {
-      setRunningPid(null);
-      setRunningInstanceId(null);
-    });
-    return () => { unlisten.then(fn => fn()); };
   }, []);
 
   // State for the manual crash-log paste modal.
@@ -156,22 +154,30 @@ export function Instances({ onEditInstance }: { onEditInstance: (id: string) => 
         </div>
       ) : (
         <ul className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {instances.map((instance) => (
-            <InstanceCard
-              key={instance.instance_id}
-              instance={instance}
-              onChanged={refresh}
-              onEdit={() => onEditInstance(instance.instance_id)}
-              onOpenCrashInvestigator={openCrashInvestigator}
-              directLaunch={directLaunch}
-              runningPid={runningPid}
-              runningInstanceId={runningInstanceId}
-              onRunningChanged={(id, pid) => {
-                setRunningInstanceId(id);
-                setRunningPid(pid);
-              }}
-            />
-          ))}
+          {instances.map((instance) => {
+            const isRunning = processState.instanceId === instance.instance_id && processState.phase === 'running';
+
+            return (
+              <InstanceCard
+                key={instance.instance_id}
+                instance={instance}
+                onChanged={refresh}
+                onEdit={() => onEditInstance(instance.instance_id)}
+                onOpenCrashInvestigator={openCrashInvestigator}
+                isRunning={isRunning}
+                runningPid={isRunning ? processState.pid : null}
+                launchBusy={processState.phase === 'launching' || processState.phase === 'checking-health'}
+                onLaunch={() => onStartLaunch(instance.instance_id, directLaunch)}
+                onKill={onKillProcess}
+                controllerError={processState.phase === 'failed' ? processState.error : null}
+                onDismissError={() => {
+                  // The controller stays in failed until a new launch starts.
+                  // For now, clear by starting a new launch cycle.
+                  onStartLaunch(instance.instance_id, directLaunch);
+                }}
+              />
+            );
+          })}
         </ul>
       )}
 
@@ -209,112 +215,43 @@ function InstanceCard({
   onChanged,
   onEdit,
   onOpenCrashInvestigator,
-  directLaunch,
+  isRunning,
   runningPid,
-  runningInstanceId,
-  onRunningChanged,
+  launchBusy,
+  onLaunch,
+  onKill,
+  controllerError,
+  onDismissError,
 }: {
   instance: InstanceRow;
   onChanged: () => void;
   onEdit: () => void;
   onOpenCrashInvestigator: (id: string) => void;
-  directLaunch: boolean;
+  isRunning: boolean;
   runningPid: number | null;
-  runningInstanceId: string | null;
-  onRunningChanged: (instanceId: string | null, pid: number | null) => void;
+  launchBusy: boolean;
+  onLaunch: () => void;
+  onKill: () => void;
+  controllerError: string | null;
+  onDismissError: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [healthReport, setHealthReport] = useState<HealthReport | null>(null);
-  const [showHealth, setShowHealth] = useState(false);
 
-  const isRunning = runningInstanceId === instance.instance_id;
-
-  // Canonical approved-launch function — used both after a clean health check
-  // and after the user confirms via HealthDialog.
-  const launchApproved = async () => {
-    try {
-      if (directLaunch) {
-        const pid = await launchInstanceDirect(instance.instance_id);
-        onRunningChanged(instance.instance_id, pid);
-      } else {
-        await launchInstance(instance.instance_id);
-      }
-    } catch (e) {
-      setError(formatError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const launch = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      // Phase 4: pre-launch health scan
-      const report = await checkInstanceHealth(instance.instance_id);
-      const hasBlockers = report.blockers.length > 0;
-      const hasWarnings = report.warnings.length > 0;
-      if (hasBlockers || hasWarnings) {
-        setHealthReport(report);
-        setShowHealth(true);
-        setBusy(false);
-        return;
-      }
-      // All clear — launch
-      await launchApproved();
-    } catch (e) {
-      setError(formatError(e));
-      setBusy(false);
-    }
-  };
-
-  const kill = async () => {
-    if (runningPid == null) return;
-    try {
-      await killProcess(runningPid);
-      onRunningChanged(null, null);
-    } catch (e) {
-      setError(formatError(e));
-    }
-  };
-
-  const handleLaunchFromHealth = () => {
-    setShowHealth(false);
-    setHealthReport(null);
-    // The user confirmed via the dialog; proceed with the approved launch.
-    setBusy(true);
-    launchApproved();
-  };
-
-  const handleCancelHealth = () => {
-    setShowHealth(false);
-    setHealthReport(null);
-  };
+  // Merge local and controller errors.
+  const displayError = error ?? controllerError;
 
   const remove = async () => {
     if (!confirm(`Delete instance "${instance.name}"? This moves the folder to trash.`)) return;
-    setBusy(true);
     setError(null);
     try {
       await deleteInstance(instance.instance_id);
       onChanged();
     } catch (e) {
       setError(formatError(e));
-      setBusy(false);
     }
   };
 
   return (
-    <>
-    {showHealth && healthReport && (
-      <HealthDialog
-        instanceId={instance.instance_id}
-        instanceName={instance.name}
-        onConfirm={handleLaunchFromHealth}
-        onCancel={handleCancelHealth}
-      />
-    )}
     <li className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -337,59 +274,63 @@ function InstanceCard({
         </span>
       </div>
 
-      {error && (
-        <p className="mt-2 text-xs text-destructive">{error}</p>
+      {displayError && (
+        <div className="mt-2 flex items-center gap-2">
+          <p className="text-xs text-destructive flex-1">{displayError}</p>
+          {controllerError && (
+            <button
+              onClick={onDismissError}
+              className="text-xs text-muted-foreground hover:underline"
+            >
+              Dismiss
+            </button>
+          )}
+        </div>
       )}
 
-      <div className="mt-4 flex gap-2">
-        {isRunning && directLaunch ? (
+      <div className="mt-4 flex flex-wrap gap-2">
+        {isRunning ? (
           <button
-            onClick={kill}
+            onClick={onKill}
             className="rounded-lg bg-destructive px-3 py-1.5 text-sm font-medium text-destructive-foreground hover:bg-destructive/90"
           >
-            ■ Kill
+            Kill
           </button>
         ) : (
           <button
-            onClick={launch}
-            disabled={busy || (runningInstanceId != null && runningInstanceId !== instance.instance_id)}
+            onClick={onLaunch}
+            disabled={launchBusy}
             className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {busy ? 'Launching…' : directLaunch ? '▶ Launch (Direct)' : '▶ Launch'}
+            {launchBusy ? 'Starting…' : 'Launch'}
           </button>
         )}
         <button
-          onClick={() => onOpenCrashInvestigator(instance.instance_id)}
-          disabled={busy}
-          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
-        >
-          Troubleshoot Crash
-        </button>
-        <button
           onClick={onEdit}
-          disabled={busy}
-          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
+          disabled={launchBusy}
+          className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
         >
           Edit
         </button>
         <button
+          onClick={() => onOpenCrashInvestigator(instance.instance_id)}
+          disabled={launchBusy}
+          className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
+        >
+          Troubleshoot
+        </button>
+        <button
           onClick={remove}
-          disabled={busy}
-          className="rounded-lg border border-input bg-background px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
+          disabled={launchBusy}
+          className="rounded-lg border border-destructive/30 px-3 py-1.5 text-sm font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
         >
           Delete
         </button>
       </div>
-
-      {isRunning && directLaunch && (
-        <div className="mt-3">
-          <ConsoleView instanceId={instance.instance_id} />
-        </div>
-      )}
     </li>
-    </>
   );
 }
+
 
 function CreateInstanceDialog({
   onClose,
@@ -510,9 +451,12 @@ function CreateInstanceDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-border bg-background p-6 shadow-xl">
-        <h3 className="text-lg font-bold mb-4">Create Custom Instance</h3>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogTitle>Create Custom Instance</DialogTitle>
+        <DialogDescription>
+          Set up a new isolated modpack profile with a verified modloader.
+        </DialogDescription>
 
         <div className="space-y-4">
           <label className="block">
@@ -611,8 +555,8 @@ function CreateInstanceDialog({
             {busy ? 'Creating…' : 'Create'}
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -626,9 +570,12 @@ function PasteLogModal({
   const [text, setText] = useState('');
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-border bg-card p-6 shadow-xl">
-        <h3 className="text-lg font-bold mb-4">Paste Crash Log</h3>
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogTitle>Paste Crash Log</DialogTitle>
+        <DialogDescription>
+          Paste your crash log or latest.log contents for automated investigation.
+        </DialogDescription>
         <textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -649,7 +596,7 @@ function PasteLogModal({
             Investigate
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

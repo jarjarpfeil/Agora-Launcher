@@ -2394,6 +2394,26 @@ ead_mod_manifest, enable_mod, search_knowledge_base) per E2 superset.
 6. **Existing snapshots become the basis of last-known-good recovery.** A successful launch establishes LKG state. Changes since LKG are visible. One-click restore returns to LKG.
 7. **Desktop UX work must include meaningful integration tests.** Mocked UI tests, Rust integration tests, and native smoke checks are separate layers. A test that only asserts the page rendered is not sufficient.
 
+#### 19.13.1 A5 minimal launch repair
+
+- `HealthDialog` is decision-only. It receives the current `HealthReport`, may apply filename-backed health fixes and re-scan after a fix, and returns confirm or cancel; it never invokes launch commands.
+- `Instances` owns the approved-launch operation. Both a clean preflight and an approved warning use the same function, preserving direct versus delegated mode.
+- Direct launch records the returned PID and running instance before showing the console. Delegated launch records no synthetic PID.
+- Health findings expose a nullable on-disk `filename`. Disable actions are rendered only when that filename exists; `mod_id` is never treated as a path.
+- The warning dialog remains open while launching and closes only after success or explicit cancellation. Launch failures remain visible in the dialog.
+
+#### 19.13.2 Release B launch-controller target
+
+- **State ownership:** `agora-core` owns health and launch policy; the Tauri layer owns process handles and exposes thin commands/events; a React controller owns presentation state and user decisions across page navigation.
+- **Controller states:** idle, checking-health, awaiting-decision, launching, running-direct, delegated-complete, exited, and failed.
+- **Interfaces:** start launch intent, approve/reject current health decision, query current process state, kill the tracked direct process, and subscribe to structured console/exit events.
+- **Mode behavior:** direct launches return and track a PID; delegated launches hand off to the official launcher and never present fake direct-running state.
+- **Concurrency:** one active direct launch per desktop controller. A second launch is rejected with a visible conflict until the tracked process exits or is killed. Delegated handoff does not create a tracked PID.
+- **Failure handling:** failed health checks and launches preserve the selected instance and expose retry/cancel. Event-listener reconnection queries backend state rather than assuming an exit.
+- **Migration sequence:** preserve the A5 parent orchestration, introduce a controller above page components, add backend process-state query support, route every launch entry point through the controller, then remove component-local PID and listener ownership.
+- **Required tests:** direct/delegated warning approval, cancellation, launch failure recovery, concurrent-launch rejection, PID-specific kill, navigation/remount recovery, exit-event reconciliation, filename-only health actions, and CLI health-gated launch parity.
+- **Rejected alternatives:** dialogs invoking launch commands; separate direct and delegated preflight paths; component-local process state as the source of truth; and deriving filenames from registry or mod IDs.
+
 ---
 
 **This MASTER_SPEC.md is the single authoritative spec. The previously-separate plan files (1782081355093-crash-investigator-plan.md, 1782611768583-agora-v1-launcher-refactor.md, dependency-aware-mod-ops-plan.md) have been deleted; their key decisions are captured in section 19 above. BACKLOG.md remains the canonical per-phase task tracker.**

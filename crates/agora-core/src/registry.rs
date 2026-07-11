@@ -1254,6 +1254,37 @@ mod tests {
     }
 
     #[test]
+    fn test_browse_items_with_query() {
+        let dir = temp_registry_db();
+        let conn = registry_connection(&dir.path().join("registry.db")).unwrap();
+        let sort = SortOption::NetScore;
+        let matching = browse_items(
+            &conn,
+            None,
+            None,
+            &sort,
+            true,
+            None,
+            None,
+            Some("test mod"),
+            100,
+        ).unwrap();
+        let missing = browse_items(
+            &conn,
+            None,
+            None,
+            &sort,
+            true,
+            None,
+            None,
+            Some("does not exist"),
+            100,
+        ).unwrap();
+        assert_eq!(matching.len(), 1);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
     fn test_sort_option_default() {
         let sort = SortOption::default();
         assert!(matches!(sort, SortOption::NetScore));

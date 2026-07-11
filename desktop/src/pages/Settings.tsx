@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-// import { useTranslation } from 'react-i18next'; // commented out: i18n deferred post-v1
 import { check } from '@tauri-apps/plugin-updater';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openUrl } from '@tauri-apps/plugin-shell';
@@ -22,7 +21,6 @@ import {
   msaGetStatus,
   msaLogout,
   setMcpApproval,
-  setSetting,
   startMcpServer,
   stopMcpServer,
   getMCPToken,
@@ -31,6 +29,9 @@ import {
 import type { CopilotToken, DeviceFlowResponse, GithubProfile, InstanceRow, McpStatus, McpTokenData, MsaAccountStatus } from '../lib/tauri';
 import { Privacy } from './Privacy';
 import { useAdvancedMode } from '../components/AdvancedModeContext';
+import { DeviceFlowPanel } from '../components/DeviceFlowPanel';
+import { useTypedSettings, SETTINGS } from '../lib/useTypedSettings';
+import { showToast } from '../components/Toast';
 
 // --- CopyButton helper ---
 
@@ -51,14 +52,36 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
+/** Token display — hidden by default with a Show/Hide toggle. */
+function TokenDisplay({ token }: { token: string }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="space-y-1">
+      {visible ? (
+        <pre className="text-xs bg-background rounded-lg p-2.5 overflow-x-auto select-all break-all border border-border">{token}</pre>
+      ) : (
+        <pre className="text-xs bg-background rounded-lg p-2.5 overflow-x-auto border border-border text-muted-foreground">••••••••••••••••</pre>
+      )}
+      <button
+        onClick={() => setVisible(!visible)}
+        className="text-xs text-primary hover:underline"
+      >
+        {visible ? 'Hide token' : 'Show token'}
+      </button>
+    </div>
+  );
+}
+
 export function Settings() {
-  // const { t, i18n } = useTranslation(); // commented out: i18n deferred post-v1
+  const ts = useTypedSettings();
+
   const [modrinth, setModrinth] = useState(false);
   const [aiMcp, setAiMcp] = useState(false);
   const [aiChatEnabled, setAiChatEnabled] = useState(false);
   const [launcherPath, setLauncherPath] = useState('');
   const [alwaysPreTouch, setAlwaysPreTouch] = useState(true);
   const [loading, setLoading] = useState(true);
+  const [directLaunch, setDirectLaunch] = useState(false);
 
   // MCP server state
   const [mcpStatus, setMcpStatus] = useState<McpStatus | null>(null);
@@ -95,8 +118,6 @@ export function Settings() {
   const [msaError, setMsaError] = useState<string | null>(null);
   const [msaBusy, setMsaBusy] = useState(false);
 
-  // Launch mode state
-  const [directLaunch, setDirectLaunch] = useState(false);
 
   const { advancedMode, toggleAdvanced } = useAdvancedMode();
   const isWindows = typeof navigator !== 'undefined' && navigator.platform.includes('Win');
@@ -119,31 +140,17 @@ export function Settings() {
     }
   };
 
+  // Sync typed settings into local state for backward-compatible render code.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [m, a, c, p, apt] = await Promise.all([
-          getSetting('modrinth_enabled'),
-          getSetting('ai_mcp_enabled'),
-          getSetting('ai_chat_enabled'),
-          getSetting('mojang_launcher_path'),
-          getSetting('jvm_always_pre_touch'),
-        ]);
-        if (cancelled) return;
-        setModrinth(Boolean(m));
-        setAiMcp(Boolean(a));
-        setAiChatEnabled(Boolean(c));
-        if (typeof p === 'string') setLauncherPath(p);
-        if (typeof apt === 'boolean') setAlwaysPreTouch(apt);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (ts.loading) return;
+    setModrinth(ts.values.modrinth_enabled as boolean ?? false);
+    setAiMcp(ts.values.ai_mcp_enabled as boolean ?? false);
+    setAiChatEnabled(ts.values.ai_chat_enabled as boolean ?? false);
+    setLauncherPath(ts.values.launcher_path as string ?? '');
+    setAlwaysPreTouch(ts.values.always_pre_touch as boolean ?? true);
+    setDirectLaunch((ts.values.launch_mode as string) === 'direct');
+    setLoading(false);
+  }, [ts.loading, ts.values]);
 
   // Load MSA status on mount
   useEffect(() => {
@@ -306,7 +313,7 @@ export function Settings() {
       setGhDevice(null);
       setGhResult(null);
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
@@ -353,65 +360,67 @@ export function Settings() {
       await msaLogout();
       setMsaCreds(null);
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
   const toggleLaunchMode = async (value: boolean) => {
     setDirectLaunch(value);
     try {
-      await setSetting('launch_mode', value ? 'direct' : 'delegation');
+      await ts.update(SETTINGS.launchMode, value ? 'direct' : 'delegation');
     } catch (e) {
       setDirectLaunch(!value);
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
   const toggleModrinth = async (value: boolean) => {
     setModrinth(value);
     try {
-      await setSetting('modrinth_enabled', value);
+      await ts.update(SETTINGS.modrinthEnabled, value);
     } catch (e) {
       setModrinth(!value);
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
   const toggleAiMcp = async (value: boolean) => {
     setAiMcp(value);
     try {
-      await setSetting('ai_mcp_enabled', value);
+      await ts.update(SETTINGS.aiMcpEnabled, value);
     } catch (e) {
       setAiMcp(!value);
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
   const toggleAiChat = async (value: boolean) => {
     setAiChatEnabled(value);
     try {
-      await setSetting('ai_chat_enabled', value);
+      await ts.update(SETTINGS.aiChatEnabled, value);
     } catch (e) {
       setAiChatEnabled(!value);
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
   const saveLauncherPath = async () => {
     try {
-      await setSetting('mojang_launcher_path', launcherPath);
+      // launcher_path setting is stored as the path directly
+      await ts.update(SETTINGS.launcherPath, launcherPath);
+      showToast('Launcher path saved.', 'success');
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
   const toggleAlwaysPreTouch = async (value: boolean) => {
     setAlwaysPreTouch(value);
     try {
-      await setSetting('jvm_always_pre_touch', value);
+      await ts.update(SETTINGS.alwaysPreTouch, value);
     } catch (e) {
       setAlwaysPreTouch(!value);
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
@@ -422,7 +431,7 @@ export function Settings() {
       const status = await startMcpServer();
       setMcpStatus(status);
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
@@ -431,7 +440,7 @@ export function Settings() {
       await stopMcpServer();
       await fetchMcpStatus();
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
@@ -439,7 +448,7 @@ export function Settings() {
     try {
       await setMcpApproval(_tool, instanceId, state);
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
@@ -448,7 +457,7 @@ export function Settings() {
       await copilotLogout();
       setCopilotToken(null);
     } catch (e) {
-      alert(formatError(e));
+      showToast(formatError(e), 'error');
     }
   };
 
@@ -659,17 +668,19 @@ export function Settings() {
                   </p>
                   {mcpToken?.token ? (
                     <>
-                      <pre className="text-xs bg-background rounded-lg p-2.5 overflow-x-auto select-all break-all border border-border">{mcpToken.token}</pre>
+                      <TokenDisplay token={mcpToken.token} />
                       <div className="flex flex-wrap gap-1.5">
                         <CopyButton text={mcpToken.token} label="Copy token" />
                         <CopyButton text={mcpToken.config_snippet} label="Copy MCP config" />
                         <button
                           onClick={async () => {
+                            if (!window.confirm('Regenerate token? This invalidates the current token. All AI clients must be updated.')) return;
                             try {
                               const data = await regenerateMCPToken();
                               setMcpToken(data);
-                            } catch {
-                              /* keep existing token */
+                              showToast('Token regenerated successfully.', 'success');
+                            } catch (e) {
+                              showToast(formatError(e), 'error');
                             }
                           }}
                           className="rounded-md border border-input px-2.5 py-1 text-xs font-medium hover:bg-accent"
@@ -865,29 +876,15 @@ export function Settings() {
                 </p>
 
                 {ghDevice && (
-                  <div className="rounded-lg border border-border bg-muted p-3 space-y-2">
-                    <p className="text-xs">Opening your browser… If it didn't open, click the button below:</p>
-                    <p className="text-sm font-semibold text-primary dark:text-primary break-all">
-                      {ghDevice.verification_uri}
-                    </p>
-                    <p className="text-sm">
-                      Code:{' '}
-                      <span className="font-mono font-bold tracking-widest">{ghDevice.user_code}</span>
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        openUrl(ghDevice.verification_uri).catch(() => {});
-                      }}
-                      disabled={ghPolling}
-                      className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-50"
-                    >
-                      Open in browser
-                    </button>
-                    {ghPolling && (
-                      <p className="text-xs text-muted-foreground">Waiting for authorization…</p>
-                    )}
-                  </div>
+                  <DeviceFlowPanel
+                    device={ghDevice}
+                    polling={ghPolling}
+                    onCancel={() => {
+                      ghSessionRef.current += 1;
+                      setGhPolling(false);
+                      setGhDevice(null);
+                    }}
+                  />
                 )}
 
                 {ghResult && <p className="text-sm text-primary">{ghResult}</p>}
@@ -1042,12 +1039,14 @@ export function Settings() {
               placeholder="Auto-discovered if empty"
               className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
             />
-            <button
-              onClick={saveLauncherPath}
-              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-            >
-              Save
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={saveLauncherPath}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Save
+              </button>
+            </div>
             <p className="text-xs text-muted-foreground">
               Override the official Mojang launcher executable location.
             </p>
@@ -1103,10 +1102,10 @@ export function Settings() {
                       await invoke('plugin:process|restart');
                     }
                   } else {
-                    window.alert('You are running the latest version of Agora.');
+                    showToast('You are running the latest version of Agora.', 'success');
                   }
                 } catch (e) {
-                  alert(formatError(e));
+                  showToast(formatError(e), 'error');
                 }
               }}
               className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"

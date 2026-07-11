@@ -107,6 +107,7 @@ pub async fn for_you_items(
     loader: Option<String>,
     limit: Option<i64>,
     modrinth_categories: Option<Vec<String>>,
+    query: Option<String>,
 ) -> LauncherResult<Vec<RegistryItem>> {
     let modrinth_enabled = modrinth_enabled.unwrap_or(false);
     let limit = limit.unwrap_or(50).clamp(1, 500);
@@ -119,6 +120,7 @@ pub async fn for_you_items(
             loader.as_deref(),
             limit,
             modrinth_categories.as_deref(),
+            query.as_deref(),
         )
     })
     .await
@@ -2370,6 +2372,7 @@ pub fn get_windows_accent_color() -> Option<String> {
 pub async fn browse_search(
     app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
+    query_key: String,
     query: Option<String>,
     content_type: Option<String>,
     category: Option<String>,
@@ -2426,6 +2429,7 @@ pub async fn browse_search(
 
     browse_cache::load_initial(
         &s.browse_cache,
+        query_key,
         registry_items,
         modrinth_results,
         BrowseFilters {
@@ -2456,101 +2460,108 @@ pub async fn browse_search(
 #[tauri::command]
 pub async fn browse_load_more(
     state: tauri::State<'_, LauncherState>,
+    query_key: String,
     // The 0-indexed page the frontend wants to display next.
     page_index: usize,
 ) -> LauncherResult<BrowsePage> {
     let s = state.lock().await;
+    let required_end = (page_index + 1) * browse_cache::PAGE_SIZE;
 
-    // 1. If the requested page is already cached, return it immediately.
-    {
-        let cache = s.browse_cache.read().await;
-        if page_index * browse_cache::PAGE_SIZE < cache.items.len() {
-            let mut page = browse_cache::get_page(&s.browse_cache, page_index).await;
-            // has_more = more cached items beyond this page, OR more Modrinth to fetch
-            let more_cached = (page_index + 1) * browse_cache::PAGE_SIZE < cache.items.len();
-            let more_modrinth = cache.has_more_modrinth && cache.filters.modrinth_enabled;
-            page.has_more = more_cached || more_modrinth;
-            return Ok(page);
+    // Fill the requested page. A fetched Modrinth page can contain duplicates,
+    // so continue until the cache contains a full requested page or the remote
+    // source is exhausted.
+    loop {
+        let (filters, modrinth_offset, should_fetch) = {
+            let cache = s.browse_cache.read().await;
+            if cache.query_key != query_key {
+                return Err(LauncherError::Generic {
+                    code: "ERR_BROWSE_STALE".into(),
+                    message: "Browse query changed before pagination completed.".into(),
+                });
+            }
+            let should_fetch = cache.items.len() < required_end
+                && cache.has_more_modrinth
+                && cache.filters.modrinth_enabled;
+            (cache.filters.clone(), cache.modrinth_offset, should_fetch)
+        };
+
+        if !should_fetch {
+            break;
         }
-    }
 
-    // 2. Requested page not cached. If Modrinth has more, fetch the next page.
-    let (filters, modrinth_offset) = {
-        let cache = s.browse_cache.read().await;
-        if !cache.has_more_modrinth || !cache.filters.modrinth_enabled {
-            return Ok(BrowsePage {
-                items: vec![],
-                total: cache.total,
-                page: page_index,
-                has_more: false,
+        let modrinth_pt = filters.content_type.as_ref().map(|ct| match ct.as_str() {
+            "pack" => "modpack".to_string(),
+            other => other.to_string(),
+        });
+        let params = ModrinthSearchParams {
+            query: Some(filters.query.clone()),
+            categories: filters.category.clone().map(|c| vec![c]),
+            loaders: filters.loader.clone().map(|l| vec![l]),
+            game_versions: filters.mc_version.clone().map(|v| vec![v]),
+            sort: Some(to_modrinth_sort(&filters.sort)),
+            limit: Some(browse_cache::PAGE_SIZE as u32),
+            offset: Some(modrinth_offset as u32),
+            project_type: modrinth_pt,
+        };
+
+        let modrinth_page = agora_core::modrinth::search_modrinth_http(&params).await
+            .map_err(|e| LauncherError::Generic { code: "ERR_MODRINTH".into(), message: e.to_string() })?;
+        let new_offset = modrinth_offset + browse_cache::PAGE_SIZE;
+        let has_more_modrinth = (modrinth_page.total_hits as usize) > new_offset;
+        let new_items: Vec<browse_cache::BrowseItem> = modrinth_page.results.into_iter().map(|mr| {
+            browse_cache::BrowseItem {
+                id: mr.project_id.clone(),
+                source: "modrinth".to_string(),
+                registry_item: None,
+                modrinth_result: Some(mr.clone()),
+                name: mr.title.clone(),
+                icon_url: mr.icon_url.clone(),
+                description: Some(mr.description.clone()),
+                content_type: mr.project_type.clone(),
+            }
+        }).collect();
+
+        if !browse_cache::append_items(
+            &s.browse_cache,
+            &query_key,
+            new_items,
+            new_offset,
+            has_more_modrinth,
+        ).await {
+            return Err(LauncherError::Generic {
+                code: "ERR_BROWSE_STALE".into(),
+                message: "Browse query changed before pagination completed.".into(),
             });
         }
-        (cache.filters.clone(), cache.modrinth_offset)
-    };
-
-    let modrinth_pt = filters.content_type.as_ref().map(|ct| match ct.as_str() {
-        "pack" => "modpack".to_string(),
-        other => other.to_string(),
-    });
-    let params = ModrinthSearchParams {
-        query: Some(filters.query.clone()),
-        categories: filters.category.clone().map(|c| vec![c]),
-        loaders: filters.loader.clone().map(|l| vec![l]),
-        game_versions: filters.mc_version.clone().map(|v| vec![v]),
-        sort: Some(to_modrinth_sort(&filters.sort)),
-        limit: Some(browse_cache::PAGE_SIZE as u32),
-        offset: Some(modrinth_offset as u32),
-        project_type: modrinth_pt,
-    };
-
-    let modrinth_page = agora_core::modrinth::search_modrinth_http(&params).await
-        .map_err(|e| LauncherError::Generic { code: "ERR_MODRINTH".into(), message: e.to_string() })?;
-
-    let new_offset = modrinth_offset + browse_cache::PAGE_SIZE;
-    let has_more_modrinth = (modrinth_page.total_hits as usize) > new_offset;
-
-    let new_items: Vec<browse_cache::BrowseItem> = modrinth_page.results.into_iter().map(|mr| {
-        browse_cache::BrowseItem {
-            id: mr.project_id.clone(),
-            source: "modrinth".to_string(),
-            registry_item: None,
-            modrinth_result: Some(mr.clone()),
-            name: mr.title.clone(),
-            icon_url: mr.icon_url.clone(),
-            description: Some(mr.description.clone()),
-            content_type: mr.project_type.clone(),
-        }
-    }).collect();
-
-    browse_cache::append_items(&s.browse_cache, new_items, new_offset, has_more_modrinth).await;
-
-    // 3. Return the requested page from the updated cache.
-    {
-        let cache = s.browse_cache.read().await;
-        if page_index * browse_cache::PAGE_SIZE < cache.items.len() {
-            let mut page = browse_cache::get_page(&s.browse_cache, page_index).await;
-            let more_cached = (page_index + 1) * browse_cache::PAGE_SIZE < cache.items.len();
-            let more_modrinth = cache.has_more_modrinth;
-            page.has_more = more_cached || more_modrinth;
-            Ok(page)
-        } else {
-            Ok(BrowsePage {
-                items: vec![],
-                total: cache.total,
-                page: page_index,
-                has_more: has_more_modrinth,
-            })
-        }
     }
+
+    let mut page = browse_cache::get_page(&s.browse_cache, page_index).await;
+    let cache = s.browse_cache.read().await;
+    if cache.query_key != query_key {
+        return Err(LauncherError::Generic {
+            code: "ERR_BROWSE_STALE".into(),
+            message: "Browse query changed before pagination completed.".into(),
+        });
+    }
+    page.has_more = (page_index + 1) * browse_cache::PAGE_SIZE < cache.items.len()
+        || (cache.has_more_modrinth && cache.filters.modrinth_enabled);
+    Ok(page)
 }
 
 /// Get a specific page from the browse cache.
 #[tauri::command]
 pub async fn browse_page(
     state: tauri::State<'_, LauncherState>,
+    query_key: String,
     page: usize,
 ) -> LauncherResult<BrowsePage> {
     let s = state.lock().await;
+    if s.browse_cache.read().await.query_key != query_key {
+        return Err(LauncherError::Generic {
+            code: "ERR_BROWSE_STALE".into(),
+            message: "Browse query changed before pagination completed.".into(),
+        });
+    }
     Ok(browse_cache::get_page(&s.browse_cache, page).await)
 }
 

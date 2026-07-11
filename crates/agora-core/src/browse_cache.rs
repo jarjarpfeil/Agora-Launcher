@@ -43,6 +43,8 @@ pub struct BrowseFilters {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowseCache {
+    /// Immutable identity of the filters that produced this cache.
+    pub query_key: String,
     pub items: Vec<BrowseItem>,
     pub total: usize,
     pub filters: BrowseFilters,
@@ -53,6 +55,7 @@ pub struct BrowseCache {
 impl Default for BrowseCache {
     fn default() -> Self {
         Self {
+            query_key: String::new(),
             items: Vec::new(),
             total: 0,
             filters: BrowseFilters::default(),
@@ -83,12 +86,8 @@ pub fn merge_items(
     let mut matched_ids = std::collections::HashSet::new();
     let mut merged = Vec::new();
 
-    let mr_len = modrinth_results.len();
-    let mut matched_count = 0u32;
-    let mut modrinth_only_count = 0u32;
     for mr in modrinth_results {
         if let Some(matched) = registry_by_modrinth_id.get(&mr.project_id) {
-            matched_count += 1;
             matched_ids.insert(matched.id.clone());
             merged.push(BrowseItem {
                 id: matched.id.clone(),
@@ -101,7 +100,6 @@ pub fn merge_items(
                 content_type: matched.content_type.clone(),
             });
         } else {
-            modrinth_only_count += 1;
             merged.push(BrowseItem {
                 id: mr.project_id.clone(),
                 source: "modrinth".to_string(),
@@ -119,13 +117,8 @@ pub fn merge_items(
         }
     }
 
-    eprintln!("[MERGE] modrinth_results={}: matched={} modrinth-only={}", mr_len, matched_count, modrinth_only_count);
-
-    let reg_len = registry_items.len();
-    let mut remaining_count = 0u32;
     for ri in registry_items {
         if !matched_ids.contains(&ri.id) {
-            remaining_count += 1;
             merged.push(BrowseItem {
                 id: ri.id.clone(),
                 source: "curated".to_string(),
@@ -139,14 +132,13 @@ pub fn merge_items(
         }
     }
 
-    eprintln!("[MERGE] registry_items={}: remaining-curated={} total-merged={}", reg_len, remaining_count, merged.len());
-
     merged
 }
 
 /// Load the first page of browse results into the cache.
 pub async fn load_initial(
     cache: &SharedBrowseCache,
+    query_key: String,
     registry_items: Vec<RegistryItem>,
     modrinth_results: Vec<ModrinthSearchResult>,
     filters: BrowseFilters,
@@ -156,6 +148,7 @@ pub async fn load_initial(
     let merged = merge_items(registry_items, modrinth_results);
     let total = merged.len();
     let mut c = cache.write().await;
+    c.query_key = query_key;
     c.items = merged;
     c.total = total;
     c.filters = filters;
@@ -163,23 +156,33 @@ pub async fn load_initial(
     c.has_more_modrinth = has_more_modrinth;
 }
 
-/// Append more Modrinth items to the cache (deduplicating by id).
+/// Append more Modrinth items only when the cache still belongs to the
+/// expected query. Returns false when a newer query replaced the cache.
 pub async fn append_items(
     cache: &SharedBrowseCache,
+    expected_query_key: &str,
     new_items: Vec<BrowseItem>,
     new_offset: usize,
     has_more: bool,
-) {
+) -> bool {
     let mut c = cache.write().await;
-    let existing_ids: std::collections::HashSet<String> = c.items.iter().map(|i| i.id.clone()).collect();
+    if c.query_key != expected_query_key {
+        return false;
+    }
+    let mut existing_ids: std::collections::HashSet<(String, String)> = c
+        .items
+        .iter()
+        .map(|i| (i.source.clone(), i.id.clone()))
+        .collect();
     for item in new_items {
-        if !existing_ids.contains(&item.id) {
+        if existing_ids.insert((item.source.clone(), item.id.clone())) {
             c.items.push(item);
         }
     }
     c.total = c.items.len();
     c.modrinth_offset = new_offset;
     c.has_more_modrinth = has_more;
+    true
 }
 
 /// Get a page of results from the cache.
@@ -210,4 +213,61 @@ pub async fn get_all(cache: &SharedBrowseCache) -> Vec<BrowseItem> {
 pub async fn invalidate(cache: &SharedBrowseCache) {
     let mut c = cache.write().await;
     *c = BrowseCache::default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: usize) -> BrowseItem {
+        BrowseItem {
+            id: format!("item-{id}"),
+            source: "curated".into(),
+            registry_item: None,
+            modrinth_result: None,
+            name: format!("Item {id}"),
+            icon_url: None,
+            description: None,
+            content_type: "mod".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn requested_pages_do_not_skip_cached_items() {
+        let cache = new_cache();
+        {
+            let mut state = cache.write().await;
+            state.query_key = "query-a".into();
+            state.items = (0..95).map(item).collect();
+            state.total = state.items.len();
+            state.has_more_modrinth = false;
+        }
+        let page_one = get_page(&cache, 1).await;
+        assert_eq!(page_one.items.first().map(|i| i.id.as_str()), Some("item-20"));
+        assert_eq!(page_one.items.last().map(|i| i.id.as_str()), Some("item-39"));
+    }
+
+    #[tokio::test]
+    async fn stale_query_append_is_rejected() {
+        let cache = new_cache();
+        cache.write().await.query_key = "query-b".into();
+        let appended = append_items(&cache, "query-a", vec![item(1)], PAGE_SIZE, false).await;
+        assert!(!appended);
+        assert!(cache.read().await.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_deduplicates_by_source_and_id() {
+        let cache = new_cache();
+        cache.write().await.query_key = "query-a".into();
+        let duplicate = item(1);
+        assert!(append_items(
+            &cache,
+            "query-a",
+            vec![duplicate.clone(), duplicate],
+            PAGE_SIZE,
+            false,
+        ).await);
+        assert_eq!(cache.read().await.items.len(), 1);
+    }
 }

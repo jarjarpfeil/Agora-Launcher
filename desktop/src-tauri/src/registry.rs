@@ -92,6 +92,7 @@ pub fn for_you_items<R: tauri::Runtime>(
     loader: Option<&str>,
     limit: i64,
     modrinth_categories: Option<&[String]>,
+    query: Option<&str>,
 ) -> LauncherResult<Vec<RegistryItem>> {
     let installed = collect_installed_registry_ids(app)?;
     let conn = open_registry(app)?;
@@ -138,7 +139,7 @@ pub fn for_you_items<R: tauri::Runtime>(
     // No interest signal at all → degrade to net_score browse.
     if interest.is_empty() {
         let sort = SortOption::NetScore;
-        return browse_items(&conn, None, None, &sort, modrinth_enabled, mc_version, loader, None, limit);
+        return browse_items(&conn, None, None, &sort, modrinth_enabled, mc_version, loader, query, limit);
     }
 
     // Candidate items: uninstalled items sharing >=1 interest category, ranked
@@ -149,6 +150,9 @@ pub fn for_you_items<R: tauri::Runtime>(
     let mut where_parts: Vec<String> = Vec::new();
     if !modrinth_enabled {
         where_parts.push("ri.download_strategy != 'modrinth_id'".to_string());
+    }
+    if query.is_some_and(|q| !q.trim().is_empty()) {
+        where_parts.push("ri.name LIKE ?".to_string());
     }
     // Compatibility filters mirror browse_items so "For You" only recommends
     // items that declare support for the user's selected MC version / loader.
@@ -187,6 +191,9 @@ pub fn for_you_items<R: tauri::Runtime>(
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
     for cat in &interest {
         params.push(Box::new(cat.clone()));
+    }
+    if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+        params.push(Box::new(format!("%{}%", q.trim())));
     }
     if let Some(mv) = mc_version {
         params.push(Box::new(mv.to_string()));

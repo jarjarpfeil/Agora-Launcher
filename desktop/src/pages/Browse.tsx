@@ -232,6 +232,7 @@ function BrowseContent({
   const [searchLoading, setSearchLoading] = useState(true);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [loadMoreLoading, setLoadMoreLoading] = useState(false);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   // Tracks the 0-indexed page displayed. Starts at 0; incremented after each
   // successful load-more. Reset to 0 on a new search.
   const [currentPage, setCurrentPage] = useState(0);
@@ -327,6 +328,7 @@ function BrowseContent({
     setItems([]);
     setHasMore(false);
     setLoadMoreLoading(false);
+    setLoadMoreError(null);
     setCurrentPage(0);
     inFlightLoadMoreRef.current = null;
 
@@ -347,6 +349,7 @@ function BrowseContent({
             loader ?? undefined,
             undefined,
             undefined,
+            debouncedQuery.trim() || undefined,
           );
 
           if (!cancelled && inFlightSearchRef.current === generation) {
@@ -355,6 +358,7 @@ function BrowseContent({
           }
         } else {
           const page = await browseSearch(
+            queryKey,
             debouncedQuery.trim() || undefined,
             contentType ?? undefined,
             category ?? undefined,
@@ -388,56 +392,61 @@ function BrowseContent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queryKey]);
 
+  const loadNextPage = useCallback(() => {
+    if (!hasMore || searchLoading || loadMoreLoading) return;
+    const capturedGeneration = generationRef.current;
+    inFlightLoadMoreRef.current = capturedGeneration;
+    const nextPage = currentPage + 1;
+    setLoadMoreLoading(true);
+    setLoadMoreError(null);
+
+    browseLoadMore(queryKey, nextPage)
+      .then((page) => {
+        if (capturedGeneration === generationRef.current) {
+          setItems((prev) => {
+            const existingKeys = new Set(prev.map((i) => `${i.id}:${i.source}`));
+            const newItems = page.items.filter(
+              (ni) => !existingKeys.has(`${ni.id}:${ni.source}`),
+            );
+            return newItems.length === 0 ? prev : [...prev, ...newItems];
+          });
+          setHasMore(page.hasMore);
+          setCurrentPage(nextPage);
+        }
+      })
+      .catch((e) => {
+        if (
+          capturedGeneration === generationRef.current
+          && !(typeof e === 'object' && e !== null && 'code' in e && e.code === 'ERR_BROWSE_STALE')
+        ) {
+          setLoadMoreError(formatError(e));
+        }
+      })
+      .finally(() => {
+        if (capturedGeneration === generationRef.current) {
+          setLoadMoreLoading(false);
+          inFlightLoadMoreRef.current = null;
+        }
+      });
+  }, [currentPage, hasMore, loadMoreLoading, queryKey, searchLoading]);
+
   // ---- Infinite scroll — captures generation at trigger time ----
   const sentinelRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = sentinelRef.current;
-    if (!sentinel || !hasMore || searchLoading) return;
+    if (!sentinel || !hasMore || searchLoading || loadMoreError) return;
 
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting && hasMore && !loadMoreLoading) {
-          const capturedGeneration = generationRef.current;
-          inFlightLoadMoreRef.current = capturedGeneration;
-          const nextPage = currentPage + 1;
-          setLoadMoreLoading(true);
-
-          browseLoadMore(nextPage)
-            .then((page) => {
-              // Only apply if the captured generation is still current
-              if (capturedGeneration === generationRef.current) {
-                // Deduplicate by (id, source) composite key — the Rust cache
-                // deduplicates stored items by id, but the response may include
-                // items that the cache already had before dedup ran.
-                setItems((prev) => {
-                  const existingKeys = new Set(prev.map((i) => `${i.id}:${i.source}`));
-                  const newItems = page.items.filter(
-                    (ni) => !existingKeys.has(`${ni.id}:${ni.source}`),
-                  );
-                  if (newItems.length === 0) return prev;
-                  return [...prev, ...newItems];
-                });
-                setHasMore(page.hasMore);
-                setCurrentPage(nextPage);
-              }
-            })
-            .catch(() => {
-              // Silently ignore stale load-more errors; the next search
-              // will reset pagination anyway.
-            })
-            .finally(() => {
-              if (capturedGeneration === generationRef.current) {
-                setLoadMoreLoading(false);
-                inFlightLoadMoreRef.current = null;
-              }
-            });
+        if (entries[0]?.isIntersecting && hasMore && !loadMoreLoading && !loadMoreError) {
+          loadNextPage();
         }
       },
       { rootMargin: '600px' },
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasMore, searchLoading, loadMoreLoading, currentPage]);
+  }, [hasMore, searchLoading, loadMoreLoading, loadMoreError, loadNextPage]);
 
   // ---- Render ----
   return (
@@ -649,13 +658,21 @@ function BrowseContent({
                         const m = await getSetting('modrinth_enabled');
                         modrinthEnabled = m === true || m === 'true';
                       } catch {}
-                      const registryItems = await forYouItems(modrinthEnabled, mcVersion ?? undefined, loader ?? undefined);
+                      const registryItems = await forYouItems(
+                        modrinthEnabled,
+                        mcVersion ?? undefined,
+                        loader ?? undefined,
+                        undefined,
+                        undefined,
+                        debouncedQuery.trim() || undefined,
+                      );
                       if (inFlightSearchRef.current === newGen) {
                         setItems(mergeItems(registryItems, []));
                         setHasMore(false);
                       }
                     } else {
                       const page = await browseSearch(
+                        queryKey,
                         debouncedQuery.trim() || undefined,
                         contentType ?? undefined,
                         category ?? undefined,
@@ -729,6 +746,17 @@ function BrowseContent({
       )}
 
       {/* Infinite scroll sentinel */}
+      {loadMoreError && (
+        <div className="rounded-lg border border-destructive bg-destructive/10 p-3 text-sm text-destructive">
+          <p>{loadMoreError}</p>
+          <button
+            onClick={loadNextPage}
+            className="mt-2 rounded-lg bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+          >
+            Retry loading more
+          </button>
+        </div>
+      )}
       {hasMore && !searchLoading && (
         <div ref={sentinelRef} className="py-6 text-center text-sm text-muted-foreground">
           {loadMoreLoading ? 'Loading more…' : ''}
