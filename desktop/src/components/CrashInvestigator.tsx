@@ -8,7 +8,6 @@ import {
   getDisablePlan,
   investigateCrash,
   investigateManual,
-  launchInstance,
   readCrashLog,
   reportStillCrashing,
   type DisablePlan,
@@ -24,6 +23,8 @@ interface CrashInvestigatorProps {
   crashFilename?: string | null;
   manualLogText?: string | null;
   onClose: () => void;
+  /** Called to re-launch the instance after disabling a suspected mod. */
+  onLaunch: () => void;
 }
 
 /** Render a single breakdown entry as plain text. */
@@ -256,6 +257,7 @@ export function CrashInvestigator({
   crashFilename,
   manualLogText,
   onClose,
+  onLaunch,
 }: CrashInvestigatorProps) {
   const [result, setResult] = useState<InvestigationResult | null>(null);
   const [loading, setLoading] = useState(true);
@@ -344,7 +346,7 @@ export function CrashInvestigator({
         return;
       }
       await disableModForTest(instanceId, filename);
-      await launchInstance(instanceId);
+      await onLaunch();
       if (!cancelledRef.current) {
         setPostLaunch({ filename, modId });
       }
@@ -377,7 +379,7 @@ export function CrashInvestigator({
       }
       // Then disable the original suspect
       await disableModForTest(instanceId, originalFilename);
-      await launchInstance(instanceId);
+      await onLaunch();
       if (!cancelledRef.current) {
         setPostLaunch({ filename: originalFilename, modId: result?.suggested_action.kind === 'GuidedDisable' ? result.suggested_action.next_suspect.mod_id : result?.suggested_action.kind === 'ConfidenceAutoDisable' ? result.suggested_action.mod_id : '' });
       }

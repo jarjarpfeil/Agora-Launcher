@@ -143,12 +143,12 @@ export function Settings() {
   // Sync typed settings into local state for backward-compatible render code.
   useEffect(() => {
     if (ts.loading) return;
-    setModrinth(ts.values.modrinth_enabled as boolean ?? false);
-    setAiMcp(ts.values.ai_mcp_enabled as boolean ?? false);
-    setAiChatEnabled(ts.values.ai_chat_enabled as boolean ?? false);
-    setLauncherPath(ts.values.launcher_path as string ?? '');
-    setAlwaysPreTouch(ts.values.always_pre_touch as boolean ?? true);
-    setDirectLaunch((ts.values.launch_mode as string) === 'direct');
+    setModrinth(ts.values.modrinthEnabled as boolean ?? false);
+    setAiMcp(ts.values.aiMcpEnabled as boolean ?? false);
+    setAiChatEnabled(ts.values.aiChatEnabled as boolean ?? false);
+    setLauncherPath(ts.values.launcherPath as string ?? '');
+    setAlwaysPreTouch(ts.values.alwaysPreTouch as boolean ?? true);
+    setDirectLaunch((ts.values.launchMode as string) === 'direct');
     setLoading(false);
   }, [ts.loading, ts.values]);
 

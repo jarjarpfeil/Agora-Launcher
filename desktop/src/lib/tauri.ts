@@ -216,6 +216,26 @@ export const launchInstanceDirect = (instanceId: string) =>
 export const killProcess = (pid: number) =>
   invoke<void>('kill_process', { pid });
 
+export interface UpdateInfo {
+  filename: string;
+  mod_jar_id: string;
+  current_version: string;
+  latest_version: string;
+  source: string;
+}
+
+export const checkInstanceUpdates = (instanceId: string) =>
+  invoke<UpdateInfo[]>('check_instance_updates', { instanceId });
+
+export interface RunningProcess {
+  instance_id: string;
+  pid: number;
+  session_id: number;
+}
+
+export const queryLaunchState = () =>
+  invoke<RunningProcess | null>('query_launch_state');
+
 export type HealthScore = 'green' | 'yellow' | 'red';
 
 export interface HealthWarning {

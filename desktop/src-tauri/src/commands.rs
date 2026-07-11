@@ -322,7 +322,7 @@ pub async fn launch_instance(
 #[tauri::command]
 pub async fn launch_instance_direct(
     app: tauri::AppHandle,
-    _state: tauri::State<'_, LauncherState>,
+    state: tauri::State<'_, LauncherState>,
     instance_id: String,
 ) -> LauncherResult<u32> {
     use tauri::Emitter;
@@ -473,33 +473,61 @@ pub async fn launch_instance_direct(
 
     let pid = child.id().unwrap_or(0);
 
+    // Store the running process in backend state so the frontend can recover
+    // running state after navigation or reload.
+    {
+        let mut s = state.lock().await;
+        s.launch_session_counter += 1;
+        s.running_process = Some(agora_core::state::RunningProcess {
+            instance_id: instance_id.clone(),
+            pid,
+            session_id: s.launch_session_counter,
+        });
+    }
+
+    let inst_id = instance_id.clone();
+    let state_cleanup = state.inner().clone();
+
     let app1 = app.clone();
+    let s1 = instance_id.clone();
     if let Some(stdout) = child.stdout.take() {
         tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 let sanitized = agora_core::log_sanitizer::sanitize_log(&line);
-                let _ = app1.emit("game-log", serde_json::json!({"line": sanitized, "stream": "stdout"}));
+                let _ = app1.emit("game-log", serde_json::json!({
+                    "line": sanitized,
+                    "stream": "stdout",
+                    "instance_id": s1,
+                }));
             }
         });
     }
 
     let app2 = app.clone();
+    let s2 = instance_id.clone();
     if let Some(stderr) = child.stderr.take() {
         tokio::spawn(async move {
             let mut reader = tokio::io::BufReader::new(stderr).lines();
             while let Ok(Some(line)) = reader.next_line().await {
                 let sanitized = agora_core::log_sanitizer::sanitize_log(&line);
-                let _ = app2.emit("game-log", serde_json::json!({"line": sanitized, "stream": "stderr"}));
+                let _ = app2.emit("game-log", serde_json::json!({
+                    "line": sanitized,
+                    "stream": "stderr",
+                    "instance_id": s2,
+                }));
             }
         });
     }
 
     let app3 = app.clone();
-    let inst_id = instance_id.clone();
+    let state_on_exit = state.inner().clone();
     tokio::spawn(async move {
         let status = child.wait().await;
         let exit_code = status.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);
+        // Clear backend running process state on exit.
+        let mut s = state_on_exit.lock().await;
+        s.running_process = None;
         let _ = app3.emit("game-exited", serde_json::json!({
             "instance_id": inst_id,
             "exit_code": exit_code
@@ -519,6 +547,16 @@ pub async fn launch_instance_direct(
     });
 
     Ok(pid)
+}
+
+/// Query the currently tracked direct-launch process, if any.
+/// Returns `None` if no direct launch is active or the process has exited.
+#[tauri::command]
+pub async fn query_launch_state(
+    state: tauri::State<'_, LauncherState>,
+) -> LauncherResult<Option<agora_core::state::RunningProcess>> {
+    let s = state.lock().await;
+    Ok(s.running_process.clone())
 }
 
 async fn download_lib(
@@ -2563,6 +2601,115 @@ pub async fn browse_page(
         });
     }
     Ok(browse_cache::get_page(&s.browse_cache, page).await)
+}
+
+// ---------------------------------------------------------------------------
+// C0-C3: Install pipeline facade commands
+// ---------------------------------------------------------------------------
+
+/// Resolve an InstallIntent into a ResolvedInstallPlan (read-only, no mutation).
+#[tauri::command]
+pub async fn resolve_install_plan(
+    state: tauri::State<'_, LauncherState>,
+    intent: agora_core::install_pipeline::InstallIntent,
+) -> LauncherResult<agora_core::install_pipeline::ResolvedInstallPlan> {
+    use agora_core::install_pipeline::{InstallPipeline, ProgressReporter, ProgressEvent};
+    let pipeline = InstallPipeline;
+    struct StubReporter;
+    impl ProgressReporter for StubReporter {
+        fn report(&self, _event: ProgressEvent) {}
+    }
+    pipeline.resolve_plan(intent, &StubReporter).await
+        .map_err(|e| LauncherError::Generic { code: "ERR_RESOLVE".into(), message: e })
+}
+
+/// Apply a fully-resolved install plan (staged, atomic, verified).
+#[tauri::command]
+pub async fn apply_install_plan(
+    _state: tauri::State<'_, LauncherState>,
+    plan: agora_core::install_pipeline::ResolvedInstallPlan,
+) -> LauncherResult<agora_core::install_pipeline::InstallOutcome> {
+    use agora_core::install_pipeline::{InstallPipeline, ProgressReporter, ProgressEvent, CancellationToken};
+    let pipeline = InstallPipeline;
+    struct StubReporter;
+    impl ProgressReporter for StubReporter {
+        fn report(&self, _event: ProgressEvent) {}
+    }
+    let cancel = CancellationToken::new();
+    let instance_dir = std::path::PathBuf::from("/tmp/agora-instance"); // TODO: resolve from plan
+    let outcome = pipeline.execute_plan(&plan, &instance_dir, &StubReporter, &cancel).await;
+    Ok(outcome)
+}
+
+/// Cancel a running install.
+#[tauri::command]
+pub async fn cancel_install(
+    _state: tauri::State<'_, LauncherState>,
+    _plan_id: String,
+) -> LauncherResult<()> {
+    // TODO: wire cancellation token lookup
+    Ok(())
+}
+
+/// Information about an available update for an installed mod.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UpdateInfo {
+    pub filename: String,
+    pub mod_jar_id: String,
+    pub current_version: String,
+    pub latest_version: String,
+    pub source: String,
+}
+
+/// Check for available updates for all installed mods in an instance.
+///
+/// Compares installed mods against the latest curated registry version.
+/// Returns mods whose SHA-256 hash differs from the registry entry.
+#[tauri::command]
+pub async fn check_instance_updates(
+    app: tauri::AppHandle,
+    instance_id: String,
+) -> LauncherResult<Vec<UpdateInfo>> {
+    use crate::models::InstanceManifest;
+    use crate::paths;
+
+    let sanitized = paths::sanitize_id(&instance_id);
+    let manifest_path = paths::instance_manifest_path(&app, &sanitized)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let manifest: InstanceManifest = serde_json::from_str(&manifest_text)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+
+    let mut updates = Vec::new();
+
+    for installed_mod in &manifest.mods {
+        if installed_mod.source == "manual" { continue; }
+        let mod_jar_id = match installed_mod.mod_jar_id.as_ref() {
+            Some(id) if !id.is_empty() => id.clone(),
+            _ => continue,
+        };
+
+        // Look up the item in the registry to compare hashes.
+        if let Ok(rconn) = db::registry_connection(&app) {
+            if let Ok(Some(item)) = crate::registry::get_item_by_id(&rconn, &mod_jar_id) {
+                let item_sha256 = &item.sha256;
+                let installed_sha = &installed_mod.sha256;
+                if installed_sha.is_empty() || installed_sha == item_sha256 {
+                    continue; // no update or unknown installed hash
+                }
+                updates.push(UpdateInfo {
+                    filename: installed_mod.filename.clone(),
+                    mod_jar_id,
+                    current_version: installed_mod.version.clone().unwrap_or_else(|| "unknown".into()),
+                    latest_version: "available".into(),
+                    source: installed_mod.source.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(updates)
 }
 
 fn to_modrinth_sort(sort: &str) -> ModrinthSort {

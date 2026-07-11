@@ -16,14 +16,14 @@ use std::collections::{HashMap, HashSet};
 // ---------------------------------------------------------------------------
 
 /// Whether a dependency is required or optional.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Requirement {
     Required,
     Optional,
 }
 
 /// Where a dependency declaration came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DepSource {
     Jar,
     Manifest,

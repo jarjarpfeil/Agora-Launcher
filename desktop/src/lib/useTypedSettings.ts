@@ -200,12 +200,15 @@ export function useTypedSettings(): UseTypedSettingsReturn {
           }));
         }
       } catch (e) {
+        const msg = formatError(e);
         if (mountedRef.current) {
           setStatuses((prev) => ({
             ...prev,
-            [def.key]: { status: 'error', error: formatError(e) },
+            [def.key]: { status: 'error', error: msg },
           }));
         }
+        // Rethrow so callers' try/catch can roll back optimistic state and show toasts.
+        throw new Error(msg);
       }
     },
     [],

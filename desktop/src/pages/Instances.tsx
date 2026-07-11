@@ -2,18 +2,26 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   checkInstanceCrash,
+  checkInstanceUpdates,
   createInstance,
+  createSnapshot,
   deleteInstance,
   getSetting,
   listInstances,
   listLoaderVersions,
   listManifestLoaders,
   listManifestMcVersions,
+  restoreSnapshot,
   formatError,
   type CreateInstanceRequest,
   type InstanceRow,
   type LoaderVersionSummary,
+  type UpdateInfo,
 } from '../lib/tauri';
+import {
+  resolveInstallPlan,
+  applyInstallPlan,
+} from '../lib/installFlow';
 import { type ProcessState } from '../lib/useProcessController';
 import { CrashInvestigator } from '../components/CrashInvestigator';
 import {
@@ -26,11 +34,13 @@ import {
 export function Instances({
   onEditInstance,
   processState,
+  processLogs,
   onStartLaunch,
   onKillProcess,
 }: {
   onEditInstance: (id: string) => void;
   processState: ProcessState;
+  processLogs: import('../lib/useProcessController').LogLine[];
   onStartLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
   onKillProcess: () => Promise<void>;
 }) {
@@ -157,6 +167,8 @@ export function Instances({
           {instances.map((instance) => {
             const isRunning = processState.instanceId === instance.instance_id && processState.phase === 'running';
 
+            const instanceLogs = processLogs.filter((l) => l.instance_id === instance.instance_id);
+
             return (
               <InstanceCard
                 key={instance.instance_id}
@@ -171,14 +183,17 @@ export function Instances({
                 onKill={onKillProcess}
                 controllerError={processState.phase === 'failed' ? processState.error : null}
                 onDismissError={() => {
-                  // The controller stays in failed until a new launch starts.
-                  // For now, clear by starting a new launch cycle.
                   onStartLaunch(instance.instance_id, directLaunch);
                 }}
+                logs={instanceLogs}
               />
             );
           })}
         </ul>
+      )}
+
+      {instances.length > 0 && (
+        <UpdatesSection instances={instances} />
       )}
 
       {showCreate && (
@@ -197,6 +212,7 @@ export function Instances({
           crashFilename={crashInvestigation.crashFilename}
           manualLogText={crashInvestigation.manualLogText}
           onClose={() => setCrashInvestigation(null)}
+          onLaunch={() => onStartLaunch(crashInvestigation.instanceId, directLaunch)}
         />
       )}
 
@@ -222,6 +238,7 @@ function InstanceCard({
   onKill,
   controllerError,
   onDismissError,
+  logs,
 }: {
   instance: InstanceRow;
   onChanged: () => void;
@@ -234,10 +251,10 @@ function InstanceCard({
   onKill: () => void;
   controllerError: string | null;
   onDismissError: () => void;
+  logs?: import('../lib/useProcessController').LogLine[];
 }) {
   const [error, setError] = useState<string | null>(null);
 
-  // Merge local and controller errors.
   const displayError = error ?? controllerError;
 
   const remove = async () => {
@@ -327,10 +344,312 @@ function InstanceCard({
           Delete
         </button>
       </div>
+
+      {isRunning && logs && logs.length > 0 && (
+        <div className="mt-3">
+          <h4 className="text-xs font-semibold text-muted-foreground mb-1 uppercase tracking-wide">
+            Console ({logs.length} lines)
+          </h4>
+          <pre className="max-h-32 overflow-y-auto rounded-lg bg-background border border-border p-2 text-[10px] font-mono leading-tight">
+            {logs.slice(-200).map((l, i) => (
+              <span key={i} className={l.stream === 'stderr' ? 'text-destructive' : ''}>
+                {l.line}{'\n'}
+              </span>
+            ))}
+          </pre>
+        </div>
+      )}
     </li>
   );
 }
 
+/** A section that checks for updates, batches them, and applies them safely. */
+
+function UpdatesSection({
+  instances,
+}: {
+  instances: InstanceRow[];
+}) {
+  const [updatesByInstance, setUpdatesByInstance] = useState<Record<string, UpdateInfo[]>>({});
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
+  const [showConfirm, setShowConfirm] = useState<{
+    instanceId: string;
+    instanceName: string;
+    updates: UpdateInfo[];
+  } | null>(null);
+
+  const checkAll = async () => {
+    setChecking(true);
+    setUpdateError(null);
+    const results: Record<string, UpdateInfo[]> = {};
+    for (const inst of instances) {
+      if (inst.is_locked) continue; // skip locked instances
+      try {
+        const updates = await checkInstanceUpdates(inst.instance_id);
+        if (updates.length > 0) results[inst.instance_id] = updates;
+      } catch {
+        // skip instances that fail
+      }
+    }
+    setUpdatesByInstance(results);
+    setSelected(new Set());
+    setChecking(false);
+  };
+
+  const totalUpdates = Object.values(updatesByInstance).reduce((sum, u) => sum + u.length, 0);
+
+  /** Toggle per-mod selection. */
+  const toggleSelected = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  };
+
+  const applyUpdates = async () => {
+    if (!showConfirm) return;
+    const { instanceId, updates } = showConfirm;
+    setShowConfirm(null);
+    setUpdating(true);
+    setUpdateProgress(null);
+    setUpdateError(null);
+
+    // Filter to selected items; if nothing selected, update all.
+    const toUpdate = selected.size > 0
+      ? updates.filter((u) => selected.has(`${instanceId}:${u.mod_jar_id}`))
+      : updates;
+    if (toUpdate.length === 0) { setUpdating(false); return; }
+
+    // Step 1: Snapshot before any mutation
+    setUpdateProgress('Creating pre-update snapshot…');
+    let snapshotId: string | undefined;
+    try {
+      const snap = await createSnapshot(instanceId, `batch-update-${Date.now()}`);
+      snapshotId = snap.id;
+    } catch (e) {
+      setUpdateError(`Snapshot failed: ${formatError(e)} — updates cancelled.`);
+      setUpdating(false);
+      return;
+    }
+
+    // Step 2: Apply each selected update sequentially via the canonical pipeline.
+    // For each update we construct an InstallIntent and resolve+execute through
+    // the backend's `resolve_install_plan` + `apply_install_plan` Tauri commands.
+    let failedCount = 0;
+    for (let i = 0; i < toUpdate.length; i++) {
+      const u = toUpdate[i];
+      setUpdateProgress(`Updating ${i + 1}/${toUpdate.length}: ${u.filename}…`);
+      try {
+        // Full pipeline: resolve a plan, then execute it.
+        // The backend install_pipeline handles staging, verification, and
+        // atomic application.
+        const intent: import('../lib/installFlow').InstallIntent = {
+          action: {
+            type: 'update',
+            itemId: u.mod_jar_id,
+            targetVersion: u.latest_version,
+          },
+          targetInstance: instanceId,
+          optionalDeps: { type: 'exclude-all' },
+          requestedBy: 'auto-update',
+          overrides: { allowReplace: false, skipHealthScan: false, forceConflictResolution: {} },
+        };
+        const plan = await resolveInstallPlan(intent);
+        const outcome = await applyInstallPlan(plan);
+        if (outcome.type === 'failed') {
+          throw new Error(outcome.error);
+        }
+        // Success via pipeline — outcome includes health scan results.
+      } catch (e) {
+        setUpdateError(`Update failed for ${u.filename}: ${formatError(e)}`);
+        failedCount++;
+        break; // Stop on first failure — rollback
+      }
+    }
+
+    if (failedCount > 0 && snapshotId) {
+      setUpdateProgress('Restoring snapshot…');
+      try {
+        await restoreSnapshot(instanceId, snapshotId);
+        setUpdateError(`Update failed after ${toUpdate.length - failedCount + 1} of ${toUpdate.length} mods. Snapshot restored.`);
+      } catch (rollbackErr) {
+        setUpdateError(`Update failed AND snapshot restore also failed. Instance may be in an inconsistent state. Error: ${formatError(rollbackErr)}`);
+      }
+    } else if (failedCount === 0) {
+      setUpdateProgress('All updates applied successfully.');
+      await checkAll(); // refresh
+    }
+    setUpdating(false);
+  };
+
+  if (updating) {
+    return (
+      <div className="mt-6 rounded-xl border border-border bg-card p-4 space-y-3">
+        <h3 className="font-semibold">Applying Updates</h3>
+        <div className="flex items-center gap-2 text-sm">
+          {updateProgress && !updateError && (
+            <>
+              <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              <span>{updateProgress}</span>
+            </>
+          )}
+        </div>
+        {updateError && (
+          <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{updateError}</div>
+        )}
+      </div>
+    );
+  }
+
+  if (totalUpdates === 0 && !checking) {
+    return (
+      <div className="mt-6">
+        <button
+          onClick={checkAll}
+          disabled={checking}
+          className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+        >
+          {checking ? 'Checking…' : 'Check for Updates'}
+        </button>
+      </div>
+    );
+  }
+
+  const allSelected = (updates: UpdateInfo[], instId: string) =>
+    updates.every((u) => selected.has(`${instId}:${u.mod_jar_id}`));
+
+  return (
+    <div className="mt-6 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="font-semibold">Updates Available ({totalUpdates})</h3>
+        <button
+          onClick={checkAll}
+          disabled={checking}
+          className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent disabled:opacity-50"
+        >
+          {checking ? 'Checking…' : 'Refresh'}
+        </button>
+      </div>
+      {Object.entries(updatesByInstance).map(([instId, updates]) => {
+        const inst = instances.find((i) => i.instance_id === instId);
+        const locked = inst?.is_locked ?? false;
+        const selectedCount = updates.filter((u) => selected.has(`${instId}:${u.mod_jar_id}`)).length;
+        return (
+          <div key={instId} className="rounded-xl border border-border bg-card p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-medium">{inst?.name ?? instId}</p>
+              {locked && <span className="text-xs text-muted-foreground">🔒 Locked — updates disabled</span>}
+            </div>
+            <div className="space-y-1">
+              {updates.map((u) => {
+                const key = `${instId}:${u.mod_jar_id}`;
+                return (
+                  <div key={u.mod_jar_id} className="flex items-center gap-2 text-xs">
+                    {!locked && (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(key)}
+                        onChange={() => toggleSelected(key)}
+                        className="rounded"
+                      />
+                    )}
+                    <span className="flex-1">{u.filename}</span>
+                    <span className="text-muted-foreground">{u.current_version} → <span className="text-primary">{u.latest_version}</span></span>
+                  </div>
+                );
+              })}
+            </div>
+            {!locked && (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    // Select/deselect all for this instance
+                    if (allSelected(updates, instId)) {
+                      updates.forEach((u) => selected.delete(`${instId}:${u.mod_jar_id}`));
+                      setSelected(new Set(selected));
+                    } else {
+                      updates.forEach((u) => selected.add(`${instId}:${u.mod_jar_id}`));
+                      setSelected(new Set(selected));
+                    }
+                  }}
+                  className="text-xs text-primary hover:underline"
+                >
+                  {allSelected(updates, instId) ? 'Deselect all' : 'Select all'}
+                </button>
+                {selectedCount > 0 && (
+                  <button
+                    onClick={() => setShowConfirm({ instanceId: instId, instanceName: inst?.name ?? instId, updates })}
+                    className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Update Selected ({selectedCount})
+                  </button>
+                )}
+                {selectedCount === 0 && (
+                  <button
+                    onClick={() => {
+                      updates.forEach((u) => selected.add(`${instId}:${u.mod_jar_id}`));
+                      setSelected(new Set(selected));
+                      setShowConfirm({ instanceId: instId, instanceName: inst?.name ?? instId, updates });
+                    }}
+                    className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Update All ({updates.length})
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {/* Update confirmation dialog */}
+      {showConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => { if (!updating) setShowConfirm(null); }}>
+          <div className="rounded-xl border border-border bg-card p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <h3 className="font-semibold mb-2">Update {showConfirm.updates.filter((u) => selected.has(`${showConfirm.instanceId}:${u.mod_jar_id}`) || selected.size === 0).length} mods?</h3>
+            <p className="text-xs text-muted-foreground mb-4">
+              Instance: {showConfirm.instanceName}
+            </p>
+            <ul className="text-xs space-y-1 mb-4 max-h-40 overflow-y-auto">
+              {showConfirm.updates
+                .filter((u) => selected.has(`${showConfirm.instanceId}:${u.mod_jar_id}`) || selected.size === 0)
+                .map((u) => (
+                  <li key={u.mod_jar_id} className="flex justify-between">
+                    <span>{u.filename}</span>
+                    <span className="text-muted-foreground">{u.current_version} → <span className="text-primary">{u.latest_version}</span></span>
+                  </li>
+                ))}
+            </ul>
+            <p className="text-xs text-muted-foreground mb-4">
+              A recovery snapshot will be created before updating. If any update fails, the snapshot will be restored.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowConfirm(null)}
+                disabled={updating}
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={applyUpdates}
+                disabled={updating}
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                {updating ? 'Updating…' : 'Update'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function CreateInstanceDialog({
   onClose,

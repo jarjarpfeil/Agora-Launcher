@@ -115,7 +115,7 @@ export function HealthDialog({ instanceId, instanceName, initialReport, onConfir
   const sc = scoreColors[effectiveScore];
 
   return (
-    <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
+    <Dialog open onOpenChange={(open) => { if (!open && !launching) onCancel(); }}>
       <DialogContent className="max-w-lg">
         <DialogTitle>Health Check</DialogTitle>
         <DialogDescription>

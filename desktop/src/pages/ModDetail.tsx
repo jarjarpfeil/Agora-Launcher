@@ -4,41 +4,42 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { defaultSchema, type Schema } from 'hast-util-sanitize';
 import {
+  formatError,
+  getAuthStatus,
+  getCuratedAnnotation,
+  getFlagRateLimit,
+  getGithubProfile,
+  getInstallPlan,
   getRegistryItem,
-  listInstances,
-  listModVersions,
-  listModVersionsLoadMore,
+  importModrinthPackByUrl,
   installModVersion,
+  installRawModrinth,
+  isModrinthEnabled,
+  listInstances,
   listLoaderVersions,
   listManifestLoaders,
   listManifestMcVersions,
-  createInstance,
-  formatError,
   listModReviews,
-  flagReview,
-  getFlagRateLimit,
-  getAuthStatus,
-  getGithubProfile,
-  getInstallPlan,
+  listModVersions,
+  listModVersionsLoadMore,
   listPackMods,
-  importModrinthPackByUrl,
-  type RegistryItem,
-  type InstanceRow,
-  type ModVersionCandidate,
+  listRawModrinthVersions,
+  flagReview,
+  createInstance,
+  fetchModrinthProject,
   type CreateInstanceRequest,
-  type ModReview,
+  type CuratedAnnotation,
   type FlagRateLimit,
   type InstallPlan,
-  type PackModRow,
-  fetchModrinthProject,
-  isModrinthEnabled,
-  type RawModrinthVersionCandidate,
-  listRawModrinthVersions,
-  installRawModrinth,
-  getCuratedAnnotation,
-  type CuratedAnnotation,
+  type InstanceRow,
+  type ModReview,
   type ModrinthProjectFull,
+  type ModVersionCandidate,
+  type PackModRow,
+  type RegistryItem,
+  type RawModrinthVersionCandidate,
 } from '../lib/tauri';
+import { InstallFlow } from '../components/InstallFlow';
 
 // Allowlist schema for rendering community/upstream markdown (Modrinth body).
 // Built on rehype-sanitize's default (already strips <script>, on* handlers,
@@ -685,6 +686,19 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     setDepPlan(null);
   };
 
+  const buildInstallIntent = (): import('../lib/installFlow').InstallIntent => ({
+    action: {
+      type: 'install',
+      sourceType: item?.modrinth_id ? 'modrinth' : 'curated',
+      itemId: item?.id ?? '',
+      candidateVersion: selectedModrinthCandidate?.version_id ?? selectedCandidate?.version ?? undefined,
+    },
+    targetInstance: selectedInstanceId ?? '',
+    optionalDeps: { type: 'exclude-all' },
+    requestedBy: 'interactive',
+    overrides: { allowReplace: false, skipHealthScan: false, forceConflictResolution: {} },
+  });
+
   // Inline create: submit handler
   const handleCreateInstance = async () => {
     setCreateBusy(true);
@@ -1220,6 +1234,15 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
             )}
           </section>
         )}
+
+        {/* InstallFlow — wraps the new canonical install pipeline */}
+        <InstallFlow
+          intent={buildInstallIntent()}
+          instanceName={instances.find((i) => i.instance_id === (selectedInstanceId ?? ''))?.name ?? ''}
+          onOpenInstance={onOpenInstanceEditor}
+          onClose={handleCloseInstallFlow}
+          open={showInstallFlow}
+        />
 
         {/* Pack-create dialog */}
         {showPackCreate && (

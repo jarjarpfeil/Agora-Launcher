@@ -189,6 +189,7 @@ export default function App() {
   // Render the HealthDialog at the App level so it survives page navigation.
   const {
     state: processState,
+    logs: processLogs,
     startLaunch,
     approveLaunch,
     cancelLaunch,
@@ -242,6 +243,7 @@ export default function App() {
                 <Instances
                   onEditInstance={(id) => navigateToInstanceDetail(id)}
                   processState={processState}
+                  processLogs={processLogs}
                   onStartLaunch={startLaunch}
                   onKillProcess={killProcess}
                 />

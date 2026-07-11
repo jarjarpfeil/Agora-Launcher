@@ -411,7 +411,7 @@ Tracking packages A1 through D5 from `Agora Desktop Upgrade.md`. Packages are co
 
 ### Release C — Canonical Safe-Install Infrastructure
 
-- [ ] **C0** — Install-transaction architecture (Sol architect)
+- [x] **C0** — Install-transaction architecture ✅ (Design in MASTER_SPEC.md §19.13.3, core types implemented)
 - [ ] **C1** — Read-only install-plan contract
 - [ ] **C2** — Transactional install execution
 - [ ] **C3** — One frontend install flow

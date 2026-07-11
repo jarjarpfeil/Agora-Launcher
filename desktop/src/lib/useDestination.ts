@@ -28,6 +28,15 @@ export interface UseDestinationReturn {
 
 const MAX_HISTORY = 50;
 
+function isValidDestination(d: unknown): d is Destination {
+  if (!d || typeof d !== 'object') return false;
+  const dest = d as Record<string, unknown>;
+  if (dest.type === 'tab') return typeof dest.tab === 'string';
+  if (dest.type === 'mod-detail') return typeof dest.itemId === 'string';
+  if (dest.type === 'instance-detail') return typeof dest.instanceId === 'string';
+  return false;
+}
+
 export function useDestination(): UseDestinationReturn {
   const historyRef = useRef<Destination[]>([{ type: 'tab', tab: 'home' }]);
   const [destination, setDestination] = useState<Destination>(historyRef.current[0]);
@@ -40,25 +49,34 @@ export function useDestination(): UseDestinationReturn {
     }
     setCanGoBack(historyRef.current.length > 1);
     setDestination(dest);
-    window.history.pushState(dest, '');
+    window.history.pushState({ __agora: dest }, '');
   }, []);
 
   // Handle browser back/forward via popstate.
   useEffect(() => {
-    // Seed the initial history entry so popstate restores the correct state.
-    window.history.replaceState(historyRef.current[0], '');
+    // Initialize from existing history state on page reload to preserve
+    // the destination across refreshes. Only write Home when no valid
+    // Agora destination exists in the history.
+    const existingState = window.history.state as Record<string, unknown> | null;
+    const restoredDest = existingState?.__agora as Destination | undefined;
+    if (restoredDest && isValidDestination(restoredDest)) {
+      historyRef.current[0] = restoredDest;
+      setDestination(restoredDest);
+      setCanGoBack(false);
+    } else {
+      window.history.replaceState({ __agora: historyRef.current[0] }, '');
+    }
 
     const handlePopState = (e: PopStateEvent) => {
-      if (e.state) {
-        const restored = e.state as Destination;
+      const state = e.state as Record<string, unknown> | null;
+      const restored = state?.__agora as Destination | undefined;
+      if (restored && isValidDestination(restored)) {
         setDestination(restored);
-        // Sync the history ref so follow-up forward/back is consistent.
         historyRef.current.push(restored);
         if (historyRef.current.length > MAX_HISTORY) {
           historyRef.current = historyRef.current.slice(-MAX_HISTORY);
         }
       } else {
-        // No state at all — fall back to home.
         setDestination({ type: 'tab', tab: 'home' });
       }
     };

@@ -5,6 +5,7 @@ import {
   killProcess,
   launchInstance,
   launchInstanceDirect,
+  queryLaunchState,
   formatError,
   type HealthReport,
 } from './tauri';
@@ -38,6 +39,8 @@ export interface ProcessState {
 
 export interface ProcessController {
   state: ProcessState;
+  /** Bounded log buffer for the tracked instance. */
+  logs: LogLine[];
   /** Start a health-gated launch. Shows the health dialog when warnings/blockers exist. */
   startLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
   /** Continue a launch after the user approved health warnings. Uses the mode captured in startLaunch. Returns null on success or an error string. */
@@ -59,10 +62,43 @@ const INITIAL_STATE: ProcessState = {
   directLaunch: false,
 };
 
+// Bounded log buffer per instance ID.
+const MAX_LOG_LINES = 5000;
+
+export interface LogLine {
+  line: string;
+  stream: 'stdout' | 'stderr';
+  instance_id: string;
+}
+
 export function useProcessController(): ProcessController {
   const [state, setState] = useState<ProcessState>(INITIAL_STATE);
+  const [logs, setLogs] = useState<LogLine[]>([]);
   const stateRef = useRef(state);
   stateRef.current = state;
+
+  // Hydrate from backend on mount — recover running state after reload.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const running = await queryLaunchState();
+        if (!cancelled && running) {
+          setState({
+            phase: 'running',
+            instanceId: running.instance_id,
+            pid: running.pid,
+            error: null,
+            healthReport: null,
+            directLaunch: true,
+          });
+        }
+      } catch {
+        // Backend unavailable — stay with default idle state.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Listen for game-exited events to clear running state.
   useEffect(() => {
@@ -83,8 +119,45 @@ export function useProcessController(): ProcessController {
     };
   }, []);
 
+  // Listen for game-log events and buffer them.
+  useEffect(() => {
+    const unlisten = listen<{ line: string; stream: string; instance_id: string }>(
+      'game-log',
+      (event) => {
+        const current = stateRef.current;
+        // Only buffer logs for the tracked instance.
+        if (current.instanceId !== event.payload.instance_id) return;
+        setLogs((prev) => {
+          const next = [...prev, {
+            line: event.payload.line,
+            stream: event.payload.stream as 'stdout' | 'stderr',
+            instance_id: event.payload.instance_id,
+          }];
+          if (next.length > MAX_LOG_LINES) {
+            return next.slice(-MAX_LOG_LINES);
+          }
+          return next;
+        });
+      },
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
   const startLaunch = useCallback(
     async (instanceId: string, directLaunch: boolean) => {
+      // Reject if any non-terminal phase is active (concurrent-launch guard).
+      const current = stateRef.current;
+      const activePhases: LaunchPhase[] = ['checking-health', 'awaiting-decision', 'launching', 'running'];
+      if (activePhases.includes(current.phase)) {
+        setState((prev) => ({
+          ...prev,
+          error: 'A launch is already in progress. Wait for it to complete before launching another instance.',
+        }));
+        return;
+      }
+
       setState({
         phase: 'checking-health',
         instanceId,
@@ -173,6 +246,7 @@ export function useProcessController(): ProcessController {
 
   return {
     state,
+    logs,
     startLaunch,
     approveLaunch,
     cancelLaunch,

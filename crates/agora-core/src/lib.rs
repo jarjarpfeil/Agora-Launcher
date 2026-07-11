@@ -33,6 +33,7 @@ pub mod java;
 pub mod launch;
 pub mod log_sanitizer;
 pub mod mod_cache;
+pub mod install_pipeline;
 pub mod snapshot;
 pub mod import;
 pub mod clone;

@@ -1,19 +1,19 @@
 # MASTER_SPEC.md
-# The Premium Curated Minecraft Mod Launcher — Complete Engineering Blueprint
+# The Premium Curated Minecraft Mod Launcher â€” Complete Engineering Blueprint
 
 > **This document is the single source of truth for the entire project. It is intended to be fed directly to an AI coding agent as unambiguous implementation context. Every architectural decision made across the full design session is captured here.**
 
-> **IMPLEMENTATION STATUS (last consolidated 2026-07-05):** The original design captured below is preserved verbatim for its decision-rationale value. Several architectural pivots have since landed in code and are documented in **§19 — Architectural Evolution & Implementation Status** (appended at the end). Where §19 conflicts with the original prose in §0–§18, **§19 wins** for the purposes of new work. The pivots in brief:
-> - **Pivot (E9):** The launcher now optionally performs **in-process Microsoft Account (MSA) authentication and direct JVM execution** (crates/agora-core/src/msa.rs, launch.rs). This is a deliberate expansion of the original *security by delegation* constraint in §0, motivated by the v1 launcher refactor — it enables in-launcher features (account sign-in, version manifest fetching) that the Mojang-launcher-delegation model cannot support. The Mojang-launcher-delegation path in §8 remains as a fallback; MSA + direct launch is the new primary path.
-> - **Workspace restructure (D12/E13):** Business logic is migrating into a shared Rust crate crates/agora-core/ consumed by both the Tauri GUI (desktop/src-tauri/, package name **gora-desktop**) and a standalone CLI (crates/agora/, binary gora). See §1.1 and §19 for migration status.
-> - **Modrinth unified into Browse (E4/D1):** The separate *Raw Modrinth tab / page* (originally described in §6.3) was removed — Modrinth search results are now merged directly into the Browse grid. The desktop/src/pages/ModrinthRaw.tsx file has been deleted.
-> - **Telemetry removed (E5/§12):** The opt-in crash telemetry (§12) had no aggregation endpoint and was never wired to a real upload path. The opt-in prompt UI and the crash_telemetry_opt_in setting have been deleted. The spec text in §12 is kept for historical reference only.
-> - **MCP server audit (A2/E2/E3):** The MCP server in desktop/src-tauri/src/mcp.rs is bound to 127.0.0.1:39741. Per the project pivot the per-session Bearer token from §10.0 #2 is **not yet implemented** (the localhost binding is the current security boundary). The tool set already implemented is the extended set (6 tools: list_instances, list_instance_mods, disable_mod, search_crash_signatures, suggest_mod_incompatibility, get_system_context) — the §10.1 set (
+> **IMPLEMENTATION STATUS (last consolidated 2026-07-05):** The original design captured below is preserved verbatim for its decision-rationale value. Several architectural pivots have since landed in code and are documented in **Â§19 â€” Architectural Evolution & Implementation Status** (appended at the end). Where Â§19 conflicts with the original prose in Â§0â€“Â§18, **Â§19 wins** for the purposes of new work. The pivots in brief:
+> - **Pivot (E9):** The launcher now optionally performs **in-process Microsoft Account (MSA) authentication and direct JVM execution** (crates/agora-core/src/msa.rs, launch.rs). This is a deliberate expansion of the original *security by delegation* constraint in Â§0, motivated by the v1 launcher refactor â€” it enables in-launcher features (account sign-in, version manifest fetching) that the Mojang-launcher-delegation model cannot support. The Mojang-launcher-delegation path in Â§8 remains as a fallback; MSA + direct launch is the new primary path.
+> - **Workspace restructure (D12/E13):** Business logic is migrating into a shared Rust crate crates/agora-core/ consumed by both the Tauri GUI (desktop/src-tauri/, package name **gora-desktop**) and a standalone CLI (crates/agora/, binary gora). See Â§1.1 and Â§19 for migration status.
+> - **Modrinth unified into Browse (E4/D1):** The separate *Raw Modrinth tab / page* (originally described in Â§6.3) was removed â€” Modrinth search results are now merged directly into the Browse grid. The desktop/src/pages/ModrinthRaw.tsx file has been deleted.
+> - **Telemetry removed (E5/Â§12):** The opt-in crash telemetry (Â§12) had no aggregation endpoint and was never wired to a real upload path. The opt-in prompt UI and the crash_telemetry_opt_in setting have been deleted. The spec text in Â§12 is kept for historical reference only.
+> - **MCP server audit (A2/E2/E3):** The MCP server in desktop/src-tauri/src/mcp.rs is bound to 127.0.0.1:39741. Per the project pivot the per-session Bearer token from Â§10.0 #2 is **not yet implemented** (the localhost binding is the current security boundary). The tool set already implemented is the extended set (6 tools: list_instances, list_instance_mods, disable_mod, search_crash_signatures, suggest_mod_incompatibility, get_system_context) â€” the Â§10.1 set (
 ead_latest_crash, 
 ead_mod_manifest, enable_mod, search_knowledge_base) is planned to be added as a superset per user decision.
-> - **Old plan files removed:** .kilo/plans/1782081355093-crash-investigator-plan.md, 1782611768583-agora-v1-launcher-refactor.md, and dependency-aware-mod-ops-plan.md have been deleted; their key decisions are folded into §19.
+> - **Old plan files removed:** .kilo/plans/1782081355093-crash-investigator-plan.md, 1782611768583-agora-v1-launcher-refactor.md, and dependency-aware-mod-ops-plan.md have been deleted; their key decisions are folded into Â§19.
 
-> **The original §0–§18 design spec follows below. For current code status, jump to §19.**
+> **The original Â§0â€“Â§18 design spec follows below. For current code status, jump to Â§19.**
 
 ---
 
@@ -22,7 +22,7 @@ ead_mod_manifest, enable_mod, search_knowledge_base) is planned to be added as a
 
 ## Table of Contents
 
-| § | Title | Purpose |
+| Â§ | Title | Purpose |
 |---|---|---|
 | 0 | Project Ethos & Philosophy | Mission, constraints, tech stack |
 | 1 | Repository Structure | Flat-file "database" in GitHub |
@@ -38,7 +38,7 @@ ead_mod_manifest, enable_mod, search_knowledge_base) is planned to be added as a
 | 11 | Dev Mode | Curator tool with sandboxed builds |
 | 12 | Anonymous Crash Telemetry | Opt-in crash matrix |
 | 13 | Web Directory | Static Next.js site |
-| 14 | Build Execution Pipeline | AI agent module prompts (1–7) |
+| 14 | Build Execution Pipeline | AI agent module prompts (1â€“7) |
 | 15 | Security Architecture | Threat model, security principles |
 | 16 | Technical Decisions Log | All architectural decisions with rationale |
 | 17 | Implementation Order & MVP Scope | Phased build guide |
@@ -60,8 +60,8 @@ If CurseForge were a beer, this would be Agora.
 - **Security by Delegation.** The application never touches Microsoft/Xbox authentication or JVM execution. These are fully delegated to the official Mojang launcher.
 - **Decentralized by Design.** All social data (votes, reviews, governance) lives as structured GitHub interactions. All application data is compiled into a static file served via GitHub Release Assets.
 - **AI Agent-Friendly.** The codebase must be broken into isolated, deterministic modules that AI tools can write, test, and debug independently.
-- **Client-Side Scalability.** All GitHub API calls are made using the user's personal OAuth token, giving each user 5,000 requests/hour — meaning the platform scales infinitely at zero cost.
-- **Modrinth Independence.** The primary download strategy is `github_release` — mods are sourced directly from developer GitHub repositories. `modrinth_id` is a supplementary fallback for mods that are not yet self-hosting. Users can disable all Modrinth API integration entirely and still use the full curated catalog, discovery, and instance management features.
+- **Client-Side Scalability.** All GitHub API calls are made using the user's personal OAuth token, giving each user 5,000 requests/hour â€” meaning the platform scales infinitely at zero cost.
+- **Modrinth Independence.** The primary download strategy is `github_release` â€” mods are sourced directly from developer GitHub repositories. `modrinth_id` is a supplementary fallback for mods that are not yet self-hosting. Users can disable all Modrinth API integration entirely and still use the full curated catalog, discovery, and instance management features.
 
 ### Tech Stack
 | Layer | Technology |
@@ -104,14 +104,14 @@ The central GitHub repository is the "database." All data is flat files committe
     poll_blacklist.json     # Banned/bot GitHub usernames; zero-weight in polls
   pack-overrides/
     optimized-survival-configs.zip   # Config/resource overrides; NO executables
-  archived/                  # Items removed by community triage (see §5.3)
+  archived/                  # Items removed by community triage (see Â§5.3)
     removed-mod.json
 /crash-signatures/
   fabric-api-missing.json
   out-of-memory.json
   ...
 /loader-manifests/
-  fabric-1.21.json          # Pinned modloader URLs + SHA-256 hashes (see §8.2.1)
+  fabric-1.21.json          # Pinned modloader URLs + SHA-256 hashes (see Â§8.2.1)
   neoforge-1.21.json
   ...
 /.github/
@@ -120,11 +120,11 @@ The central GitHub repository is the "database." All data is flat files committe
   ISSUE_TEMPLATE/
     review-form.yml         # Structured review submission form
     mod-submission.yml      # New mod PR template
-README.md                   # Code of Engagement (full text, see §5)
+README.md                   # Code of Engagement (full text, see Â§5)
 ```
 
 **Separate Repositories:**
-- `launcher-media` — Custom promotional banners and images served via GitHub Pages (see §4 Image and Media Handling). Not part of the main registry repo to avoid binary bloat.
+- `launcher-media` â€” Custom promotional banners and images served via GitHub Pages (see Â§4 Image and Media Handling). Not part of the main registry repo to avoid binary bloat.
 
 ---
 
@@ -166,7 +166,7 @@ README.md                   # Code of Engagement (full text, see §5)
 | `content_type` | string | `mod`, `pack`, `shader`, `resourcepack`, `server`, `datapack`, `world` |
 | `author` | string | Creator or organization name |
 | `license` | string | SPDX license identifier (e.g., `MIT`, `LGPL-3.0`) |
-| `download_strategy` | string | `github_release` (primary — direct from developer repo), `modrinth_id` (supplementary fallback — via Modrinth API), `direct_hash` (for closed-source/self-hosted) |
+| `download_strategy` | string | `github_release` (primary â€” direct from developer repo), `modrinth_id` (supplementary fallback â€” via Modrinth API), `direct_hash` (for closed-source/self-hosted) |
 | `source_identifier` | string | GitHub `owner/repo`, Modrinth project ID, or direct URL |
 | `sha256` | string | **Required for all strategies.** SHA-256 hash of the downloadable file. For `github_release`, the compiler populates from release asset metadata. For `modrinth_id`, the compiler populates from the Modrinth API. For `direct_hash`, manually provided by the developer. The launcher rejects any download where the computed hash does not match. |
 | `package_signatures` | string[] | Java package prefixes for crash log cross-referencing. Note: multiple mods may transitively share package prefixes (e.g., `net.fabricmc`). The crash resolver uses these as an initial filter, then narrows down using class names from the stack trace and the instance's installed mod list. |
@@ -269,11 +269,11 @@ Community-submitted regex patterns create a ReDoS (Regular Expression Denial of 
 
 **Countermeasures:**
 
-1. **Rust `regex` Crate Only:** The Rust `regex` crate is *the only* regex engine permitted. It intentionally does not support unbounded backtracking — patterns that would cause exponential backtracking instead return an error at compile time or run in guaranteed linear time. This structurally prevents the most dangerous class of ReDoS attacks.
+1. **Rust `regex` Crate Only:** The Rust `regex` crate is *the only* regex engine permitted. It intentionally does not support unbounded backtracking â€” patterns that would cause exponential backtracking instead return an error at compile time or run in guaranteed linear time. This structurally prevents the most dangerous class of ReDoS attacks.
 
 2. **Maximum Regex Length:** All submitted `regex_pattern` values are limited to **256 characters**. This prevents extremely complex patterns that could still cause performance issues even under the Rust regex engine's constraints.
 
-3. **PR Review Enforcement:** Curators must test every new crash signature against a representative crash log (≥100KB) before merging. The compilation CI rejects any pattern that takes longer than **50ms** to evaluate against the test corpus.
+3. **PR Review Enforcement:** Curators must test every new crash signature against a representative crash log (â‰¥100KB) before merging. The compilation CI rejects any pattern that takes longer than **50ms** to evaluate against the test corpus.
 
 4. **Compiled Regex Caching:** The Tauri client pre-compiles all `crash_signatures` patterns on startup and caches them in memory. Matching is then a simple linear scan with no per-match compilation overhead.
 
@@ -292,7 +292,7 @@ Community-submitted regex patterns create a ReDoS (Regular Expression Denial of 
 
 2. **Parse all manifest JSON files** in `registry/mods/`, `registry/packs/`, etc. Items in `registry/archived/` are explicitly skipped and excluded from the compiled database.
 
-3. **API Batch Fetch with Complexity Budgeting** — Query the GitHub API for all tracked Issues:
+3. **API Batch Fetch with Complexity Budgeting** â€” Query the GitHub API for all tracked Issues:
    - For reaction counts: Use the GitHub **REST API** `GET /repos/{owner}/{repo}/issues/{issue_number}/reactions` where more efficient (cheaper than GraphQL per-item queries).
    - For comments: Use GraphQL with `pageInfo` cursors. Budget approximately 100 items per query to stay well under the 5,000 complexity-point/hour limit.
    - Pull comment text for all `[REVIEW]`-tagged comments.
@@ -307,25 +307,25 @@ Community-submitted regex patterns create a ReDoS (Regular Expression Denial of 
    **Sybil Attack Resistance:** The base thresholds (30-day age + 3 comments) are cheap for bot farms to overcome at scale (create 1000 accounts, wait 30 days, leave 3 comments each). To mitigate this without disenfranchising legitimate users:
     - **Velocity weighting:** A single user's vote weight is capped relative to the historical daily average vote volume for that item. If an item typically receives 5 votes/day and suddenly receives 100 from new accounts in a 6-hour window, each of those votes is weighted down proportionally rather than counted at full weight.
     - **Account diversity bonus:** Vote weight receives a small multiplier if the account has a demonstrated history of participating in *different* issues/repositories (not just the targeted one). Accounts that only vote on a single item are treated with suspicion.
-    - **Curator escalation:** If the compiler detects more than 50 new accounts voting on the same item within 24 hours—all passing the base trust check—it flags the item for curator review and applies the velocity anomaly detection (Step 5) even if the raw threshold hasn't been met.
+    - **Curator escalation:** If the compiler detects more than 50 new accounts voting on the same item within 24 hoursâ€”all passing the base trust checkâ€”it flags the item for curator review and applies the velocity anomaly detection (Step 5) even if the raw threshold hasn't been met.
 
 5. **Velocity Anomaly Detection (Circuit Breaker):**
    ```
    if (recent_downvotes / historical_average) > 5.0 AND total_recent > 20:
-       → set status = 'under_review'
-       → freeze vote counts at pre-spike values
-       → trigger GitHub Discussions Triage Poll (see §5.3)
+       â†’ set status = 'under_review'
+       â†’ freeze vote counts at pre-spike values
+       â†’ trigger GitHub Discussions Triage Poll (see Â§5.3)
    ```
    "Recent" is defined as the past 6-hour window. Historical average is the rolling 7-day mean.
 
-6. **Programmatic Reaction Scrubbing** — If the circuit breaker fires on a burst window:
+6. **Programmatic Reaction Scrubbing** â€” If the circuit breaker fires on a burst window:
     - Use `DELETE /repos/{owner}/{repo}/issues/comments/{comment_id}/reactions/{reaction_id}` to remove the malicious downvotes from GitHub.
     - Log offending usernames to `registry/governance/poll_blacklist.json`.
     - For extreme cases: the compiler creates a high-priority confidential issue in the private admin repo with title `[ALERT] Coordinated Attack Detected` and lists offending usernames for manual curator review and org-level action.
 
 **Compiler API Permissions:** The nightly compiler requires `issues:write` (to delete malicious reactions and create curator alerts) and `discussions:write` (to create triage polls). These are granted via the `GITHUB_TOKEN` in the Action workflow with `permissions: issues: write, discussions: write` in the YAML.
 
-7. **Sentiment & Spam Scrubbing** — Every comment that passes trust filtering is then evaluated:
+7. **Sentiment & Spam Scrubbing** â€” Every comment that passes trust filtering is then evaluated:
    - **Regex filters (discard matching):**
      - Version begging: `(?i)(when\s+is|update\s+to|for|port|1\.\d+)\s*(release|\?|when)`
      - Empty praise: `^(good\s+mod|nice|cool|pog|great|wow)$`
@@ -333,7 +333,7 @@ Community-submitted regex patterns create a ReDoS (Regular Expression Denial of 
    - **`vaderSentiment` (Python NLP):** Scores positivity/negativity. Discards comments with extreme aggression intensity scores even if profanity-check passes.
    - Comments surviving all filters are included in the compiled SQLite `curator_reviews` table.
 
-8. **Under-Review State Resolution** — For items where a 7-day triage poll has expired:
+8. **Under-Review State Resolution** â€” For items where a 7-day triage poll has expired:
    - Parse poll results using GitHub Discussions API.
    - Any vote cast by a user in `poll_blacklist.json` is counted at weight 0.
    - **If "Remove" wins:** Archive item. Remove from all future builds. JSON file is moved to `registry/archived/`.
@@ -343,7 +343,7 @@ Community-submitted regex patterns create a ReDoS (Regular Expression Denial of 
 
 10. **SQLite Compilation:** Build `registry.db` from the in-memory state.
 
-11. **Image URL Hydration:** For mods with `download_strategy = "github_release"`, curators provide `icon_url` and `gallery_urls` directly in the manifest (e.g., pointing to `raw.githubusercontent.com` asset paths). For `modrinth_id` mods, the compiler queries the Modrinth API via the batch endpoint `GET /v2/projects?ids=[...]` (up to 500 IDs per request) to extract icon/gallery URLs. For non-Modrinth, non-GitHub items, curators provide image URLs manually. If custom promotional banners are needed, upload those assets to the dedicated `launcher-media` repository served via GitHub Pages. **The database never holds binary image data — only URL strings pointing to CDN-hosted images.**
+11. **Image URL Hydration:** For mods with `download_strategy = "github_release"`, curators provide `icon_url` and `gallery_urls` directly in the manifest (e.g., pointing to `raw.githubusercontent.com` asset paths). For `modrinth_id` mods, the compiler queries the Modrinth API via the batch endpoint `GET /v2/projects?ids=[...]` (up to 500 IDs per request) to extract icon/gallery URLs. For non-Modrinth, non-GitHub items, curators provide image URLs manually. If custom promotional banners are needed, upload those assets to the dedicated `launcher-media` repository served via GitHub Pages. **The database never holds binary image data â€” only URL strings pointing to CDN-hosted images.**
 
 12. **Database Signing:** Sign the compiled `registry.db` with the project's offline Ed25519 private key. Write the signature to `registry.db.sig`. This allows the Tauri client to verify database authenticity and detect a compromised GitHub account distributing a malicious build.
 
@@ -353,7 +353,7 @@ Community-submitted regex patterns create a ReDoS (Regular Expression Denial of 
 
 If a major internet event causes a coordinated mass-attack:
 - GitHub's native Interaction Limits can be programmatically enabled via API.
-- Setting: "Limit to existing users" — only accounts with prior interactions can comment or react.
+- Setting: "Limit to existing users" â€” only accounts with prior interactions can comment or react.
 - This can be toggled by the compiler when a velocity anomaly is detected without requiring human intervention.
 
 ---
@@ -362,9 +362,9 @@ If a major internet event causes a coordinated mass-attack:
 
 The launcher maintains **two separate SQLite databases**:
 
-1. **`registry.db`** — Read-only global state downloaded from GitHub Release Assets. This database is treated as immutable by the launcher. It contains curated mod metadata, social metrics, categories, crash signatures, and curated reviews. The launcher never writes to this file.
+1. **`registry.db`** â€” Read-only global state downloaded from GitHub Release Assets. This database is treated as immutable by the launcher. It contains curated mod metadata, social metrics, categories, crash signatures, and curated reviews. The launcher never writes to this file.
 
-2. **`local_state.db`** — Read-write local state stored in the user's app data directory (`%APPDATA%/agora-mc/local_state.db`, etc.). This contains user settings, instance metadata, launch history, crash telemetry, MCP approval grants, cached registry release tag, and any other mutable application state.
+2. **`local_state.db`** â€” Read-write local state stored in the user's app data directory (`%APPDATA%/agora-mc/local_state.db`, etc.). This contains user settings, instance metadata, launch history, crash telemetry, MCP approval grants, cached registry release tag, and any other mutable application state.
 
 **Why the Split:**
 - Prevents file-system locking bugs where a downloaded read-only database competes with runtime writes.
@@ -408,7 +408,7 @@ The launcher maintains **two separate SQLite databases**:
 The database **never stores binary image data**. All images are hotlinked via URL strings:
 
 1. **GitHub Release Assets:** For `github_release` mods, curators typically point `icon_url` to `raw.githubusercontent.com` paths within the developer's repo (e.g., `assets/icon.png` on the default branch), or to the `launcher-media` repo for custom promotional assets.
-2. **Modrinth CDN:** For `modrinth_id` mods, the nightly compiler queries the Modrinth API and extracts project icon/gallery URLs. This is the **supplementary** path — used when a mod is not yet self-hosting on GitHub.
+2. **Modrinth CDN:** For `modrinth_id` mods, the nightly compiler queries the Modrinth API and extracts project icon/gallery URLs. This is the **supplementary** path â€” used when a mod is not yet self-hosting on GitHub.
 3. **Custom Assets:** For curated packs or items not on GitHub or Modrinth, curators provide image URLs directly in the manifest. Custom promotional banners are uploaded to the `launcher-media` repository served via GitHub Pages.
 4. **Client-Side Caching:** The Tauri app may cache downloaded images locally for offline display, but the source of truth is always the URL in the database.
 
@@ -422,13 +422,13 @@ The database **never stores binary image data**. All images are hotlinked via UR
 ### Table: `item_categories` (Junction)
 | Column | Type | Constraints |
 |---|---|---|
-| `item_id` | TEXT | FK → `registry_items(id)` |
-| `category_id` | TEXT | FK → `categories(id)` |
+| `item_id` | TEXT | FK â†’ `registry_items(id)` |
+| `category_id` | TEXT | FK â†’ `categories(id)` |
 
 ### Table: `curator_reviews`
 | Column | Type | Description |
 |---|---|---|
-| `item_id` | TEXT | FK → `registry_items(id)` |
+| `item_id` | TEXT | FK â†’ `registry_items(id)` |
 | `curator_note` | TEXT | Markdown write-up from the curator team |
 | `top_reviews_json` | TEXT | JSON array of top community comments (survived NLP filtering) |
 
@@ -441,7 +441,7 @@ The database **never stores binary image data**. All images are hotlinked via UR
 | `solution_markdown` | TEXT | User-facing fix description |
 | `action_button_json` | TEXT | JSON: `{ "label": "...", "mod_id": "..." }` |
 
-**Note on Mutable State:** User instances, crash telemetry, settings, and MCP approval grants are **not** stored in `registry.db`. They live in the separate `local_state.db` database defined in §4.1b. This split ensures `registry.db` is read-only and replaceable at runtime without data loss.
+**Note on Mutable State:** User instances, crash telemetry, settings, and MCP approval grants are **not** stored in `registry.db`. They live in the separate `local_state.db` database defined in Â§4.1b. This split ensures `registry.db` is read-only and replaceable at runtime without data loss.
 
 #### Schema Versioning
 | Column | Type | Description |
@@ -540,7 +540,7 @@ Stores: active sidebar tab, last-selected Minecraft version, JVM defaults, UI th
 | `granted_at` | TEXT | ISO timestamp |
 | `expires_at` | TEXT | ISO timestamp or NULL |
 
-When a user selects "Always Allow for This Tool" in the approval dialog, the grant is stored here with `state = 'approved_always'`. This prevents repeated prompts across app restarts. Grants can be revoked by the user in Settings → Integrations → MCP Server → "Clear Tool Approvals."
+When a user selects "Always Allow for This Tool" in the approval dialog, the grant is stored here with `state = 'approved_always'`. This prevents repeated prompts across app restarts. Grants can be revoked by the user in Settings â†’ Integrations â†’ MCP Server â†’ "Clear Tool Approvals."
 
 #### Schema Versioning for `local_state.db`
 | Column | Type | Description |
@@ -553,7 +553,7 @@ The launcher runs a Rust-based migration runner on startup. Migrations are appli
 
 All data sourced from SQLite is **untrusted**. Curator notes, review text, category names, and crash signature markdown all originate from community input that survived NLP filtering but may still contain malicious markup. The following rendering rules are mandatory:
 
-1. **React Frontend:** The Tauri React UI must **never** use `dangerouslySetInnerHTML` for any user/community-sourced content. All output is rendered via React's default JSX escaping, which HTML-encodes all special characters. Curator notes are rendered as plain text with a custom lightweight markdown parser that only supports bold, italic, code blocks, and links — no raw HTML passthrough.
+1. **React Frontend:** The Tauri React UI must **never** use `dangerouslySetInnerHTML` for any user/community-sourced content. All output is rendered via React's default JSX escaping, which HTML-encodes all special characters. Curator notes are rendered as plain text with a custom lightweight markdown parser that only supports bold, italic, code blocks, and links â€” no raw HTML passthrough.
 
 2. **Next.js Web Directory:** The static website must render all SQLite-sourced text safely. Use `react-markdown` with a strict `allowedElements` list (`p`, `strong`, `em`, `code`, `a`, `pre`, `ul`, `ol`, `li`) and `disallowedElements={['html']}` to structurally prevent raw HTML generation. If raw HTML can never be emitted, there is nothing to sanitize. No `<script>`, `<iframe>`, `<object>`, `<embed>`, or event handler attributes are permitted.
 
@@ -565,7 +565,7 @@ General app settings are stored in `user_settings` table in `local_state.db`. Ra
 
 Settings include: active sidebar tab, last-selected Minecraft version, JVM defaults, UI theme, notification preferences, telemetry opt-in, MCP server port, cached registry release tag, cached Mojang launcher path, Modrinth integration toggle, AI/MCP integration toggle, and MCP approval grants.
 
-**Settings are editable on the fly** — the Settings tab writes to `tauri-plugin-store` immediately, which asynchronously syncs to `local_state.db`. Components subscribing to store values update immediately.
+**Settings are editable on the fly** â€” the Settings tab writes to `tauri-plugin-store` immediately, which asynchronously syncs to `local_state.db`. Components subscribing to store values update immediately.
 
 ### 4.3 Offline / Degraded Mode
 
@@ -578,7 +578,7 @@ If the launcher cannot reach GitHub Releases to fetch or update `registry.db`, i
 - GitHub is blocked by regional firewall or ISP.
 
 **Degraded Mode Behavior:**
-1. A persistent banner appears at the top of the app: *"⚠️ Registry Offline — Running in Degraded Mode. Curated catalog may be outdated."*
+1. A persistent banner appears at the top of the app: *"âš ï¸ Registry Offline â€” Running in Degraded Mode. Curated catalog may be outdated."*
 2. The launcher uses the last cached `registry.db` (even if older than 7 days).
 3. The **My Instances** tab is fully functional. Users can launch existing instances because `local_state.db` and `instance_manifest.json` files are intact.
 4. The **Browse** tab shows curated mods from the cached DB. Mods with `download_strategy = 'modrinth_id'` are filtered out if Modrinth integration is disabled; if Modrinth is enabled, they remain visible but show a warning that registry metadata may be stale.
@@ -652,16 +652,16 @@ The Rust backend communicates errors to the React UI using standardized error co
 | `ERR_DISKFULL` | Warning | *"Not enough disk space to complete this operation."* | Show required vs available space; abort before writing |
 | `ERR_AUTH_EXPIRED` | Warning | *"Your GitHub session has expired. Sign in again to continue."* | Prompt OAuth Device Flow again |
 | `ERR_AUTH_REQUIRED` | Info | *"This feature requires GitHub sign-in."* | Show sign-in button |
-| `ERR_MODRINTH_DISABLED` | Info | *"Modrinth integration is disabled. Enable it in Settings or install this mod manually."* | Open Settings → Integrations or drag-and-drop panel |
+| `ERR_MODRINTH_DISABLED` | Info | *"Modrinth integration is disabled. Enable it in Settings or install this mod manually."* | Open Settings â†’ Integrations or drag-and-drop panel |
 | `ERR_INSTANCE_LOCKED` | Info | *"This instance is locked. Unlock it to add or remove mods."* | Show unlock confirmation dialog |
 | `ERR_SANDBOX_UNAVAILABLE` | Error | *"Dev Mode builds require Docker, Podman, or Firecracker."* | Link to sandbox setup guide |
-| `ERR_MOJANG_NOT_FOUND` | Error | *"Minecraft Launcher not found. Please install it or set its path in Settings."* | Open Settings → Launcher Path |
+| `ERR_MOJANG_NOT_FOUND` | Error | *"Minecraft Launcher not found. Please install it or set its path in Settings."* | Open Settings â†’ Launcher Path |
 | `ERR_LAUNCH_FAILED` | Error | *"Could not start Minecraft. Check the logs for details."* | Open Diagnostics / Logs tab |
 | `ERR_UNSUPPORTED_LOADER` | Error | *"This modloader version is not yet verified by the curation team."* | Wait for registry update |
 | `ERR_VERSION_NOT_FOUND` | Warning | *"Requested mod version not found. Install the closest compatible version?"* | Show fallback version picker |
 | `ERR_DEPENDENCY_MISSING` | Warning | *"A mod requires [dependency]. Try installing it?"* | Offer auto-install from crash signature or manual search |
 | `ERR_MCP_TOO_MANY_REQUESTS` | Warning | *"AI client sent too many requests. Approve or deny pending requests first."* | Show MCP approvals queue |
-| `ERR_MCP_DENIED` | Info | *"AI tool request denied based on your saved approval preferences."* | No action — call was explicitly blocked |
+| `ERR_MCP_DENIED` | Info | *"AI tool request denied based on your saved approval preferences."* | No action â€” call was explicitly blocked |
 | `ERR_MCP_UNAUTHORIZED` | Error | *"AI client connection rejected: invalid or missing token."* | Show current token in Settings |
 
 **Error Response Shape (JSON-RPC and Tauri commands):**
@@ -744,16 +744,16 @@ The compiler generates an append-only **`/governance/audit_log.json`** file in t
 ```
 
 **Action Types:**
-- `AUTO_FLAG` — Circuit breaker fired, item marked under_review
-- `POLL_CREATED` — GitHub Discussion triage poll created
-- `POLL_CLOSED` — Poll expired, results recorded
-- `IMMUNITY_APPLIED` — Curator applied immune override
-- `IMMUNITY_REMOVED` — Curator removed immune override
-- `ARCHIVED` — Item removed from registry by community vote
-- `RESTORED` — Item restored after successful "Keep" vote
-- `BLACKLIST_UPDATED` — Username added to `poll_blacklist.json`
-- `REACTION_SCRUBBED` — Malicious reaction deleted by compiler
-- `SIGNATURE_REJECTED` — Registry signature failed verification (logged by client, submitted via telemetry)
+- `AUTO_FLAG` â€” Circuit breaker fired, item marked under_review
+- `POLL_CREATED` â€” GitHub Discussion triage poll created
+- `POLL_CLOSED` â€” Poll expired, results recorded
+- `IMMUNITY_APPLIED` â€” Curator applied immune override
+- `IMMUNITY_REMOVED` â€” Curator removed immune override
+- `ARCHIVED` â€” Item removed from registry by community vote
+- `RESTORED` â€” Item restored after successful "Keep" vote
+- `BLACKLIST_UPDATED` â€” Username added to `poll_blacklist.json`
+- `REACTION_SCRUBBED` â€” Malicious reaction deleted by compiler
+- `SIGNATURE_REJECTED` â€” Registry signature failed verification (logged by client, submitted via telemetry)
 
 **Retention:** The audit log is appended to nightly. When it exceeds 10,000 entries, the oldest 2,000 entries are moved to `/governance/audit_log_archive.{YYYYMMDD}.json`. The current log and the last 3 archived logs are included in `registry.db` as `audit_log_json` for in-app display in the Triage Center "Transparency Log" panel.
 
@@ -766,13 +766,13 @@ The compiler generates an append-only **`/governance/audit_log.json`** file in t
 The following text appears verbatim in three places:
 1. The central repository's `README.md`
 2. The GitHub Issue Form header (`review-form.yml`)
-3. The Tauri "Write a Review" modal — the user must check a consent box before the Submit button becomes active
+3. The Tauri "Write a Review" modal â€” the user must check a consent box before the Submit button becomes active
 
 The canonical text lives in `CODE_OF_ENGAGEMENT.md` at the repository root. A CI workflow copies this file into the three required locations during the nightly build. This ensures a single source of truth.
 
 ---
 
-> **📜 Platform Code of Engagement**
+> **ðŸ“œ Platform Code of Engagement**
 >
 > This platform is a curated asset repository, not a general discussion forum or social media feed. We built this ecosystem to keep modding open, high-quality, and hyper-focused.
 >
@@ -784,7 +784,7 @@ The canonical text lives in `CODE_OF_ENGAGEMENT.md` at the repository root. A CI
 > - Violations result in immediate and permanent removal from the registry's review system.
 >
 > If you want to socialize, share memes, or debate off-topic things, visit our community spaces instead:
-> 🔗 [Project Discord] | 🔗 [Project Matrix/Lemmy]
+> ðŸ”— [Project Discord] | ðŸ”— [Project Matrix/Lemmy]
 
 ---
 
@@ -798,7 +798,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        ### 🚨 STOP: Read the Code of Engagement above before continuing.
+        ### ðŸš¨ STOP: Read the Code of Engagement above before continuing.
         Reviews must be strictly focused on technical stability, performance, and features.
         Zero tolerance for version begging, memes, politics, or low-effort filler.
   - type: input
@@ -828,20 +828,20 @@ body:
 
 ```
 [Active Status]
-      │
-      ▼ (Net score drops below -10 organically, OR velocity spike detected)
+      â”‚
+      â–¼ (Net score drops below -10 organically, OR velocity spike detected)
 [Flagged / Under Review]
-      │ 
-      │ → Mod stays downloadable with warning banner
-      │ → GitHub Action auto-creates a 7-day Discussion poll:
-      │     Title: "[Community Triage] Should '<Mod Name>' be removed from the registry?"
-      │     Options: [Keep] / [Remove]
-      │ → Votes from poll_blacklist.json users are counted at weight 0
-      │
-      ▼ (7 days pass)
-      ├── [REMOVE wins] → Item archived. JSON moved to /registry/archived/. Removed from all future builds.
-      │
-      └── [KEEP wins] → status = 'active'. immunity_cooldown set to +30 days. Triage paused.
+      â”‚ 
+      â”‚ â†’ Mod stays downloadable with warning banner
+      â”‚ â†’ GitHub Action auto-creates a 7-day Discussion poll:
+      â”‚     Title: "[Community Triage] Should '<Mod Name>' be removed from the registry?"
+      â”‚     Options: [Keep] / [Remove]
+      â”‚ â†’ Votes from poll_blacklist.json users are counted at weight 0
+      â”‚
+      â–¼ (7 days pass)
+      â”œâ”€â”€ [REMOVE wins] â†’ Item archived. JSON moved to /registry/archived/. Removed from all future builds.
+      â”‚
+      â””â”€â”€ [KEEP wins] â†’ status = 'active'. immunity_cooldown set to +30 days. Triage paused.
 ```
 
 ### 5.4 Curator Immune Override
@@ -862,45 +862,45 @@ When `immune = true`:
 - The client UI renders a permanent non-dismissible **Curator Shield** banner (steel blue/gray, not warning red/yellow) at the very top of the mod's profile page, above the download button:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  🛡️ CURATOR PROTECTED ASSET                                     │
-├─────────────────────────────────────────────────────────────────┤
-│  This mod is permanently exempt from automated community triage │
-│  and negative review penalties.                                 │
-│                                                                 │
-│  Reasoning from the Curators:                                   │
-│  "[override_justification text rendered verbatim here]"         │
-└─────────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  ðŸ›¡ï¸ CURATOR PROTECTED ASSET                                     â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚  This mod is permanently exempt from automated community triage â”‚
+â”‚  and negative review penalties.                                 â”‚
+â”‚                                                                 â”‚
+â”‚  Reasoning from the Curators:                                   â”‚
+â”‚  "[override_justification text rendered verbatim here]"         â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
-- The "Upvote / Downvote" buttons are **removed** from the UI (not just greyed out — the user should not be screaming into a void).
+- The "Upvote / Downvote" buttons are **removed** from the UI (not just greyed out â€” the user should not be screaming into a void).
 - If `allow_comments = false`, the review section is hidden with: *"Review section locked by administration."*
-- This banner is **conditional** — it only renders if `is_immune = 1`. No visual clutter for non-immune items.
+- This banner is **conditional** â€” it only renders if `is_immune = 1`. No visual clutter for non-immune items.
 
 ### 5.5 In-App Comment Reporting
 
-The launcher's UI includes a "🚩 Flag Review" button on every comment. This must be rate-limited to prevent abuse.
+The launcher's UI includes a "ðŸš© Flag Review" button on every comment. This must be rate-limited to prevent abuse.
 
 **Rate Limiting:** Each user is limited to **5 flag submissions per hour** and **20 per day**. If the limit is exceeded, the flag button is greyed out with a tooltip showing when the limit resets. This prevents a single user from generating thousands of admin tickets.
 
 ```
-[User clicks 🚩 on a comment in the launcher]
-        │
-        ▼
-[Rate limit check — if exceeded, block and show cooldown timer]
-        │
-        ▼
+[User clicks ðŸš© on a comment in the launcher]
+        â”‚
+        â–¼
+[Rate limit check â€” if exceeded, block and show cooldown timer]
+        â”‚
+        â–¼
 [Tauri app creates a GitHub Issue directly via the GitHub REST API]
   Target: Private admin repo (e.g., `agora-mc/admin-alerts`)
   Using: The user's OAuth token with `public_repo` scope
   Title: "[REPORT] Low-effort/Toxic comment on Mod: <mod_name>"
   Body: Direct link to the comment ID + quoted text + reporter's username
   Labels: `triage`, `comment-report`
-        │
-        ▼
+        â”‚
+        â–¼
 [Curator reviews the flag, clicks Delete on GitHub]
-        │
-        ▼
+        â”‚
+        â–¼
 [Comment is deleted. It disappears from the next morning's database build.]
 ```
 
@@ -922,11 +922,11 @@ A dedicated sidebar tab labeled **"Community Governance"** or **"Triage Center"*
 
 ```
 Sidebar Tabs:
-  ├── 🏠 Home (Featured & Trending)
-  ├── 🔍 Browse (Curated Mod/Pack/Shader/etc. discovery)
-  ├── 📦 My Instances
-  ├── 🗳️ Community Governance (Triage Center)
-  └── ⚙️ Settings
+  â”œâ”€â”€ ðŸ  Home (Featured & Trending)
+  â”œâ”€â”€ ðŸ” Browse (Curated Mod/Pack/Shader/etc. discovery)
+  â”œâ”€â”€ ðŸ“¦ My Instances
+  â”œâ”€â”€ ðŸ—³ï¸ Community Governance (Triage Center)
+  â””â”€â”€ âš™ï¸ Settings
 
 Main Content Area: Dynamic based on sidebar selection
 
@@ -936,7 +936,7 @@ On the app's first launch (or if `registry.db` has never been downloaded):
 
 1. **Welcome Screen:** Displays the "Agora" mission statement and project ethos. A "Get Started" button proceeds.
 
-2. **Integration Configuration (Optional — Default Disabled):**
+2. **Integration Configuration (Optional â€” Default Disabled):**
    Before any other setup, the user is presented with a clean, minimal screen titled **"Connect External Services"** with the subtitle *"These are completely optional. You can change your mind at any time in Settings."*
 
    | Integration | Default | Description |
@@ -961,70 +961,70 @@ On the app's first launch (or if `registry.db` has never been downloaded):
 
 6. **Home Screen:** The user lands on the Home tab showing "Featured Platform Packs."
 
-### 6.1b Integration Configuration UI (Settings → Integrations)
+### 6.1b Integration Configuration UI (Settings â†’ Integrations)
 
-After onboarding, users can revisit and modify their integration preferences at any time via **Settings → Integrations**. This panel mirrors the onboarding screen exactly:
+After onboarding, users can revisit and modify their integration preferences at any time via **Settings â†’ Integrations**. This panel mirrors the onboarding screen exactly:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  ⚙️ Settings  >  Integrations                                    │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  External Services                                               │
-│  ─────────────────────────────────────────────────────────────  │
-│                                                                  │
-│  █  Modrinth Access                                              │
-│     ┌────────────────────────────────────────────────────────┐  │
-│     │ Allow live Modrinth API queries. Enables the Raw      │  │
-│     │ Modrinth tab and version fallback for Modrinth-sourced │  │
-│     │ curated mods. When off, Modrinth-sourced curated mods │  │
-│     │ are hidden from Browse and search results entirely.   │  │
-│     │ No Modrinth calls are made when off.                  │  │
-│     └────────────────────────────────────────────────────────┘  │
-│     [Toggle:  OFF  |  ON]                                       │
-│                                                                  │
-│  █  AI / MCP Server                                              │
-│     ┌────────────────────────────────────────────────────────┐  │
-│     │ Enable local MCP server for external AI tools to      │  │
-│     │ diagnose crashes and search mods. Generates a         │  │
-│     │ per-session token. No AI features run when off.       │  │
-│     └────────────────────────────────────────────────────────┘  │
-│     [Toggle:  OFF  |  ON]                                       │
-│                                                                  │
-│  Current token: mcp://localhost:39741?token=...                 │
-│  [Regenerate Token]  [Copy to Clipboard]                        │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
+â”‚  âš™ï¸ Settings  >  Integrations                                    â”‚
+â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
+â”‚                                                                  â”‚
+â”‚  External Services                                               â”‚
+â”‚  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  â”‚
+â”‚                                                                  â”‚
+â”‚  â–ˆ  Modrinth Access                                              â”‚
+â”‚     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”‚
+â”‚     â”‚ Allow live Modrinth API queries. Enables the Raw      â”‚  â”‚
+â”‚     â”‚ Modrinth tab and version fallback for Modrinth-sourced â”‚  â”‚
+â”‚     â”‚ curated mods. When off, Modrinth-sourced curated mods â”‚  â”‚
+â”‚     â”‚ are hidden from Browse and search results entirely.   â”‚  â”‚
+â”‚     â”‚ No Modrinth calls are made when off.                  â”‚  â”‚
+â”‚     â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â”‚
+â”‚     [Toggle:  OFF  |  ON]                                       â”‚
+â”‚                                                                  â”‚
+â”‚  â–ˆ  AI / MCP Server                                              â”‚
+â”‚     â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”  â”‚
+â”‚     â”‚ Enable local MCP server for external AI tools to      â”‚  â”‚
+â”‚     â”‚ diagnose crashes and search mods. Generates a         â”‚  â”‚
+â”‚     â”‚ per-session token. No AI features run when off.       â”‚  â”‚
+â”‚     â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜  â”‚
+â”‚     [Toggle:  OFF  |  ON]                                       â”‚
+â”‚                                                                  â”‚
+â”‚  Current token: mcp://localhost:39741?token=...                 â”‚
+â”‚  [Regenerate Token]  [Copy to Clipboard]                        â”‚
+â”‚                                                                  â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 ```
 
 **Toggle Behavior:**
-- **Modrinth Access `OFF → ON`:** The Raw Modrinth sidebar tab immediately appears. Modrinth-sourced curated mods reappear in Browse and search results.
-- **Modrinth Access `ON → OFF`:** The Raw Modrinth tab disappears immediately. **All curated mods with `download_strategy = 'modrinth_id'` are filtered out of Browse, search, and category queries via SQL:**
+- **Modrinth Access `OFF â†’ ON`:** The Raw Modrinth sidebar tab immediately appears. Modrinth-sourced curated mods reappear in Browse and search results.
+- **Modrinth Access `ON â†’ OFF`:** The Raw Modrinth tab disappears immediately. **All curated mods with `download_strategy = 'modrinth_id'` are filtered out of Browse, search, and category queries via SQL:**
   ```sql
   -- When Modrinth is disabled, append to every catalog query:
   WHERE download_strategy != 'modrinth_id'
   ```
-  In-flight Modrinth downloads are allowed to finish but no new Modrinth API calls are initiated. Installed Modrinth-sourced mods in existing instances continue to work — they are already on disk.
-- **AI / MCP `OFF → ON`:** The MCP server starts on an ephemeral port. The token and URL are displayed. A system tray / OS notification says: *"MCP Server running on port XXXX. Share the token with your AI client."*
-- **AI / MCP `ON → OFF`:** The MCP server shuts down immediately. All active AI client connections are terminated. The token is invalidated. The UI shows: *"MCP Server stopped. Previous token is no longer valid."*
+  In-flight Modrinth downloads are allowed to finish but no new Modrinth API calls are initiated. Installed Modrinth-sourced mods in existing instances continue to work â€” they are already on disk.
+- **AI / MCP `OFF â†’ ON`:** The MCP server starts on an ephemeral port. The token and URL are displayed. A system tray / OS notification says: *"MCP Server running on port XXXX. Share the token with your AI client."*
+- **AI / MCP `ON â†’ OFF`:** The MCP server shuts down immediately. All active AI client connections are terminated. The token is invalidated. The UI shows: *"MCP Server stopped. Previous token is no longer valid."*
 
 **Browse-Only Mode Limitations (Updated):**
 
 | Feature | With OAuth | Browse-Only |
 |---|---|---|
-| Browse curated catalog | ✅ | ✅ |
-| Install curated packs (GitHub-sourced) | ✅ | ✅ |
-| Install curated packs (Modrinth-sourced, if Modrinth ON) | ✅ | ✅ |
-| Download raw Modrinth mods (if Modrinth ON) | ✅ | ✅ |
-| Create custom instances | ✅ | ✅ |
-| Use MCP AI tools (if AI ON) | ✅ | ❌ |
-| Vote on mods | ✅ | ❌ |
-| Submit reviews | ✅ | ❌ |
-| Access Triage Center | ✅ | ❌ |
-| Report crashes to GitHub | ✅ | ❌ |
-| Flag comments | ✅ | ❌ |
+| Browse curated catalog | âœ… | âœ… |
+| Install curated packs (GitHub-sourced) | âœ… | âœ… |
+| Install curated packs (Modrinth-sourced, if Modrinth ON) | âœ… | âœ… |
+| Download raw Modrinth mods (if Modrinth ON) | âœ… | âœ… |
+| Create custom instances | âœ… | âœ… |
+| Use MCP AI tools (if AI ON) | âœ… | âŒ |
+| Vote on mods | âœ… | âŒ |
+| Submit reviews | âœ… | âŒ |
+| Access Triage Center | âœ… | âŒ |
+| Report crashes to GitHub | âœ… | âŒ |
+| Flag comments | âœ… | âŒ |
 
-All features work offline once `registry.db` is cached, except those requiring live API calls. Integration toggles are independent of OAuth state — a user can have Modrinth ON and AI OFF, or vice versa, in Browse-Only Mode.
+All features work offline once `registry.db` is cached, except those requiring live API calls. Integration toggles are independent of OAuth state â€” a user can have Modrinth ON and AI OFF, or vice versa, in Browse-Only Mode.
 ```
 
 ### 6.2 Discovery & Sorting System
@@ -1070,11 +1070,11 @@ When a user opens a mod's detail page from the Browse tab:
 
 ### 6.3 The "Boutique vs. Warehouse" UX Split
 
-- **Default View ("The Boutique"):** Only items from the curated `registry.db` are shown. No MCreator slop, no abandoned weekend projects. If a user searches for something and it isn't in the curated list, the UI shows a subtle message: *"Not finding what you need? Search all of Modrinth →"*
-- **Raw Modrinth Tab:** Clicking the above button (or selecting the Modrinth tab in the sidebar) flips to a live Modrinth API search. The launcher downloads mod files directly from Modrinth's CDN and **verifies each file against the SHA-1 hash published in Modrinth's API** before writing it to the instance. An uncurated mod is structurally unvetted by this community, but the file itself is integrity-checked against Modrinth's own records. This section displays a persistent warning banner: *"⚠️ These mods are uncurated by the community. Download at your own discretion."*
+- **Default View ("The Boutique"):** Only items from the curated `registry.db` are shown. No MCreator slop, no abandoned weekend projects. If a user searches for something and it isn't in the curated list, the UI shows a subtle message: *"Not finding what you need? Search all of Modrinth â†’"*
+- **Raw Modrinth Tab:** Clicking the above button (or selecting the Modrinth tab in the sidebar) flips to a live Modrinth API search. The launcher downloads mod files directly from Modrinth's CDN and **verifies each file against the SHA-1 hash published in Modrinth's API** before writing it to the instance. An uncurated mod is structurally unvetted by this community, but the file itself is integrity-checked against Modrinth's own records. This section displays a persistent warning banner: *"âš ï¸ These mods are uncurated by the community. Download at your own discretion."*
 
-**Modrinth Integration Toggle:** In Settings → Integrations, users can disable all Modrinth API access entirely. When disabled:
-- The "Search all of Modrinth →" link is hidden.
+**Modrinth Integration Toggle:** In Settings â†’ Integrations, users can disable all Modrinth API access entirely. When disabled:
+- The "Search all of Modrinth â†’" link is hidden.
 - The Raw Modrinth sidebar tab is removed.
 - Curated mods with `download_strategy = "modrinth_id"` show a warning: *"This mod is hosted on Modrinth. Modrinth integration is disabled. Enable it in Settings to install, or download the file manually and drag it into the instance."*
 - All other features (GitHub-sourced curated mods, pack management, instance creation, governance) continue to work normally.
@@ -1082,13 +1082,13 @@ When a user opens a mod's detail page from the Browse tab:
 ### 6.4 Extended Content Types
 
 The same manifest system, data pipeline, and discovery algorithms support:
-- `mod` — Standard Minecraft modifications
-- `pack` — Curated modpacks (see §7)
-- `shader` — Iris/OptiFine-compatible shader packs
-- `resourcepack` — Texture/resource replacements
-- `server` — Listed public servers running curated packs
-- `datapack` — Vanilla-compatible data modifications
-- `world` — World downloads/saves
+- `mod` â€” Standard Minecraft modifications
+- `pack` â€” Curated modpacks (see Â§7)
+- `shader` â€” Iris/OptiFine-compatible shader packs
+- `resourcepack` â€” Texture/resource replacements
+- `server` â€” Listed public servers running curated packs
+- `datapack` â€” Vanilla-compatible data modifications
+- `world` â€” World downloads/saves
 
 ### 6.5 Instance Management
 
@@ -1170,15 +1170,15 @@ Each instance directory contains a lightweight JSON file tracking every mod inst
   - UI hides "Add Mod" button
   - Manifest is immutable; shows only installed mod list
   - "Unlock" button is visible with a warning tooltip
-        │
-        ▼ (User clicks Unlock → confirms warning)
+        â”‚
+        â–¼ (User clicks Unlock â†’ confirms warning)
 [UNLOCKED]
   - Rust copies instances/<pack>/ to instances/<pack>_backup/ recursively, then verifies that the file count and total size match the source. If verification fails, display: *'Backup creation failed. Unlock operation cancelled to prevent data loss.'*
   - Note: directory copies are not atomic; this is a best-effort safeguard.
   - UI exposes raw Modrinth search and manual .jar drag-and-drop
   - "Revert to Original" button appears
-        │
-        ▼ (User clicks Revert)
+        â”‚
+        â–¼ (User clicks Revert)
 [REVERT]
   - Rust deletes instances/<pack>/ and renames instances/<pack>_backup/ back
   - Instance is perfectly restored to the curator's original state
@@ -1192,7 +1192,7 @@ When a curated pack manifest is updated in the registry (new mod versions added,
 2. The launcher reads `instances/<pack>/instance_manifest.json` to determine the current state of installed mods (filename, version, hash).
 3. The launcher compares the manifest against the current pack definition in `registry.db` to compute a diff.
 4. If differences exist, a diff dialog appears:
-   - *"3 mods updated (Sodium 1.7.1 → 1.7.2, Iris 1.6.0 → 1.6.1, ...)*
+   - *"3 mods updated (Sodium 1.7.1 â†’ 1.7.2, Iris 1.6.0 â†’ 1.6.1, ...)*
    - *"1 mod added (NEWMOD)*
    - *"2 mods removed (OLDMOD1, OLDDMOD2)*
 5. The launcher respects the user's previous optional/recommended choices stored in `instance_manifest.json` under `user_preferences`.
@@ -1211,7 +1211,7 @@ Users can create instances from scratch (not just from curated packs or `.mrpack
 3. Instance is created empty with the correct modloader injected.
 4. User can browse the curated registry and add mods individually.
 5. For each mod, the version picker shows versions compatible with the instance's MC version/loader.
-6. The instance is treated as an unlocked pack — mods can be freely added/removed.
+6. The instance is treated as an unlocked pack â€” mods can be freely added/removed.
 
 ### 6.5c Pack Export
 
@@ -1226,7 +1226,7 @@ Users can export any existing instance as a shareable pack:
 
 ### 6.5d Instance Deletion
 
-1. Right-click on instance card → "Delete Instance" or settings menu → "Delete Instance".
+1. Right-click on instance card â†’ "Delete Instance" or settings menu â†’ "Delete Instance".
 2. Confirmation modal: *"This will permanently delete the instance directory including all mods, configs, and saves. This cannot be undone."*
 3. On confirmation, the instance directory is moved to the OS trash/recycle bin (using platform-specific APIs like Windows `SHFileOperation` or macOS `NSWorkspace`) rather than immediately deleted.
 4. User can recover from trash if accidental.
@@ -1236,7 +1236,7 @@ Users can export any existing instance as a shareable pack:
 ## 7. MODPACK ARCHITECTURE (THREE-TIER)
 
 ### Tier 1: Curated Platform Packs (Central Repo)
-Community curators submit `registry/packs/*.json` manifests via GitHub PR. Because mods are resolved via Modrinth ID or the existing mod manifest database, the pack itself is a tiny JSON file — no files are hosted by the platform. These appear on the launcher's home screen as "Featured Platform Packs."
+Community curators submit `registry/packs/*.json` manifests via GitHub PR. Because mods are resolved via Modrinth ID or the existing mod manifest database, the pack itself is a tiny JSON file â€” no files are hosted by the platform. These appear on the launcher's home screen as "Featured Platform Packs."
 
 ### Tier 2: Native Modrinth .mrpack Support
 1. User searches in the Modrinth tab (e.g., "Fabulously Optimized").
@@ -1261,12 +1261,12 @@ Community curators submit `registry/packs/*.json` manifests via GitHub PR. Becau
    - For GitHub releases without a `version_info.json`, the launcher searches release assets by filename pattern (e.g., `*1.21*.jar`) and release description as a best-effort compatibility guess.
    - The resolved version ID, file URL, and hash are cached in the instance metadata for future reference (updates, crash reporting).
 
-4. **Fetch Mods:** Concurrently download all resolved mod files. See §7.1.1 for download failure handling.
+4. **Fetch Mods:** Concurrently download all resolved mod files. See Â§7.1.1 for download failure handling.
 5. **Fetch Overrides:** Download `override_url` zip from GitHub raw CDN.
-6. **Sanitize Overrides (CRITICAL — see §7.2).**
+6. **Sanitize Overrides (CRITICAL â€” see Â§7.2).**
 7. **Extract Config Files:** Write `.toml`, `.json`, `.properties`, `.png`, `.mcmeta`, `.js` (for KubeJS scripts) to the instance directory.
-8. **Inject Modloader (see §8.2).**
-9. **Mutate `launcher_profiles.json` (see §8.3).**
+8. **Inject Modloader (see Â§8.2).**
+9. **Mutate `launcher_profiles.json` (see Â§8.3).**
 10. **Launch.**
 
 #### 7.1.1 Download Failure Handling (Partial Pack Load)
@@ -1319,7 +1319,7 @@ Zip bombs (e.g., a 10KB file expanding to 500GB) are structurally defeated by ch
 
 #### 7.2.2 Directory Whitelist (Replacing the Denylist)
 
-The previous design used a denylist of dangerous extensions (`.jar`, `.exe`, etc.). This is insufficient — dangerous content can exist in many forms beyond denylisted extensions (e.g., KubeJS scripts that are effectively code, malicious JSON payloads, OpenLoader resources that load additional content).
+The previous design used a denylist of dangerous extensions (`.jar`, `.exe`, etc.). This is insufficient â€” dangerous content can exist in many forms beyond denylisted extensions (e.g., KubeJS scripts that are effectively code, malicious JSON payloads, OpenLoader resources that load additional content).
 
 The launcher instead uses a **directory whitelist**. Only files whose paths start with an allowed prefix are extracted; everything else is silently skipped and logged:
 
@@ -1329,7 +1329,7 @@ The launcher instead uses a **directory whitelist**. Only files whose paths star
 | `defaultconfigs/` | Default server-side configs |
 | `resourcepacks/` | Embedded resource packs |
 | `kubejs/` | KubeJS scripts (sandboxed inside Java; no OS access) |
-| `mods/` | Not allowed via overrides — see below |
+| `mods/` | Not allowed via overrides â€” see below |
 
 **The `mods/` directory is explicitly excluded from the whitelist.** This structurally enforces the "Manifest Only" guarantee: all `.jar` files must enter the `/mods/` folder through the JSON manifest array and Modrinth API, never through pack overrides.
 
@@ -1340,7 +1340,7 @@ Additionally, within whitelisted directories, certain file types remain hard-ban
 .jar, .class, .exe, .bat, .cmd, .sh, .ps1, .dll, .so, .dylib, .msi, .dmg
 ```
 
-If any file with a banned extension is found inside the zip — even within a whitelisted directory — the installation is aborted, partially-extracted files are deleted, and the user sees:
+If any file with a banned extension is found inside the zip â€” even within a whitelisted directory â€” the installation is aborted, partially-extracted files are deleted, and the user sees:
 
 *"Installation Aborted: Security Violation. Pack overrides cannot contain executable files or mods. All mods must be routed through the platform manifest. This is a platform security requirement."*
 
@@ -1359,13 +1359,13 @@ By enforcing the directory whitelist plus the executable extension ban, the plat
 
 - Shell scripts can download and execute remote payloads at runtime. A curator might audit a "safe" script today, but a bad actor can change the remote URL's content after approval.
 - `.sh` files break Windows users; `.bat` files break macOS/Linux users. Cross-platform packs must not rely on OS-level scripts.
-- The correct solution for in-game scripting is **KubeJS** or **CraftTweaker** — mods that run `.js` scripts strictly inside the Java sandbox, with no OS-level access.
+- The correct solution for in-game scripting is **KubeJS** or **CraftTweaker** â€” mods that run `.js` scripts strictly inside the Java sandbox, with no OS-level access.
 
 ---
 
 ### 7.5 GITHUB OAUTH TOKEN SECURITY
 
-The platform relies heavily on user GitHub OAuth tokens for API calls, voting, crash reporting, and governance. These tokens are a high-value target — if stolen, they grant the attacker the ability to impersonate the user on GitHub, create issues, vote, and potentially access private repositories depending on granted scopes.
+The platform relies heavily on user GitHub OAuth tokens for API calls, voting, crash reporting, and governance. These tokens are a high-value target â€” if stolen, they grant the attacker the ability to impersonate the user on GitHub, create issues, vote, and potentially access private repositories depending on granted scopes.
 
 #### 7.5.1 Authentication Flow
 
@@ -1376,8 +1376,8 @@ The launcher uses the **GitHub Device Flow** (`POST https://github.com/login/dev
 3. The launcher polls for authorization. Once the user approves in the browser, the launcher receives an access token.
 
 **Token Scopes:** Only the minimum required scopes are requested:
-- `public_repo` — to create issues (crash reports) and interact with public repositories
-- `read:org` — for organization membership checks (if applicable for governance)
+- `public_repo` â€” to create issues (crash reports) and interact with public repositories
+- `read:org` â€” for organization membership checks (if applicable for governance)
 
 No `repo` (full private access), `user`, `admin`, or other broad scopes are ever requested.
 
@@ -1403,7 +1403,7 @@ The `keyring` Rust crate provides a cross-platform abstraction over these stores
 
 - **User's own rate limit:** Each user's API calls count against their personal 5,000 requests/hour quota. The launcher never makes API calls that count against a shared rate limit.
 - **No server-side token storage:** The platform has no backend. Tokens never leave the user's machine.
-- **Token revocation:** Users can revoke the launcher's access at any time via GitHub Settings → Applications. A "Disconnect GitHub" button in the launcher's Settings tab also deletes the token from the credential store.
+- **Token revocation:** Users can revoke the launcher's access at any time via GitHub Settings â†’ Applications. A "Disconnect GitHub" button in the launcher's Settings tab also deletes the token from the credential store.
 
 ---
 
@@ -1437,7 +1437,7 @@ Supported loaders (MVP scope):
 
 #### 8.2.1 Supply Chain Verification (Modloader Downloads)
 
-Downloading modloader metadata and libraries from internet sources introduces a supply chain risk — if an upstream CDN is compromised, malicious code reaches every user.
+Downloading modloader metadata and libraries from internet sources introduces a supply chain risk â€” if an upstream CDN is compromised, malicious code reaches every user.
 
 **Countermeasures:**
 
@@ -1451,7 +1451,7 @@ Downloading modloader metadata and libraries from internet sources introduces a 
    
    Any redirect to an off-domain URL is blocked. This prevents DNS hijacking or MITM attacks from redirecting downloads to attacker-controlled servers.
 
-3. **Pinned Source Lists:** The compiler maintains a `loader_manifests.json` file in the registry mapping each supported `(loader, mc_version, loader_version)` tuple to its official source URL and pinned hash. This file is updated only via curator PR — the same governance process as mod manifests.
+3. **Pinned Source Lists:** The compiler maintains a `loader_manifests.json` file in the registry mapping each supported `(loader, mc_version, loader_version)` tuple to its official source URL and pinned hash. This file is updated only via curator PR â€” the same governance process as mod manifests.
 
 ### 8.3 `launcher_profiles.json` Mutation
 
@@ -1469,11 +1469,11 @@ Rust reads the official `~/.minecraft/launcher_profiles.json`, then injects a ne
 }
 ```
 
-Note: `javaArgs` is dynamically assembled from the JVM Argument Builder (§8.4). Note that `gameDir` points to the **isolated instance folder**, not the default `.minecraft` directory.
+Note: `javaArgs` is dynamically assembled from the JVM Argument Builder (Â§8.4). Note that `gameDir` points to the **isolated instance folder**, not the default `.minecraft` directory.
 
 #### 8.3.1 Atomic Write with Backup
 
-Directly mutating `launcher_profiles.json` is risky — a crash, power loss, or write interruption during mutation could corrupt the file, potentially destroying all of the user's launcher profiles.
+Directly mutating `launcher_profiles.json` is risky â€” a crash, power loss, or write interruption during mutation could corrupt the file, potentially destroying all of the user's launcher profiles.
 
 **Atomic Write Procedure:**
 
@@ -1482,7 +1482,7 @@ Directly mutating `launcher_profiles.json` is risky — a crash, power loss, or 
 3. Serialize the mutated JSON back to a string.
 4. Write the serialized string to a **temporary file**: `launcher_profiles.json.tmp`.
 5. Create (or overwrite) a **backup file**: `launcher_profiles.json.bak` from the current on-disk file.
-6. Use `std::fs::rename()` to atomically replace `launcher_profiles.json` with the `.tmp` file. On most filesystems, `rename()` is atomic — the file is either the old version or the new version, never a partial write.
+6. Use `std::fs::rename()` to atomically replace `launcher_profiles.json` with the `.tmp` file. On most filesystems, `rename()` is atomic â€” the file is either the old version or the new version, never a partial write.
 7. If any step fails, the `.bak` file is used to restore the original state.
 
 **Recovery:** If the launcher detects that `launcher_profiles.json` is invalid JSON on startup:
@@ -1504,7 +1504,7 @@ Rust resolves the Mojang launcher executable path at runtime using the following
 The resolved path is cached in the app's local configuration for subsequent launches.
 
 ```rust
-// Rust backend — uses cached path if available, otherwise discovers
+// Rust backend â€” uses cached path if available, otherwise discovers
 let launcher_path = config.get("mojang_launcher_path")
     .unwrap_or_else(|| discover_mojang_launcher());
 std::process::Command::new(&launcher_path)
@@ -1515,11 +1515,11 @@ std::process::Command::new(&launcher_path)
 
 The Mojang launcher opens, sees the user is already logged in (we never touched auth), reads the modloader `lastVersionId`, downloads any missing vanilla assets it needs, points its read directory at the isolated instance folder, and boots the game.
 
-### 8.5 JVM Argument Builder (UI → Args)
+### 8.5 JVM Argument Builder (UI â†’ Args)
 
 **Memory Slider:**
-- User drags a slider (e.g., 1GB – 32GB based on detected system RAM).
-- Rust translates: a selection of `8GB` → `-Xmx8G -Xms8G` (setting min and max to the same value is best practice for modded Minecraft; prevents GC pressure from heap resizing).
+- User drags a slider (e.g., 1GB â€“ 32GB based on detected system RAM).
+- Rust translates: a selection of `8GB` â†’ `-Xmx8G -Xms8G` (setting min and max to the same value is best practice for modded Minecraft; prevents GC pressure from heap resizing).
 
 **Garbage Collector Dropdown:**
 | UI Label | JVM Flag | Notes |
@@ -1552,9 +1552,9 @@ When the user clicks "Play":
 1. Rust checks `instances/<pack>/crash-reports/` for any files with a modification timestamp newer than `last_launched_at` (stored in `user_instances` table).
 2. **If a new crash report exists:**
    - Halt the launch.
-   - Display a modal: *"⚠️ This instance crashed during its last session. Do you want to review the crash report before launching, or proceed anyway?"*
+   - Display a modal: *"âš ï¸ This instance crashed during its last session. Do you want to review the crash report before launching, or proceed anyway?"*
    - Options: **[Review Crash]** | **[Launch Anyway]**
-3. If user clicks "Review Crash": open the Crash Diagnostic View (§9.2).
+3. If user clicks "Review Crash": open the Crash Diagnostic View (Â§9.2).
 4. After any crash review, update `last_launched_at` to now.
 
 **Timing Rule:** `last_launched_at` is updated to the current timestamp **immediately before launching the Mojang launcher process**, regardless of whether crash review was performed. This prevents infinite crash prompt loops when the user clicks "Launch Anyway."
@@ -1583,10 +1583,10 @@ The `crash-signatures/` folder is a community-maintained repository. Anyone can 
 Every instance has a **"Diagnostics / Logs" tab** in its settings screen:
 - Lists all crash reports and `latest.log` files with human-readable timestamps.
 - Rust reads and streams the file content to the React frontend.
-- **Syntax highlighting:** `[ERROR]` lines → red, `[WARN]` lines → amber/yellow, `[INFO]` → default, `[DEBUG]` → gray.
+- **Syntax highlighting:** `[ERROR]` lines â†’ red, `[WARN]` lines â†’ amber/yellow, `[INFO]` â†’ default, `[DEBUG]` â†’ gray.
 - User can select any crash report at any time (not just on pre-launch intercept) and send it to the AI for analysis.
 
-### 9.4 Automated GitHub Issue Submission (Layer 0 — Duplicate Check)
+### 9.4 Automated GitHub Issue Submission (Layer 0 â€” Duplicate Check)
 
 Before either the regex engine or AI runs, Rust checks if the crash is already a known issue:
 
@@ -1611,15 +1611,15 @@ Without authentication, any local process could connect to the MCP server and ex
 
 **Mandatory Security Controls:**
 
-1. **Localhost Binding Only:** The MCP server binds to `127.0.0.1` on an OS-assigned ephemeral port. The port is displayed in Settings → MCP Server. The user copies the full URL with token into their AI client.
+1. **Localhost Binding Only:** The MCP server binds to `127.0.0.1` on an OS-assigned ephemeral port. The port is displayed in Settings â†’ MCP Server. The user copies the full URL with token into their AI client.
 
 2. **Per-Session Authentication Token:** When the Tauri app starts the MCP server, it generates a cryptographically random 256-bit token. This token is displayed to the user once in the Settings panel (e.g., `mcp://localhost:PORT?token=...`). The user manually copies this token into their AI client's MCP configuration. Any connection without the correct token is immediately rejected.
 
 3. **User Approval Flow (Capability Permissions):** Destructive operations require explicit user approval. Each request is tracked in an internal `approval_state` enum in the Rust backend:
-   - `pending` — Waiting for user decision
-   - `approved_once` — Approved for this specific call only; deleted immediately after execution
-   - `approved_always` — User selected "Always Allow"; persisted to `local_state.db` in the `mcp_approval_grants` table
-   - `denied` — User denied the request; may be persisted if the user selects "Don't ask again for this tool/instance"
+   - `pending` â€” Waiting for user decision
+   - `approved_once` â€” Approved for this specific call only; deleted immediately after execution
+   - `approved_always` â€” User selected "Always Allow"; persisted to `local_state.db` in the `mcp_approval_grants` table
+   - `denied` â€” User denied the request; may be persisted if the user selects "Don't ask again for this tool/instance"
 
    When an AI client calls a destructive tool like `disable_mod` or `enable_mod`, the Rust backend first checks `mcp_approval_grants`:
    - If a matching `approved_always` grant exists for `(tool_name, instance_id)` or `(tool_name, "*")`, the call proceeds without UI interruption.
@@ -1638,7 +1638,7 @@ Without authentication, any local process could connect to the MCP server and ex
    - A specific `(tool_name, instance_id)` pair, or
    - A global `(tool_name, "*")` allowing the tool across all instances.
 
-   Users can review and revoke all grants in Settings → Integrations → MCP Server → "Clear Tool Approvals." Grants do not have a forced expiration, but the user can set one via the approval dialog (e.g., "Allow for 7 days").
+   Users can review and revoke all grants in Settings â†’ Integrations â†’ MCP Server â†’ "Clear Tool Approvals." Grants do not have a forced expiration, but the user can set one via the approval dialog (e.g., "Allow for 7 days").
 
 5. **Pending Approvals Queue:** Destructive tool calls (`disable_mod`, `enable_mod`) awaiting user response are placed in a queue. The Tauri UI displays a single "Pending MCP Approvals" panel showing all queued requests with Batch Approve/Deny options. If the queue exceeds 10 pending requests, the MCP server returns `JSON-RPC error -32002: Too many pending approvals. Please approve or deny existing requests first.` to the AI client.
 
@@ -1649,9 +1649,9 @@ Without authentication, any local process could connect to the MCP server and ex
 | `read_latest_crash` | `(instance_id: string)` | Returns the last 200 lines of the newest crash report or `latest.log` for the given instance |
 | `list_instance_mods` | `(instance_id: string)` | Reads `instances/<id>/instance_manifest.json` and returns a JSON array of all installed mods with their `filename`, `registry_id` (null if raw/untracked), `source`, `version`, and `sha256`. Curated mods include extra metadata from `registry.db` (curator notes, categories). Raw/untracked mods show basic file info only. |
 | `read_mod_manifest` | `(mod_id: string)` | Fetches the community data for a specific mod from the local SQLite DB: curator notes, known dependencies, categories |
-| `disable_mod` | `(instance_id: string, mod_filename: string)` | Rust physically renames `mod.jar` → `mod.jar.disabled`. Provides immediate mechanical relief without deleting the file. Reversible. |
+| `disable_mod` | `(instance_id: string, mod_filename: string)` | Rust physically renames `mod.jar` â†’ `mod.jar.disabled`. Provides immediate mechanical relief without deleting the file. Reversible. |
 | `enable_mod` | `(instance_id: string, mod_filename: string)` | Reverses a `disable_mod` call |
-| `search_knowledge_base` | `(query: string)` | Executes a parameterized `LIKE %query%` search against the `curator_note` column in the SQLite DB. The query string is bound as a parameter — never concatenated into the SQL string. Returns the top 3-5 matching items with their curator notes. Powers "vibe-based" semantic mod discovery. |
+| `search_knowledge_base` | `(query: string)` | Executes a parameterized `LIKE %query%` search against the `curator_note` column in the SQLite DB. The query string is bound as a parameter â€” never concatenated into the SQL string. Returns the top 3-5 matching items with their curator notes. Powers "vibe-based" semantic mod discovery. |
 
 ### 10.2 System Context Injection
 
@@ -1713,7 +1713,7 @@ A dedicated **"Dev Mode"** panel is accessible to users who opt into curator wor
 
 ### 11.1 Build Sandbox (Critical Security Requirement)
 
-Running `./gradlew build` or any repository build system directly on the host OS is the single highest-risk operation in the entire platform. Build scripts (Gradle, Maven, etc.) execute arbitrary code — a malicious `build.gradle` can download and execute remote payloads, steal files, or install persistent malware. This is not theoretical; it is a common supply chain attack vector.
+Running `./gradlew build` or any repository build system directly on the host OS is the single highest-risk operation in the entire platform. Build scripts (Gradle, Maven, etc.) execute arbitrary code â€” a malicious `build.gradle` can download and execute remote payloads, steal files, or install persistent malware. This is not theoretical; it is a common supply chain attack vector.
 
 **Mandatory Build Isolation:**
 
@@ -1728,9 +1728,9 @@ All Dev Mode builds **must** execute inside an isolated sandbox. The launcher su
 
 **Sandbox Enforcement:**
 
-1. The build command is executed **only** inside the sandbox — never on the host OS.
+1. The build command is executed **only** inside the sandbox â€” never on the host OS.
 2. The sandbox has **no network access** by default during build (prevents build scripts from downloading remote payloads). If a build legitimately requires network access (e.g., to fetch Maven dependencies), the curator must explicitly enable network for that build session via a toggle.
-3. The sandbox's filesystem is **ephemeral** — it is destroyed after the build completes. Only the output `.jar` file(s) are copied out to the test instance's `mods/` directory.
+3. The sandbox's filesystem is **ephemeral** â€” it is destroyed after the build completes. Only the output `.jar` file(s) are copied out to the test instance's `mods/` directory.
 4. The sandbox has **no access** to the host's home directory, SSH keys, browser profiles, or any other sensitive data.
 
 **Failure Mode:** If no sandbox backend is available, Dev Mode refuses to build and displays: *"Dev Mode builds require a sandbox environment (Docker, Podman, or Firecracker) for security. Please install one to continue."*
@@ -1745,7 +1745,7 @@ Users who enable telemetry contribute to a global **Crash Matrix** that benefits
 
 **Aggregation:** Once a week, the launcher compresses the local telemetry table and posts it as an anonymous line item to a public aggregation endpoint (e.g., a serverless form endpoint or a public GitHub Gist). The nightly compiler ingests these contributions to produce a global Crash Matrix JSON file.
 
-**User-facing warning:** When a user attempts to install a mod combination that appears in the Crash Matrix with a co-crash rate above a threshold (e.g., 30%+), the launcher shows: *"⚠️ Community data indicates these mods have a high co-crash rate. Proceed with caution."*
+**User-facing warning:** When a user attempts to install a mod combination that appears in the Crash Matrix with a co-crash rate above a threshold (e.g., 30%+), the launcher shows: *"âš ï¸ Community data indicates these mods have a high co-crash rate. Proceed with caution."*
 
 **Privacy:** No intentional personal data is collected. Only mod ID pairs and counts are included in telemetry submissions. However, if using GitHub Gists or serverless endpoints as the aggregation point, the receiving service may inherently observe IP addresses, timing metadata, and user agent strings as part of standard HTTP request processing. Users are informed of this nuance in the telemetry opt-in dialog.
 
@@ -1753,9 +1753,9 @@ Users who enable telemetry contribute to a global **Crash Matrix** that benefits
 
 ## 13. WEB DIRECTORY (NEXT.JS)
 
-A completely static Next.js website deployed for free on Vercel or GitHub Pages. It serves as the public face of the platform — a searchable, browsable directory that doesn't require the desktop app.
+A completely static Next.js website deployed for free on Vercel or GitHub Pages. It serves as the public face of the platform â€” a searchable, browsable directory that doesn't require the desktop app.
 
-**Data Source:** Fetches the latest `registry.db` from the GitHub Release asset URL (see §3.1 Step 13). The static Next.js build queries the GitHub Releases API for the latest `registry-*` tag and downloads the attached `registry.db` asset during its own CI build process.
+**Data Source:** Fetches the latest `registry.db` from the GitHub Release asset URL (see Â§3.1 Step 13). The static Next.js build queries the GitHub Releases API for the latest `registry-*` tag and downloads the attached `registry.db` asset during its own CI build process.
 
 **Features:**
 - Full-text search across mod names and curator notes
@@ -1796,7 +1796,7 @@ Write a Rust Tauri backend module that:
 1. Manages isolated modpack instances in a local /instances/ directory.
 2. Maintains an instance_manifest.json per instance tracking all installed mods (source, version, hash, filename).
 3. Downloads mod .jar files concurrently via GitHub Releases API (primary) or Modrinth API (supplementary fallback) with SHA-256 hash verification for all strategies.
-4. Implements a zip override extractor with a directory whitelist (only config/, defaultconfigs/, resourcepacks/, kubejs/ — no mods/), hard-banned executable extensions (.jar, .exe, .bat, .sh, etc.), Zip Slip path traversal protection, and zip bomb limits (500MB compressed, 2GB extracted, 5000 files max).
+4. Implements a zip override extractor with a directory whitelist (only config/, defaultconfigs/, resourcepacks/, kubejs/ â€” no mods/), hard-banned executable extensions (.jar, .exe, .bat, .sh, etc.), Zip Slip path traversal protection, and zip bomb limits (500MB compressed, 2GB extracted, 5000 files max).
 5. Injects modloader version JSON and library files into the official ~/.minecraft directory with domain pinning and JSON hash verification.
 6. Reads and mutates the official launcher_profiles.json atomically with backup and corruption recovery.
 7. Constructs javaArgs strings from user-selected memory (slider), GC type (dropdown), custom args (text box), and AlwaysPreTouch toggle.
@@ -1861,22 +1861,22 @@ This section consolidates all cross-cutting security decisions, threat models, a
 
 | # | Threat | Severity | Mitigation Location | Status |
 |---|---|---|---|---|
-| 1 | Dev Mode executing arbitrary Gradle/Maven builds | Critical | §11.1 — Build sandbox | Addressed |
-| 2 | Unauthenticated MCP tools allowing local process takeover | Critical | §10.0 — MCP Security | Addressed |
-| 3 | GitHub OAuth token theft from compromised app | Critical | §7.5 — OAuth Token Security | Addressed |
-| 4 | Zip bomb attacks via pack override downloads | High | §7.2.1 — Zip Bomb Mitigation | Addressed |
-| 5 | Override extraction relying on denylist instead of whitelist | High | §7.2.2 — Directory Whitelist | Addressed |
-| 6 | Supply-chain attacks on modloader downloads | High | §8.2.1 — Supply Chain Verification | Addressed |
-| 7 | Regex DoS via community crash signatures | High | §2.4.1 — Regex DoS Prevention | Addressed |
-| 8 | `launcher_profiles.json` corruption during mutation | High | §8.3.1 — Atomic Write with Backup | Addressed |
-| 9 | GitHub as a strategic dependency (not a vulnerability per se) | Medium | §15.2 below | Acknowledged |
-| 10 | Sybil attacks on governance voting | Medium | §3.1 Step 4 — Sybil Resistance | Partially addressed |
-| 11 | Privacy leakage in crash report submissions | Medium | §9.4 — Preview before submit | Addressed |
-| 12 | Telemetry not fully anonymous at transport level | Medium | §12 — Updated wording | Acknowledged |
+| 1 | Dev Mode executing arbitrary Gradle/Maven builds | Critical | Â§11.1 â€” Build sandbox | Addressed |
+| 2 | Unauthenticated MCP tools allowing local process takeover | Critical | Â§10.0 â€” MCP Security | Addressed |
+| 3 | GitHub OAuth token theft from compromised app | Critical | Â§7.5 â€” OAuth Token Security | Addressed |
+| 4 | Zip bomb attacks via pack override downloads | High | Â§7.2.1 â€” Zip Bomb Mitigation | Addressed |
+| 5 | Override extraction relying on denylist instead of whitelist | High | Â§7.2.2 â€” Directory Whitelist | Addressed |
+| 6 | Supply-chain attacks on modloader downloads | High | Â§8.2.1 â€” Supply Chain Verification | Addressed |
+| 7 | Regex DoS via community crash signatures | High | Â§2.4.1 â€” Regex DoS Prevention | Addressed |
+| 8 | `launcher_profiles.json` corruption during mutation | High | Â§8.3.1 â€” Atomic Write with Backup | Addressed |
+| 9 | GitHub as a strategic dependency (not a vulnerability per se) | Medium | Â§15.2 below | Acknowledged |
+| 10 | Sybil attacks on governance voting | Medium | Â§3.1 Step 4 â€” Sybil Resistance | Partially addressed |
+| 11 | Privacy leakage in crash report submissions | Medium | Â§9.4 â€” Preview before submit | Addressed |
+| 12 | Telemetry not fully anonymous at transport level | Medium | Â§12 â€” Updated wording | Acknowledged |
 
 ### 15.2 Strategic Dependency: GitHub as Implicit Backend
 
-This project's architecture describes itself as "serverless" and "$0/month." While technically true — no servers are rented, no databases are hosted — **GitHub functions as the de facto backend** for:
+This project's architecture describes itself as "serverless" and "$0/month." While technically true â€” no servers are rented, no databases are hosted â€” **GitHub functions as the de facto backend** for:
 
 - Database (Issues, Discussions, Reactions)
 - Authentication (OAuth provider)
@@ -1893,7 +1893,7 @@ This is a **strategic dependency risk**, not a security vulnerability. If GitHub
 
 ...portions of the platform break. This risk is accepted because:
 1. GitHub's free tier is extremely generous and has been stable for years.
-2. All data is stored as flat JSON files in the repository — migration to a different platform is structurally possible (if labor-intensive).
+2. All data is stored as flat JSON files in the repository â€” migration to a different platform is structurally possible (if labor-intensive).
 3. The client-side SQLite model means the launcher remains functional offline even if GitHub is temporarily unreachable.
 
 **Offline Capability:** The downloaded `registry.db` is cached locally. If the user is offline, they can still browse the curated catalog, read curator notes, and assemble modpack configurations. Mod file downloads are deferred until an internet connection is available. The app displays a "Limited Offline Mode" banner when it cannot reach GitHub Releases or Modrinth.
@@ -1908,7 +1908,7 @@ This is a **strategic dependency risk**, not a security vulnerability. If GitHub
 4. **Treat all community data as untrusted.** Curator notes, reviews, category names, and crash signature markdown are all potentially malicious. Escape everything before rendering. Never use raw HTML passthrough.
 5. **Sandbox arbitrary code execution.** Any operation that compiles, builds, or executes code from an external source (Dev Mode, MCP tool invocation) must run in an isolated environment with explicit user approval.
 6. **Atomic writes for critical files.** When mutating user-owned files (launcher_profiles.json, instance configs), always write to a temporary file first, then rename atomically. Always maintain a backup.
-7. **Fail closed, not open.** When verification fails (hash mismatch, signature invalid, sandbox unavailable), the operation is blocked — not logged and allowed to proceed.
+7. **Fail closed, not open.** When verification fails (hash mismatch, signature invalid, sandbox unavailable), the operation is blocked â€” not logged and allowed to proceed.
 8. **Accepted Ecosystem Limitations:** KubeJS scripts run within Minecraft's JVM without OS-level sandboxing. This is a limitation of the Minecraft modding ecosystem, not this launcher. The directory whitelist prevents OS-level scripting attacks (`.sh`, `.bat`), but in-game scripts with network access remain a broad Minecraft security concern outside this platform's scope.
 9. **Parameterized Queries Only.** All user input that reaches SQLite must use parameterized queries or prepared statements. Never concatenate user input into SQL strings. The `tauri-plugin-sql` API supports parameter binding natively. This applies to: browse search queries, category filters, instance IDs passed to crash diagnostics, and MCP `search_knowledge_base` tool inputs.
 
@@ -1935,14 +1935,14 @@ This section documents key architectural decisions made during design so future 
 | Deploy registry.db as GitHub Release Asset (not repo commit) | Committing a binary `.db` file daily would bloat the Git history irreversibly, making clones prohibitively slow. Release Assets support files up to 2GB and don't pollute repository history. |
 | Sign registry.db with Ed25519 offline key | Prevents a compromised GitHub account from distributing a malicious database. The Tauri client verifies the signature before trusting the data. |
 | Store image URLs, not binary images, in database | Hosting raw images in the repository would exhaust storage limits. Modrinth CDN already hosts mod icons and gallery images; custom assets use a dedicated `launcher-media` repo with GitHub Pages. |
-| Directory whitelist for override extraction (not denylist) | Denylists are fundamentally insufficient — dangerous content exists in many forms beyond banned extensions (KubeJS scripts, malicious JSON, OpenLoader resources). A whitelist of allowed paths structurally prevents unknown threats. |
+| Directory whitelist for override extraction (not denylist) | Denylists are fundamentally insufficient â€” dangerous content exists in many forms beyond banned extensions (KubeJS scripts, malicious JSON, OpenLoader resources). A whitelist of allowed paths structurally prevents unknown threats. |
 | Sandbox Dev Mode builds (Docker/Podman/Firecracker) | Build scripts execute arbitrary code. Running them on the host OS is the single highest-risk operation. Sandboxing with ephemeral filesystems and no host access prevents supply chain compromise. |
 | MCP server authentication with per-session tokens and user approval flow | Without auth, any local process could disable all mods, read crash logs, or manipulate installations. Per-session tokens + capability-level approval dialogs treat MCP tools as the privileged operations they are. |
 | Store OAuth tokens in OS keychain, never plaintext | Storing tokens in config files, environment variables, or local databases makes them trivially stealable. OS credential managers provide hardware-backed encryption and access auditing. |
-| Atomic writes with backup for launcher_profiles.json | Direct mutation of critical files risks corruption from crashes or power loss during writes. The `.tmp` → `rename()` pattern is atomic on most filesystems, and `.bak` files enable automatic recovery. |
+| Atomic writes with backup for launcher_profiles.json | Direct mutation of critical files risks corruption from crashes or power loss during writes. The `.tmp` â†’ `rename()` pattern is atomic on most filesystems, and `.bak` files enable automatic recovery. |
 | Rust `regex` crate only for crash signature matching | The Rust regex engine avoids catastrophic backtracking by construction, structurally preventing ReDoS. Maximum pattern length and CI performance gates add defense-in-depth. |
 | SHA-256 hash verification for all download strategies (not just direct_hash) | Supply chain attacks can compromise any upstream source. Verifying hashes for Modrinth downloads, GitHub releases, and modloader libraries ensures integrity regardless of the source. |
-| GitHub as implicit backend — strategic dependency acknowledged | GitHub provides database, auth, voting, governance, and CDN at zero cost. This dependency is accepted because: data is portable (flat JSON files), the client works offline, and the compiler fails loudly on breaking API changes. |
+| GitHub as implicit backend â€” strategic dependency acknowledged | GitHub provides database, auth, voting, governance, and CDN at zero cost. This dependency is accepted because: data is portable (flat JSON files), the client works offline, and the compiler fails loudly on breaking API changes. |
 | Preview-before-submit for crash reports | Auto-submitting crash reports to developer repos leaks username, OS, mod list, and hardware hints without user awareness. Mandatory preview allows redaction of sensitive information before public posting. |
 | Realistic telemetry anonymity wording | Claiming "no personal data is ever collected" is inaccurate when HTTP transport inherently exposes IP, timing, and user agent. Honest wording ("no intentional personal data") sets correct user expectations. |
 | Trust score based on org interactions only | "3 comments anywhere on GitHub" is not queryable via any API. Org-scoped interactions are the only practical and verifiable metric. |
@@ -1993,41 +1993,41 @@ This section gives a concrete build order so a coding agent (or human developer)
 
 ### Phase 0: Repository & Data Plumbing (Required Before Anything Else)
 
-1. **Create the central GitHub repository** with the directory structure from §1 (`registry/mods/`, `registry/packs/`, `crash-signatures/`, `loader-manifests/`, `.github/workflows/`, `CODE_OF_ENGAGEMENT.md`).
-2. **Seed registry with 5–10 example mods** (Sodium, Iris, Lithium, Fabric API, etc.) using `github_release` strategy.
+1. **Create the central GitHub repository** with the directory structure from Â§1 (`registry/mods/`, `registry/packs/`, `crash-signatures/`, `loader-manifests/`, `.github/workflows/`, `CODE_OF_ENGAGEMENT.md`).
+2. **Seed registry with 5â€“10 example mods** (Sodium, Iris, Lithium, Fabric API, etc.) using `github_release` strategy.
 3. **Create `loader-manifests/known_good_hashes.json`** with pinned hashes for Fabric, NeoForge, Quilt, Forge for the current Minecraft version.
 4. **Create the separate `launcher-media` repository** for custom banners.
 5. **Create the private `agora-mc/admin-alerts` repository** for flag reports and triage alerts.
 
-### Phase 1: Compiler (Python GitHub Action) — Module 1
+### Phase 1: Compiler (Python GitHub Action) â€” Module 1
 
 1. Implement manifest JSON parser.
 2. Implement GitHub Releases API fetcher with SHA-256 hash extraction for `github_release` mods.
 3. Implement GraphQL/REST trust score fetcher (org interactions only).
 4. Implement NLP filtering (profanity-check, vaderSentiment).
 5. Implement velocity anomaly detection.
-6. Build `registry.db` with all schemas from §4 (registry tables only).
+6. Build `registry.db` with all schemas from Â§4 (registry tables only).
 7. Sign with Ed25519 offline key.
 8. Upload as GitHub Release Asset.
 
-**Acceptance test:** Compiler runs nightly, produces a `registry.db` with 5–10 mods, a valid signature, and uploads it to a tagged release.
+**Acceptance test:** Compiler runs nightly, produces a `registry.db` with 5â€“10 mods, a valid signature, and uploads it to a tagged release.
 
-### Phase 2: Rust Tauri Skeleton & Instance Engine — Module 3
+### Phase 2: Rust Tauri Skeleton & Instance Engine â€” Module 3
 
 1. Initialize Tauri project with React + Tailwind.
-2. Implement §4 dual-DB setup (`registry.db` + `local_state.db`).
-3. Implement first-run onboarding flow (§6.1a) with integration toggles.
-4. Implement downloader with SHA-256 verification, 6 concurrent, 3 retries, partial-pack fallback (§7.1.1).
-5. Implement override sanitization with whitelist + zip bomb limits (§7.2).
-6. Implement modloader injection with domain pinning + JSON hash verification (§8.2).
-7. Implement `launcher_profiles.json` atomic write + corruption recovery (§8.3).
-8. Implement Mojang launcher discovery (§8.4).
-9. Implement JVM argument builder with `AlwaysPreTouch` toggle (§8.5).
+2. Implement Â§4 dual-DB setup (`registry.db` + `local_state.db`).
+3. Implement first-run onboarding flow (Â§6.1a) with integration toggles.
+4. Implement downloader with SHA-256 verification, 6 concurrent, 3 retries, partial-pack fallback (Â§7.1.1).
+5. Implement override sanitization with whitelist + zip bomb limits (Â§7.2).
+6. Implement modloader injection with domain pinning + JSON hash verification (Â§8.2).
+7. Implement `launcher_profiles.json` atomic write + corruption recovery (Â§8.3).
+8. Implement Mojang launcher discovery (Â§8.4).
+9. Implement JVM argument builder with `AlwaysPreTouch` toggle (Â§8.5).
 10. Implement `instance_manifest.json` for each instance.
 
 **Acceptance test:** User can create a custom instance, install 3 mods, set JVM args, and successfully launch Minecraft via the Mojang launcher.
 
-### Phase 3: Browse, Discovery & Search — Module 2
+### Phase 3: Browse, Discovery & Search â€” Module 2
 
 1. Implement React sidebar with 5 tabs.
 2. Implement Browse tab with sort, filter, search (FTS5 or LIKE).
@@ -2035,11 +2035,11 @@ This section gives a concrete build order so a coding agent (or human developer)
 4. Implement Modrinth SQL filter (`WHERE download_strategy != 'modrinth_id'` when disabled).
 5. Implement "For You" algorithm with local install tracking.
 6. Implement "Boutique vs. Warehouse" split.
-7. Implement "Search all of Modrinth →" link to Raw Modrinth tab.
+7. Implement "Search all of Modrinth â†’" link to Raw Modrinth tab.
 
 **Acceptance test:** User can browse curated mods, sort by net score, filter by category, and search by name.
 
-### Phase 4: Crash Diagnostics — Module 4
+### Phase 4: Crash Diagnostics â€” Module 4
 
 1. Pre-launch interceptor with `last_launched_at` timing fix.
 2. Regex signature engine using Rust `regex` crate.
@@ -2050,7 +2050,7 @@ This section gives a concrete build order so a coding agent (or human developer)
 
 **Acceptance test:** A simulated crash report matches a regex signature, displays the fix, and the user can optionally submit to GitHub after preview.
 
-### Phase 5: Governance & Triage — Module 7
+### Phase 5: Governance & Triage â€” Module 7
 
 1. Triage Center tab with under-review items from `registry.db`.
 2. Live GitHub Discussions API integration for poll percentages.
@@ -2061,7 +2061,7 @@ This section gives a concrete build order so a coding agent (or human developer)
 
 **Acceptance test:** An item marked under_review appears in the Triage Center with live poll data.
 
-### Phase 6: MCP Server — Module 5
+### Phase 6: MCP Server â€” Module 5
 
 1. MCP server with localhost binding, ephemeral port, per-session auth token.
 2. Approval queue with persistent grants in `local_state.db`.
@@ -2070,7 +2070,7 @@ This section gives a concrete build order so a coding agent (or human developer)
 
 **Acceptance test:** Claude Desktop connects with the token, calls `list_instance_mods` and `disable_mod`, and the user sees the approval prompt.
 
-### Phase 7: Dev Mode — Optional
+### Phase 7: Dev Mode â€” Optional
 
 1. Sandbox detection (Docker, Podman, Firecracker).
 2. Repo clone + build in sandbox with no network.
@@ -2078,7 +2078,7 @@ This section gives a concrete build order so a coding agent (or human developer)
 
 **Acceptance test:** User can build a mod from a GitHub URL inside a Docker container and test it.
 
-### Phase 8: Web Directory — Module 6
+### Phase 8: Web Directory â€” Module 6
 
 1. Static Next.js site that fetches `registry.db` from GitHub Release Asset.
 2. Server-rendered mod cards.
@@ -2091,7 +2091,7 @@ This section gives a concrete build order so a coding agent (or human developer)
 
 1. Code signing certificate for Windows / macOS notarization.
 2. Auto-update mechanism via Tauri's built-in updater.
-3. Disk space pre-check (§7.1.2).
+3. Disk space pre-check (Â§7.1.2).
 4. Instance deletion to OS trash.
 5. Pack export to `.mrpack` / custom JSON.
 6. Telemetry opt-in flow.
@@ -2105,12 +2105,12 @@ The **minimum viable product** is reached when:
 - Crash reports work with preview-before-submit.
 - Triage Center shows live poll data.
 - MCP server works with approvals.
-- All security controls from §15 are in place.
+- All security controls from Â§15 are in place.
 - Offline Mode works with cached DB.
 - Modrinth integration can be fully disabled.
 - All GitHub OAuth features work or gracefully degrade.
 
-Dev Mode (Phase 7) and the Web Directory (Phase 8) can ship later. Phases 1–5 are the core product.
+Dev Mode (Phase 7) and the Web Directory (Phase 8) can ship later. Phases 1â€“5 are the core product.
 
 ---
 
@@ -2120,7 +2120,7 @@ This section is an honest disclosure of what the spec does not yet cover, what a
 
 ### 18.1 Known Limitations
 
-- **GitHub as a single point of failure for the central registry.** If GitHub is down, the curated catalog and updates are inaccessible. The "Bootstrap Bootstrap" emergency URL is a future concern (user deferred this). Current mitigation: Degraded Mode (§4.3) allows continuing with cached data.
+- **GitHub as a single point of failure for the central registry.** If GitHub is down, the curated catalog and updates are inaccessible. The "Bootstrap Bootstrap" emergency URL is a future concern (user deferred this). Current mitigation: Degraded Mode (Â§4.3) allows continuing with cached data.
 
 - **Modrinth is still reachable for its batch and version APIs even with the toggle off** in some code paths. The `modrinth_id` curated mods are filtered from Browse, but if a developer URL points to a Modrinth CDN (e.g., direct file hosting), those downloads would still work. The toggle is a UI/feature gate, not a network-level block.
 
@@ -2140,7 +2140,7 @@ This section is an honest disclosure of what the spec does not yet cover, what a
 
 - **No automated tests are defined.** The spec describes the system but does not include a testing strategy (unit tests, integration tests, end-to-end tests).
 
-- **No migration scripts for `registry.db` schema changes.** When the compiler adds a new column, existing client apps will fail. The versioning protocol (§4.1a) blocks forward-incompatible DBs but doesn't define what migrations look like.
+- **No migration scripts for `registry.db` schema changes.** When the compiler adds a new column, existing client apps will fail. The versioning protocol (Â§4.1a) blocks forward-incompatible DBs but doesn't define what migrations look like.
 
 - **`local_state.db` migrations are specified as "robust against data loss" but no rollback strategy is defined.** If a migration fails halfway, what state is the user left in?
 
@@ -2217,11 +2217,11 @@ The spec is comprehensive, internally consistent, and covers all major architect
 | Audit log | High | Append-only, well-defined format |
 
 **Recommended next steps:**
-1. Begin Phase 0 (repository setup) and Phase 1 (compiler) immediately — these are prerequisites for everything else.
+1. Begin Phase 0 (repository setup) and Phase 1 (compiler) immediately â€” these are prerequisites for everything else.
 2. Build a working prototype of the Rust instance engine (Phase 2) before investing heavily in the React UI.
-3. Get 2–3 curators to seed the registry with real mods and test the pack installation flow end-to-end.
+3. Get 2â€“3 curators to seed the registry with real mods and test the pack installation flow end-to-end.
 4. Set up CI for the compiler with sample test data.
-5. Establish a security review process before the public launch — all Critical/High items in §15.1 should be verified.
+5. Establish a security review process before the public launch â€” all Critical/High items in Â§15.1 should be verified.
 
 **This document is the source of truth.** When implementation questions arise that are not answered here, prefer the simplest interpretation that is consistent with the existing decisions. Update this document as those questions are resolved.
 ```
@@ -2382,12 +2382,12 @@ ead_mod_manifest, enable_mod, search_knowledge_base) per E2 superset.
 
 ### 19.13 Desktop Reliability, UX Coherence, and Safe Operations
 
-> Approved principles for the Desktop Upgrade Execution Plan (packages A1–D5). Last updated 2026-07-10.
+> Approved principles for the Desktop Upgrade Execution Plan (packages A1â€“D5). Last updated 2026-07-10.
 
 **Architecture principles:**
 
 1. **One canonical launch orchestration path.** There is exactly one route through health preflight, user decision, launch mode selection, process spawn, PID tracking, and exit handling. Dialogs return decisions; they do not launch.
-2. **One canonical install transaction path.** Every mod/update/removal entry point resolves an `InstallIntent` → `ResolvedInstallPlan` → verified staging → atomic application → health scan → result. No page bypasses the plan.
+2. **One canonical install transaction path.** Every mod/update/removal entry point resolves an `InstallIntent` â†’ `ResolvedInstallPlan` â†’ verified staging â†’ atomic application â†’ health scan â†’ result. No page bypasses the plan.
 3. **React dialogs return user decisions and do not execute business operations.** A dialog's only side effect is calling `onConfirm()` or `onCancel()`. The parent component dispatches backend commands.
 4. **Process state survives navigation.** Running-instance identity, PID, console subscription, and exit status live in a controller that outlives page components. React may query backend state after remount.
 5. **User-changing operations are previewable and reversible.** Every manifest mutation produces a plan that shows what changes before execution. Snapshots enable rollback.
@@ -2414,6 +2414,55 @@ ead_mod_manifest, enable_mod, search_knowledge_base) per E2 superset.
 - **Required tests:** direct/delegated warning approval, cancellation, launch failure recovery, concurrent-launch rejection, PID-specific kill, navigation/remount recovery, exit-event reconciliation, filename-only health actions, and CLI health-gated launch parity.
 - **Rejected alternatives:** dialogs invoking launch commands; separate direct and delegated preflight paths; component-local process state as the source of truth; and deriving filenames from registry or mod IDs.
 
+#### 19.13.3 Release C canonical install-transaction architecture
+
+> Approved design from C0 Sol architect call. Implementation packages C1–C4.
+
+**Five-phase pipeline (all in `agora-core`):**
+
+1. **Resolve** — pure data, no instance changes. Takes InstallIntent, returns ResolvedInstallPlan with required/optional deps, conflicts, files to add/remove/disable, snapshot requirement, disk estimate, warnings, and blocking errors.
+2. **Stage** — download all artifacts into <instance_dir>/.agora/staging/<fingerprint>/. Verify every artifact before touching the live instance. Any verification failure aborts with zero live instance changes.
+3. **Snapshot** — create recovery snapshot of mods/ + instance_manifest.json immediately before application. .agora/ excluded.
+4. **Apply** — atomic stage-then-swap: remove/disable/add files, then write instance_manifest.json.tmp → fsync → atomic rename over instance_manifest.json. **The manifest rename is the single commit point.** Pre-application manifest backup at .bak.<fp> enables fast rollback.
+5. **Health scan** — run check_instance_health post-apply. Failure triggers automatic snapshot restore, guaranteeing the instance ends in either (healthy + new install) or (pre-install state).
+
+**Key invariants:**
+- InstallIntent → ResolvedInstallPlan: plan makes zero instance changes. Deterministic for unchanged input (intent + instance state + registry revision).
+- Plan fingerprint = SHA-256(canonical_json(intent) || canonical_json(resolved_candidates) || instance_state_hash || registry_revision). Stale plans are rejected at apply time.
+- Required dependencies: fail closed. Missing → blocking error, plan cannot proceed.
+- Optional dependencies: governed by OptionalDepsPolicy (Include/ExcludeAll/Prompt). Prompt returns choices to frontend; user picks, intent re-submitted.
+- Conflicts: structured DepConflict with esolution_options (Replace/Skip/DisableExisting/Abort) and locking flag.
+- Existing-file: same item same version → Skip (no-op). Same item different version → Update (remove old + add new). Different item same filename → conflict.
+- Staging: same-volume as mods/ → moves are atomic renames. Orphan staging dirs cleaned on next launcher startup.
+- Verification: SHA-256 required for curated items. Modrinth uses strongest available (SHA-512 > 256 > 1). SHA-1 only accepted with Modrinth's published hash. No hash → blocking error.
+- Snapshot: always required for mutating operations (install/update/remove). Label encodes plan fingerprint.
+- Atomic application: remove phase (move targets to staging trash), disable phase (.jar → .jar.disabled), add phase (atomic rename from staging into mods/), manifest commit (.tmp → fsync → rename). Every pre-commit step is reversible.
+- Fast rollback (pre-commit): reverse file moves, restore manifest .bak. Snapshot restore (post-commit or crash): restore from snapshot zip. Health scan failure → automatic snapshot restore.
+
+**State ownership:**
+- `agora-core`: `InstallPipeline` struct with `resolve_plan()`, `apply_plan()`, `cancel()`. Owns all business logic, dependency resolution, staging, application, hashing, health checks. No Tauri dependency. Communicates progress via `&dyn ProgressReporter` trait.
+- Tauri facade: thin commands (`resolve_install_plan`, `apply_install_plan`, `cancel_install`). Provides ProgressReporter impl that emits Tauri events. Maps core errors to Tauri errors.
+- React: constructs InstallIntent from user action, renders plan, handles interactive prompts, subscribes to progress events, sends cancel on user request. Never touches filesystem or makes integrity decisions.
+
+**CLI reuse:** `agora-cli` depends on `agora-core`, calls `InstallPipeline` directly. Provides ProgressReporter impl for stdout progress bar. Cancellation via Ctrl+C. --dry-run resolves + prints, no mutation. --yes skips interactive prompts.
+
+**Migration sequence (behind feature flag INSTALL_PIPELINE_V2):**
+1. Build core InstallPipeline with unit tests.
+2. Add Tauri facade commands alongside existing commands.
+3. Migrate ModDetail main install → plan UI component → apply pipeline.
+4. Migrate Versions tab.
+5. Migrate raw Modrinth install (wraps intent with SourceType=Modrinth).
+6. Migrate InstanceEditor Add Mod.
+7. Remove old commands + feature flag.
+
+**Required tests:** resolution (missing dep, optional, cycles, conflicts); fingerprint staleness; staging verification (hash mismatch, no hash, network failure); snapshot (create + restore, .agora exclusion); application atomicity (pre-commit rollback, post-commit snapshot restore, crash recovery); health scan (success + failure rollback); cancellation (each phase); E2E (full install via Tauri mock/CLI); migration flag toggling.
+
+**Rejected alternatives:**
+- Dialogs or frontend code invoking install commands directly.
+- Skipping dependency resolution for Modrinth or manual installs.
+- Verifying artifacts after touching the live instance.
+- Incremental/file-level snapshot in v1 (full zip only for correctness).
+- Staging on a different volume than the instance (atomic rename fails cross-volume).
 ---
 
 **This MASTER_SPEC.md is the single authoritative spec. The previously-separate plan files (1782081355093-crash-investigator-plan.md, 1782611768583-agora-v1-launcher-refactor.md, dependency-aware-mod-ops-plan.md) have been deleted; their key decisions are captured in section 19 above. BACKLOG.md remains the canonical per-phase task tracker.**
