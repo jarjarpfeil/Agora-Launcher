@@ -57,7 +57,7 @@ test('app shell renders with Agora branding', async ({ page }) => {
 test('navigation to browse works', async ({ page }) => {
   await page.goto('/');
   // Sidebar uses <button> elements (not <a> links) for navigation.
-  const browseButton = page.getByRole('button', { name: /browse/i });
+  const browseButton = page.getByRole('button', { name: 'Browse', exact: true });
   await expect(browseButton).toBeVisible();
   await browseButton.click();
   // After clicking Browse, the page should show a "Browse" heading.
@@ -69,7 +69,7 @@ test('sidebar navigation buttons are visible', async ({ page }) => {
   // All base sidebar tabs should be present as buttons.
   const tabs = ['Home', 'Browse', 'My Instances', 'Community Governance', 'Settings'];
   for (const tab of tabs) {
-    await expect(page.getByRole('button', { name: tab })).toBeVisible();
+    await expect(page.getByRole('button', { name: tab, exact: true })).toBeVisible();
   }
 });
 

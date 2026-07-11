@@ -218,6 +218,7 @@ export function InstallFlow({
   const handleCancel = useCallback(() => {
     if (state.phase === 'executing') {
       state.token.cancel();
+      return; // Dialog stays open — user must wait for outcome.
     }
     if (state.phase === 'review' || state.phase === 'error') {
       dispatch({ type: 'close' });
@@ -519,9 +520,13 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-// Stub invoke — will be wired to actual Tauri command in C3.
+// Stub invoke — disabled until C2 pipeline is production-ready.
+// Returns a hard error so no caller can accidentally proceed.
 async function invokeApplyPlan(_plan: ResolvedInstallPlan): Promise<InstallOutcome> {
-  // Simulate a delay for development testing.
-  await new Promise((r) => setTimeout(r, 1500));
-  return { type: 'success', installedItems: ['test.jar'], existingItemsReused: [], warnings: [], health: { type: 'skipped', reason: 'dev' }, snapshotId: 'snap-1' };
+  await new Promise((r) => setTimeout(r, 100));
+  return {
+    type: 'failed',
+    error: 'Install pipeline is under active development (C2). Please use the legacy install flow.',
+    rollbackPerformed: false,
+  };
 }

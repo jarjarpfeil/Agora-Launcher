@@ -236,6 +236,18 @@ export interface RunningProcess {
 export const queryLaunchState = () =>
   invoke<RunningProcess | null>('query_launch_state');
 
+export const getLkgMarker = (instanceId: string) =>
+  invoke<Record<string, unknown> | null>('get_lkg_marker', { instanceId });
+
+export const exportLockfile = (instanceId: string) =>
+  invoke<Record<string, unknown>>('export_lockfile', { instanceId });
+
+export const detectDrift = (instanceId: string, snapshotId: string) =>
+  invoke<Record<string, unknown>>('detect_drift', { instanceId, snapshotId });
+
+export const importLockfile = (lockfileJson: string) =>
+  invoke<string>('import_lockfile', { lockfileJson });
+
 export type HealthScore = 'green' | 'yellow' | 'red';
 
 export interface HealthWarning {

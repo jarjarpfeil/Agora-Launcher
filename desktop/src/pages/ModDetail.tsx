@@ -39,7 +39,7 @@ import {
   type RegistryItem,
   type RawModrinthVersionCandidate,
 } from '../lib/tauri';
-import { InstallFlow } from '../components/InstallFlow';
+
 
 // Allowlist schema for rendering community/upstream markdown (Modrinth body).
 // Built on rehype-sanitize's default (already strips <script>, on* handlers,
@@ -686,19 +686,6 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     setDepPlan(null);
   };
 
-  const buildInstallIntent = (): import('../lib/installFlow').InstallIntent => ({
-    action: {
-      type: 'install',
-      sourceType: item?.modrinth_id ? 'modrinth' : 'curated',
-      itemId: item?.id ?? '',
-      candidateVersion: selectedModrinthCandidate?.version_id ?? selectedCandidate?.version ?? undefined,
-    },
-    targetInstance: selectedInstanceId ?? '',
-    optionalDeps: { type: 'exclude-all' },
-    requestedBy: 'interactive',
-    overrides: { allowReplace: false, skipHealthScan: false, forceConflictResolution: {} },
-  });
-
   // Inline create: submit handler
   const handleCreateInstance = async () => {
     setCreateBusy(true);
@@ -1235,14 +1222,9 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
           </section>
         )}
 
-        {/* InstallFlow — wraps the new canonical install pipeline */}
-        <InstallFlow
-          intent={buildInstallIntent()}
-          instanceName={instances.find((i) => i.instance_id === (selectedInstanceId ?? ''))?.name ?? ''}
-          onOpenInstance={onOpenInstanceEditor}
-          onClose={handleCloseInstallFlow}
-          open={showInstallFlow}
-        />
+        {/* InstallFlow — disabled until C2 pipeline is production-ready */}
+        {/* TODO(C2): remove #if and the stub executor in InstallFlow */}
+
 
         {/* Pack-create dialog */}
         {showPackCreate && (

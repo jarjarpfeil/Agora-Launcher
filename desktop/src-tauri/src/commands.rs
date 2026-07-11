@@ -460,6 +460,12 @@ pub async fn launch_instance_direct(
 
     let full_args = agora_core::launch::build_launch_command(&opts, &version_info, &abs_cp);
 
+    // Pre-launch snapshot — captures mods/ + manifest for LKG promotion.
+    let snapshot_label = format!("pre-launch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+    if let Ok(instance_dir) = crate::paths::instance_dir(&app, &sanitized) {
+        let _ = agora_core::snapshot::create_snapshot(&instance_dir, Some(&snapshot_label));
+    }
+
     let mut child = tokio::process::Command::new(&opts.java_path)
         .args(&full_args)
         .stdout(std::process::Stdio::piped())
@@ -525,6 +531,29 @@ pub async fn launch_instance_direct(
     tokio::spawn(async move {
         let status = child.wait().await;
         let exit_code = status.as_ref().ok().and_then(|s| s.code()).unwrap_or(-1);
+        // Classify launch and promote to LKG if applicable.
+        let outcome = agora_core::lkg::classify_launch(&agora_core::lkg::LaunchEvents {
+            exit_code: Some(exit_code),
+            runtime_ms: 0, // TODO: measure actual runtime
+            was_user_cancelled: false,
+            crash_report_found: exit_code != 0,
+            log_crash_signature_matched: false,
+        });
+        if agora_core::lkg::promotes_to_lkg(&outcome) {
+            let lkg_data = serde_json::json!({
+                "promoted_at": chrono::Utc::now().to_rfc3339(),
+                "launch_session_id": format!("launch-{}", chrono::Utc::now().timestamp()),
+                "outcome": "success",
+                "exit_code": exit_code,
+                "instance_id": inst_id,
+            });
+            if let Ok(dir) = crate::paths::instance_dir(&app3, &inst_id) {
+                let _ = std::fs::write(
+                    dir.join("lkg.json"),
+                    serde_json::to_string_pretty(&lkg_data).unwrap_or_default(),
+                );
+            }
+        }
         // Clear backend running process state on exit.
         let mut s = state_on_exit.lock().await;
         s.running_process = None;
@@ -2188,8 +2217,54 @@ pub async fn create_snapshot(app: tauri::AppHandle, _state: tauri::State<'_, Lau
     let sanitized = paths::sanitize_id(&instance_id);
     let instance_dir = paths::instance_dir(&app, &sanitized)
         .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
-    agora_core::snapshot::create_snapshot(&instance_dir, label.as_deref())
-        .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })
+
+    let result = agora_core::snapshot::create_snapshot(&instance_dir, label.as_deref())
+        .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })?;
+
+    // Run retention policy after every snapshot creation.
+    let _ = run_retention(&instance_dir);
+
+    Ok(result)
+}
+
+/// List all snapshot IDs for an instance, determine which are LKG and
+/// pre-restore, then evict those exceeding the retention policy.
+fn run_retention(instance_dir: &std::path::Path) -> Result<(), String> {
+    use agora_core::lkg::RetentionPolicy;
+
+    let snapshots = agora_core::snapshot::list_snapshots(instance_dir)
+        .map_err(|e| format!("list_snapshots: {e}"))?;
+    if snapshots.is_empty() {
+        return Ok(());
+    }
+
+    // Read lkg.json to find LKG snapshot IDs.
+    let lkg_path = instance_dir.join("lkg.json");
+    let lkg_ids: Vec<String> = if lkg_path.is_file() {
+        if let Ok(text) = std::fs::read_to_string(&lkg_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                val["currentLkgSnapshotId"].as_str()
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default()
+            } else { vec![] }
+        } else { vec![] }
+    } else { vec![] };
+
+    // Identify pre-restore snapshot IDs from labels.
+    let pre_restore_ids: Vec<String> = snapshots.iter()
+        .filter(|s| s.label.as_deref().map_or(false, |l| l.starts_with("pre-restore-")))
+        .map(|s| s.id.clone())
+        .collect();
+
+    let all_ids: Vec<String> = snapshots.iter().map(|s| s.id.clone()).collect();
+    let policy = RetentionPolicy::default();
+    let to_evict = agora_core::lkg::retention_plan(&all_ids, &lkg_ids, &pre_restore_ids, &policy);
+
+    for id in &to_evict {
+        let _ = agora_core::snapshot::delete_snapshot(instance_dir, id);
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -2197,6 +2272,11 @@ pub async fn restore_snapshot(app: tauri::AppHandle, _state: tauri::State<'_, La
     let sanitized = paths::sanitize_id(&instance_id);
     let instance_dir = paths::instance_dir(&app, &sanitized)
         .map_err(|e| LauncherError::Generic { code: "ERR_PATH".into(), message: e.to_string() })?;
+
+    // Create a pre-restore snapshot so the user can undo this restore.
+    let pre_label = format!("pre-restore-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
+    let _ = agora_core::snapshot::create_snapshot(&instance_dir, Some(&pre_label));
+
     agora_core::snapshot::restore_snapshot(&instance_dir, &snapshot_id)
         .map_err(|e| LauncherError::Generic { code: "ERR_SNAPSHOT".into(), message: e })
 }
@@ -2605,9 +2685,15 @@ pub async fn browse_page(
 
 // ---------------------------------------------------------------------------
 // C0-C3: Install pipeline facade commands
+//
+// NOTE: These commands are under active development (Release C). The resolver
+// is a stub, and the executor targets a hardcoded path. They are feature-gated
+// behind `cfg(not(production_install))` and must NOT be registered in
+// production builds until C2 integration tests pass.
 // ---------------------------------------------------------------------------
 
 /// Resolve an InstallIntent into a ResolvedInstallPlan (read-only, no mutation).
+#[cfg(not(feature = "production_install"))]
 #[tauri::command]
 pub async fn resolve_install_plan(
     state: tauri::State<'_, LauncherState>,
@@ -2624,6 +2710,8 @@ pub async fn resolve_install_plan(
 }
 
 /// Apply a fully-resolved install plan (staged, atomic, verified).
+/// DANGER: targets a hardcoded path — DO NOT register in production builds.
+#[cfg(not(feature = "production_install"))]
 #[tauri::command]
 pub async fn apply_install_plan(
     _state: tauri::State<'_, LauncherState>,
@@ -2636,18 +2724,216 @@ pub async fn apply_install_plan(
         fn report(&self, _event: ProgressEvent) {}
     }
     let cancel = CancellationToken::new();
-    let instance_dir = std::path::PathBuf::from("/tmp/agora-instance"); // TODO: resolve from plan
+    // SAFETY: hardcoded temp path; real instance resolution deferred to C2.
+    let instance_dir = std::path::PathBuf::from("/tmp/agora-instance");
     let outcome = pipeline.execute_plan(&plan, &instance_dir, &StubReporter, &cancel).await;
     Ok(outcome)
 }
 
+/// Read the LKG marker for an instance, if any.
+#[tauri::command]
+pub async fn get_lkg_marker(
+    app: tauri::AppHandle,
+    instance_id: String,
+) -> LauncherResult<Option<serde_json::Value>> {
+    use std::path::Path;
+    let sanitized = crate::paths::sanitize_id(&instance_id);
+    let instance_dir = crate::paths::instance_dir(&app, &sanitized)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let lkg_path = instance_dir.join("lkg.json");
+    if !lkg_path.is_file() {
+        return Ok(None);
+    }
+    match std::fs::read_to_string(&lkg_path) {
+        Ok(text) => {
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| LauncherError::LocalStateFailed)?;
+            Ok(Some(value))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Detect drift between a snapshot's file index and the current instance state.
+#[tauri::command]
+pub async fn detect_drift(
+    app: tauri::AppHandle,
+    instance_id: String,
+    snapshot_id: String,
+) -> LauncherResult<serde_json::Value> {
+    use agora_core::lkg::FileEntry;
+    let sanitized = crate::paths::sanitize_id(&instance_id);
+    let instance_dir = crate::paths::instance_dir(&app, &sanitized)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+
+    // Restore snapshot index to get the reference file list.
+    let index_path = instance_dir.join(".agora").join("snapshots").join(&snapshot_id).join("index.json");
+    let index_text = std::fs::read_to_string(&index_path)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let index: serde_json::Value = serde_json::from_str(&index_text)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+
+    // Parse reference files from snapshot index.
+    let ref_files: Vec<FileEntry> = index["fileIndex"]
+        .as_array()
+        .map(|arr| {
+            arr.iter().filter_map(|v| {
+                Some(FileEntry {
+                    path: v["path"].as_str()?.to_string(),
+                    sha256: v["sha256"].as_str()?.to_string(),
+                    size: v["size"].as_u64().unwrap_or(0),
+                })
+            }).collect()
+        })
+        .unwrap_or_default();
+
+    // Scan current mods/ directory.
+    let mods_dir = instance_dir.join("mods");
+    let mut current_files = Vec::new();
+    if mods_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&mods_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "jar" || e == "disabled") {
+                    if let Ok(bytes) = std::fs::read(&path) {
+                        let sha256 = {
+                            use sha2::Digest;
+                            let mut hasher = sha2::Sha256::new();
+                            hasher.update(&bytes);
+                            format!("{:x}", hasher.finalize())
+                        };
+                        current_files.push(FileEntry {
+                            path: entry.file_name().to_string_lossy().to_string(),
+                            sha256,
+                            size: bytes.len() as u64,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let diff = agora_core::lkg::compute_diff(&ref_files, &current_files, Some(snapshot_id), None);
+    Ok(serde_json::to_value(&diff).unwrap_or_default())
+}
+
+/// Export a portable lockfile for an instance.
+#[tauri::command]
+pub async fn export_lockfile(
+    app: tauri::AppHandle,
+    instance_id: String,
+) -> LauncherResult<serde_json::Value> {
+    use serde_json::json;
+    let sanitized = crate::paths::sanitize_id(&instance_id);
+    let manifest_path = crate::paths::instance_manifest_path(&app, &sanitized)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let manifest: crate::models::InstanceManifest = serde_json::from_str(&text)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
+
+    let mods: Vec<serde_json::Value> = manifest.mods.iter().map(|m| {
+        json!({
+            "id": m.mod_jar_id,
+            "filename": m.filename,
+            "sha256": m.sha256,
+            "source": m.source,
+            "version": m.version,
+        })
+    }).collect();
+
+    Ok(json!({
+        "schemaVersion": 1,
+        "generator": "agora",
+        "exportedAt": chrono::Utc::now().to_rfc3339(),
+        "instance": {
+            "name": manifest.name,
+            "gameVersion": manifest.minecraft_version,
+            "loader": { "type": manifest.loader, "version": manifest.loader_version },
+        },
+        "mods": mods,
+    }))
+}
+
+/// Import a lockfile — validate the JSON and create an instance skeleton.
+/// Does NOT download artifacts (use the existing install commands for that).
+/// Returns the created instance_id or a precise validation error.
+#[tauri::command]
+pub async fn import_lockfile(
+    app: tauri::AppHandle,
+    lockfile_json: String,
+) -> LauncherResult<String> {
+    // 1. Parse lockfile JSON.
+    let lf: serde_json::Value = serde_json::from_str(&lockfile_json)
+        .map_err(|e| LauncherError::Generic { code: "ERR_PARSE".into(), message: format!("Invalid lockfile JSON: {e}") })?;
+
+    // 2. Verify schema version.
+    let schema_ver = lf["schemaVersion"].as_i64().unwrap_or(0);
+    if schema_ver != 1 {
+        return Err(LauncherError::Generic {
+            code: "ERR_SCHEMA".into(),
+            message: format!("Unsupported lockfile schema version: {schema_ver}. Expected 1."),
+        });
+    }
+
+    // 3. Extract instance metadata.
+    let name = lf["instance"]["name"].as_str().unwrap_or("Imported Instance");
+    let game_version = lf["instance"]["gameVersion"].as_str().unwrap_or("");
+    let loader_type = lf["instance"]["loader"]["type"].as_str().unwrap_or("");
+    let loader_ver = lf["instance"]["loader"]["version"].as_str().unwrap_or("");
+    if game_version.is_empty() || loader_type.is_empty() {
+        return Err(LauncherError::Generic {
+            code: "ERR_MISSING_FIELD".into(),
+            message: "Lockfile missing required instance.gameVersion or instance.loader fields.".into(),
+        });
+    }
+
+    // 4. Create the instance.
+    let request = CreateInstanceRequest {
+        name: name.to_string(),
+        instance_id: String::new(),
+        minecraft_version: game_version.to_string(),
+        loader: loader_type.to_string(),
+        loader_version: loader_ver.to_string(),
+        jvm_memory_mb: Some(4096),
+        jvm_gc: None,
+        jvm_custom_args: None,
+        jvm_always_pre_touch: None,
+    };
+    let inst_row = crate::instances::create_instance(app.clone(), request).await?;
+    let inst_id = inst_row.instance_id;
+
+    // 5. Verify lockfile content hash if present.
+    if let Some(expected_hash) = lf["contentHash"].as_str().filter(|h| !h.is_empty()) {
+        let mut canonical = lf.clone();
+        canonical["signature"] = serde_json::Value::Null;
+        let canonical_bytes = serde_json::to_vec(&canonical)
+            .map_err(|_| LauncherError::Generic { code: "ERR_SERIALIZE".into(), message: "Failed to serialize canonical lockfile".into() })?;
+        let actual_hash = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(&canonical_bytes);
+            format!("{:x}", hasher.finalize())
+        };
+        if actual_hash != expected_hash {
+            return Err(LauncherError::Generic {
+                code: "ERR_HASH_MISMATCH".into(),
+                message: format!("Lockfile contentHash mismatch: expected {expected_hash}, computed {actual_hash}."),
+            });
+        }
+    }
+
+    Ok(inst_id)
+}
+
 /// Cancel a running install.
+/// NOTE: cancellation token lookup not yet wired — operation is a no-op.
+#[cfg(not(feature = "production_install"))]
 #[tauri::command]
 pub async fn cancel_install(
     _state: tauri::State<'_, LauncherState>,
     _plan_id: String,
 ) -> LauncherResult<()> {
-    // TODO: wire cancellation token lookup
     Ok(())
 }
 

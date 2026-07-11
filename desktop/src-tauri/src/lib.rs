@@ -64,10 +64,14 @@ pub fn run() {
             commands::launch_instance,
             commands::launch_instance_direct,
             commands::query_launch_state,
-            commands::resolve_install_plan,
-            commands::apply_install_plan,
-            commands::cancel_install,
+            // commands::resolve_install_plan,   // C2: feature-gated
+            // commands::apply_install_plan,     // C2: unsafe stub
+            // commands::cancel_install,         // C2: not yet wired
             commands::check_instance_updates,
+            commands::get_lkg_marker,
+            commands::export_lockfile,
+            commands::import_lockfile,
+            commands::detect_drift,
             commands::list_snapshots,
             commands::create_snapshot,
             commands::restore_snapshot,

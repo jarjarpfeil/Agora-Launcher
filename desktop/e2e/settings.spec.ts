@@ -33,6 +33,8 @@ test('one failed setting does not cascade and settings page renders', async ({ p
           return Promise.resolve(null);
         }
         if (command === 'get_windows_accent_color') return Promise.resolve(null);
+        if (command === 'list_instances') return Promise.resolve([]);
+        if (command === 'list_snapshots') return Promise.resolve([]);
         if (command.startsWith('plugin:event|')) return Promise.resolve(1);
         if (command === 'set_setting') return Promise.resolve(null);
         return Promise.resolve(null);
@@ -45,7 +47,7 @@ test('one failed setting does not cascade and settings page renders', async ({ p
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
 
   // The settings page should render all sections even though ai_mcp_enabled
   // failed to load. Sensible defaults are used for the failed setting.

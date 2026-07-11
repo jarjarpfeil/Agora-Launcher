@@ -33,6 +33,8 @@ test('missing registry stays recoverable and retry success opens Browse', async 
             ? Promise.reject(new Error('Network unavailable'))
             : Promise.resolve(ready);
         }
+        if (command === 'list_instances') return Promise.resolve([]);
+        if (command === 'list_snapshots') return Promise.resolve([]);
         if (command === 'list_categories' || command === 'list_manifest_loaders' || command === 'list_manifest_mc_versions') return Promise.resolve([]);
         if (command === 'browse_search') return Promise.resolve({ items: [], total: 0, page: 0, hasMore: false });
         return Promise.resolve(null);
@@ -45,7 +47,7 @@ test('missing registry stays recoverable and retry success opens Browse', async 
   });
 
   await page.goto('/');
-  await page.getByRole('button', { name: 'Browse' }).click();
+  await page.getByRole('button', { name: 'Browse', exact: true }).click();
   await expect(page.getByText('No registry database found.')).toBeVisible();
   await expect(page.getByText('No items to display.')).toHaveCount(0);
 

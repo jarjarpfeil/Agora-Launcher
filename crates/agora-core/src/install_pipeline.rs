@@ -33,6 +33,7 @@ pub use crate::dependency_ops::{DepSource, Requirement};
 
 /// What the user wants to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum InstallOperation {
     Install,
     Update,
@@ -45,6 +46,7 @@ pub enum InstallOperation {
 
 /// Where the item comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SourceType {
     /// Curated registry item (GitHub Release).
     Curated,
@@ -60,6 +62,7 @@ pub enum SourceType {
 
 /// How optional dependencies are handled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum OptionalDepsPolicy {
     /// Include only these specific optional deps (empty = none).
     Include(Vec<String>),
@@ -75,6 +78,7 @@ pub enum OptionalDepsPolicy {
 
 /// Who or what initiated this install.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum RequestSource {
     Interactive,
     CLI,
@@ -87,6 +91,7 @@ pub enum RequestSource {
 
 /// Describes where to obtain the artifact content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ArtifactSource {
     /// Download from a URL.
     Download { url: String },
@@ -99,6 +104,7 @@ pub enum ArtifactSource {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashSpec {
     /// Ordered by preference (strongest first). At least one entry required.
     /// SHA-256 is mandatory for curated items; SHA-1 accepted for Modrinth
@@ -107,12 +113,14 @@ pub struct HashSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HashedValue {
     pub algorithm: HashAlgorithm,
     pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum HashAlgorithm {
     Sha256,
     Sha512,
@@ -124,6 +132,7 @@ pub enum HashAlgorithm {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedDownload {
     pub item_id: String,
     pub version_id: String,
@@ -135,6 +144,7 @@ pub struct ResolvedDownload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedLocal {
     pub item_id: String,
     pub source_path: String,
@@ -144,6 +154,7 @@ pub struct ResolvedLocal {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ResolvedArtifact {
     Download(ResolvedDownload),
     LocalFile(ResolvedLocal),
@@ -155,6 +166,7 @@ pub enum ResolvedArtifact {
 
 /// How a resolved dependency relates to the instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum DepDisposition {
     /// Already installed at a compatible version — no action needed.
     ReuseExisting { mod_jar_id: String, installed_filename: String },
@@ -167,6 +179,7 @@ pub enum DepDisposition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedDep {
     pub mod_jar_id: String,
     pub requirement: Requirement,
@@ -179,6 +192,7 @@ pub struct ResolvedDep {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DepConflict {
     /// Stable identifier for this conflict (used in PendingChoice responses).
     pub conflict_id: String,
@@ -193,6 +207,7 @@ pub struct DepConflict {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ConflictKind {
     VersionConflict,
     DuplicateMod,
@@ -203,6 +218,7 @@ pub enum ConflictKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ConflictResolution {
     Replace,
     Skip,
@@ -215,6 +231,7 @@ pub enum ConflictResolution {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileAdd {
     pub target_filename: String,
     pub staging_filename: String,
@@ -223,11 +240,13 @@ pub struct FileAdd {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileRemove {
     pub filename: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileDisable {
     pub filename: String,
 }
@@ -237,12 +256,14 @@ pub struct FileDisable {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanWarning {
     pub code: String,
     pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanError {
     pub code: String,
     pub message: String,
@@ -255,6 +276,7 @@ pub struct PlanError {
 /// Snapshot is always required for mutating operations.
 /// This struct carries only the parameters, not an optional flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SnapshotPlan {
     pub label: String,            // encodes plan fingerprint + timestamp
     pub estimated_bytes: u64,
@@ -265,6 +287,7 @@ pub struct SnapshotPlan {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiskSpaceEstimate {
     pub download_bytes: u64,
     pub snapshot_bytes: u64,
@@ -292,6 +315,7 @@ impl DiskSpaceEstimate {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum PendingChoice {
     OptionalDependencies {
         choice_id: String,
@@ -305,12 +329,14 @@ pub enum PendingChoice {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct OptionalDepOption {
     pub mod_jar_id: String,
     pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictResolutionOption {
     pub resolution: ConflictResolution,
     pub label: String,
@@ -322,6 +348,7 @@ pub struct ConflictResolutionOption {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanOverrides {
     pub allow_replace: bool,
     pub skip_health_scan: bool,
@@ -334,6 +361,7 @@ pub struct PlanOverrides {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ResolvedOperation {
     Install {
         artifact: ResolvedArtifact,
@@ -349,6 +377,7 @@ pub enum ResolvedOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReverseDepInfo {
     pub mod_jar_id: String,
     pub filename: String,
@@ -362,6 +391,7 @@ pub struct ReverseDepInfo {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum InstallAction {
     Install {
         source_type: SourceType,
@@ -379,6 +409,7 @@ pub enum InstallAction {
 
 /// Pure input — what the user wants to do.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstallIntent {
     pub action: InstallAction,
     pub target_instance: String,
@@ -393,6 +424,7 @@ pub struct InstallIntent {
 
 /// Full read-only plan. Making a plan commits to no instance changes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResolvedInstallPlan {
     pub fingerprint: String,
     pub intent: InstallIntent,
@@ -439,6 +471,7 @@ impl ResolvedInstallPlan {
 /// A dedicated input type for plan fingerprint computation.
 /// Uses BTreeMap and sorted collections for deterministic serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanFingerprintInput {
     pub schema_version: u32,
     pub action: InstallAction,
@@ -450,6 +483,7 @@ pub struct PlanFingerprintInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ArtifactFingerprint {
     pub source_kind: String,          // "download" | "local"
     pub version_id: String,
@@ -465,6 +499,7 @@ pub struct ArtifactFingerprint {
 use crate::health::HealthReport;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum HealthOutcome {
     Completed(HealthReport),
     Skipped { reason: String },
@@ -475,6 +510,7 @@ pub enum HealthOutcome {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum InstallOutcome {
     Success {
         installed_items: Vec<String>,
@@ -504,6 +540,7 @@ pub enum InstallOutcome {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProgressEvent {
     pub plan_id: String,
     pub phase: ProgressPhase,
@@ -515,6 +552,7 @@ pub struct ProgressEvent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ProgressPhase {
     Resolving,
     Staging,
@@ -680,12 +718,10 @@ impl InstallPipeline {
             message: "Creating recovery snapshot…".into(),
         });
 
-        let snapshot = crate::snapshot::create_snapshot(instance_dir, Some(&plan.snapshot.label))
-            .map_err(|e| e);
+        let snapshot = crate::snapshot::create_snapshot(instance_dir, Some(&plan.snapshot.label));
         let snapshot_id = match snapshot {
             Ok(ref s) => s.id.clone(),
             Err(ref e) => {
-                // Snapshot failure is fatal — abort without mutation.
                 return InstallOutcome::Failed {
                     error: format!("Snapshot failed before apply: {e}"),
                     rollback_performed: false,
@@ -721,18 +757,25 @@ impl InstallPipeline {
             instance_dir,
             &staging_dir,
         );
-        match apply_result {
-            Ok(()) => {}
+        let rollback_result = match &apply_result {
+            Ok(()) => None,
             Err(e) => {
-                // Pre-commit failure — restore snapshot.
-                let _ = crate::snapshot::restore_snapshot(instance_dir, &snapshot_id);
-                let _ = std::fs::remove_dir_all(&staging_dir);
-                return InstallOutcome::Failed {
-                    error: format!("Apply failed, snapshot restored: {e}"),
-                    rollback_performed: true,
-                    snapshot_id: Some(snapshot_id),
-                };
+                match crate::snapshot::restore_snapshot(instance_dir, &snapshot_id) {
+                    Ok(()) => Some(format!("Apply failed, snapshot restored: {e}")),
+                    Err(restore_err) => Some(format!(
+                        "Apply failed AND snapshot restore also failed. Instance may be inconsistent. \
+                         Restore error: {restore_err}. Original error: {e}"
+                    )),
+                }
             }
+        };
+        if let Some(error_msg) = rollback_result {
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return InstallOutcome::Failed {
+                error: error_msg,
+                rollback_performed: true, // best-effort
+                snapshot_id: Some(snapshot_id),
+            };
         }
 
         // Check cancellation after commit.
@@ -763,35 +806,30 @@ impl InstallPipeline {
             warnings: vec![],
             blockers: vec![],
         };
-        let health_result: std::result::Result<crate::health::HealthReport, String> = Ok(if let Some(ref m) = manifest {
+        let health_report: crate::health::HealthReport = if let Some(ref m) = manifest {
             crate::health::health(instance_dir, m, None)
         } else {
             default_health
-        });
-        match health_result {
-            Ok(report) if !report.blockers.is_empty() || !report.warnings.is_empty() => {
-                // Health failure after commit — restore snapshot.
-                let _ = crate::snapshot::restore_snapshot(instance_dir, &snapshot_id);
-                let _ = std::fs::remove_dir_all(&staging_dir);
-                return InstallOutcome::HealthRollback {
-                    health_report: report,
+        };
+
+        let has_issues = !health_report.blockers.is_empty() || !health_report.warnings.is_empty();
+        if has_issues && !plan.intent.overrides.skip_health_scan {
+            let restore_outcome = crate::snapshot::restore_snapshot(instance_dir, &snapshot_id);
+            let _ = std::fs::remove_dir_all(&staging_dir);
+            return match restore_outcome {
+                Ok(()) => InstallOutcome::HealthRollback {
+                    health_report,
                     snapshot_id,
-                    warnings: vec![],
-                };
-            }
-            Ok(_) => {}
-            Err(e) => {
-                let _ = crate::snapshot::restore_snapshot(instance_dir, &snapshot_id);
-                let _ = std::fs::remove_dir_all(&staging_dir);
-                return InstallOutcome::Failed {
-                    error: format!("Health scan error, snapshot restored: {e}"),
-                    rollback_performed: true,
+                    warnings: plan.warnings.clone(),
+                },
+                Err(restore_err) => InstallOutcome::Failed {
+                    error: format!("Health scan found issues AND snapshot restore failed: {restore_err}"),
+                    rollback_performed: false,
                     snapshot_id: Some(snapshot_id),
-                };
-            }
+                },
+            };
         }
 
-        // Clean staging on success.
         let _ = std::fs::remove_dir_all(&staging_dir);
 
         reporter.report(ProgressEvent {
@@ -808,7 +846,7 @@ impl InstallPipeline {
             installed_items: plan.files_to_add.iter().map(|f| f.target_filename.clone()).collect(),
             existing_items_reused: vec![],
             warnings: plan.warnings.clone(),
-            health: HealthOutcome::Skipped { reason: "not yet implemented".into() },
+            health: HealthOutcome::Completed(health_report),
             snapshot_id,
         }
     }

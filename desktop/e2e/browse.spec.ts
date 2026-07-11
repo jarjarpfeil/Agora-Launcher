@@ -59,6 +59,8 @@ async function installBrowseMock(page: Page) {
           return Promise.resolve([]);
         }
         if (command === 'get_windows_accent_color') return Promise.resolve(null);
+        if (command === 'list_instances') return Promise.resolve([]);
+        if (command === 'list_snapshots') return Promise.resolve([]);
         if (command.startsWith('plugin:event|')) return Promise.resolve(1);
         if (command === 'browse_search' || command === 'browse_load_more') {
           return new Promise((resolve, reject) => calls.push({ command, args, resolve, reject }));
@@ -102,7 +104,7 @@ async function resolveCall(page: Page, index: number, result: BrowseResult) {
 
 async function openBrowse(page: Page) {
   await page.goto('/');
-  await page.getByRole('button', { name: 'Browse' }).click();
+  await page.getByRole('button', { name: 'Browse', exact: true }).click();
   // React StrictMode intentionally runs mount effects twice in development.
   await waitForCalls(page, 2);
   return page.evaluate(() => (window as any).__browseCalls.length - 1) as Promise<number>;
