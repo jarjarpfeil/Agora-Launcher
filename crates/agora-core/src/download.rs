@@ -3,6 +3,15 @@ use crate::loader_manifests;
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::Sha256;
 
+const MOD_DOWNLOAD_ALLOWLIST: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "api.github.com",
+    "cdn.modrinth.com",
+    "api.modrinth.com",
+];
+
 /// Raw SHA-256 hex digest of a byte slice.
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -15,6 +24,55 @@ pub fn sha1_hex(data: &[u8]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
+}
+
+/// Download a mod artifact using the dedicated GitHub/Modrinth allowlist.
+/// Both the initial URL and every redirect must remain HTTPS on port 443.
+pub async fn download_mod_bytes(url: &str) -> LauncherResult<Vec<u8>> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| LauncherError::UntrustedSource)?;
+    ensure_allowed_mod_url(&parsed)?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if ensure_allowed_mod_url(attempt.url()).is_ok() {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .user_agent("AgoraLauncher/1.0")
+        .build()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_NETWORK".into(),
+            message: format!("Failed to build mod download client: {e}"),
+        })?;
+    let response = client
+        .get(parsed.clone())
+        .send()
+        .await
+        .map_err(|_| LauncherError::NetworkOffline)?;
+    if !response.status().is_success() {
+        return Err(LauncherError::Generic {
+            code: "ERR_NETWORK".into(),
+            message: format!("HTTP {} for {}", response.status(), parsed),
+        });
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|_| LauncherError::NetworkOffline)
+}
+
+fn ensure_allowed_mod_url(url: &reqwest::Url) -> LauncherResult<()> {
+    let host = url.host_str().ok_or(LauncherError::UntrustedSource)?;
+    if url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && MOD_DOWNLOAD_ALLOWLIST.contains(&host)
+    {
+        Ok(())
+    } else {
+        Err(LauncherError::UntrustedSource)
+    }
 }
 
 /// Deterministic SHA-256 of a JSON payload after stripping volatile keys.

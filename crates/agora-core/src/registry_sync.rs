@@ -11,18 +11,16 @@ use ed25519_dalek::{Signature, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH
 use serde::{Deserialize, Serialize};
 
 /// The GitHub repository hosting registry release assets (`owner/repo`).
-const REGISTRY_REPO: &str =
-    match option_env!("AGORA_REGISTRY_REPO") {
-        Some(v) => v,
-        None => "jarjarpfeil/Agora-Minecraft-Mod-Loader",
-    };
+const REGISTRY_REPO: &str = match option_env!("AGORA_REGISTRY_REPO") {
+    Some(v) => v,
+    None => "jarjarpfeil/Agora-Minecraft-Mod-Loader",
+};
 
 /// Ed25519 public key (hex) for verifying registry.db signatures.
-const REGISTRY_PUBKEY_HEX: &str =
-    match option_env!("AGORA_REGISTRY_PUBKEY") {
-        Some(v) => v,
-        None => "47adee76cf587ee618f79eb2fa5bde003824d3bfc2dbb5080d33073c5a8f8c18",
-    };
+const REGISTRY_PUBKEY_HEX: &str = match option_env!("AGORA_REGISTRY_PUBKEY") {
+    Some(v) => v,
+    None => "47adee76cf587ee618f79eb2fa5bde003824d3bfc2dbb5080d33073c5a8f8c18",
+};
 
 /// App-side expected schema version for registry.db.
 ///
@@ -71,8 +69,11 @@ pub async fn check_and_download_update(
     force: bool,
     github_token: Option<String>,
 ) -> LauncherResult<RegistryStatus> {
-    let conn = db::local_state_connection(local_state_path)
-        .map_err(|e| LauncherError::Generic { code: "ERR_DB".into(), message: e.to_string() })?;
+    let conn =
+        db::local_state_connection(local_state_path).map_err(|e| LauncherError::Generic {
+            code: "ERR_DB".into(),
+            message: e.to_string(),
+        })?;
     if !db::is_network_enabled(&conn, "network_registry_sync_enabled") {
         return Err(LauncherError::Generic {
             code: "ERR_NETWORK_DISABLED".into(),
@@ -118,10 +119,7 @@ pub async fn check_and_download_update(
                 latest_tag: None,
                 update_available: false,
                 checked: false,
-                message: format!(
-                    "Could not check for updates: {}. Using cached registry.",
-                    e
-                ),
+                message: format!("Could not check for updates: {}. Using cached registry.", e),
             });
         }
     };
@@ -176,10 +174,10 @@ pub async fn check_and_download_update(
         });
     }
 
-    let db_path = paths::registry_db_path(app_data_dir)
-        .map_err(|_| LauncherError::RegistryMissing)?;
-    let sig_path = paths::registry_sig_path(app_data_dir)
-        .map_err(|_| LauncherError::RegistryMissing)?;
+    let db_path =
+        paths::registry_db_path(app_data_dir).map_err(|_| LauncherError::RegistryMissing)?;
+    let sig_path =
+        paths::registry_sig_path(app_data_dir).map_err(|_| LauncherError::RegistryMissing)?;
     atomic_replace_db(&db_path, &sig_path, &db_bytes, &sig_bytes)?;
     set_cached_tag(local_state_path, &latest.tag_name)?;
 
@@ -227,18 +225,12 @@ pub fn get_status(
 /// On first run with no cached DB, copy the local registry.db from the repo
 /// if it exists. Development convenience for local testing.
 #[cfg(debug_assertions)]
-pub fn seed_from_local_build(
-    app_data_dir: &std::path::PathBuf,
-) -> LauncherResult<bool> {
-    let dest = paths::registry_db_path(app_data_dir)
-        .map_err(|_| LauncherError::RegistryMissing)?;
+pub fn seed_from_local_build(app_data_dir: &std::path::PathBuf) -> LauncherResult<bool> {
+    let dest = paths::registry_db_path(app_data_dir).map_err(|_| LauncherError::RegistryMissing)?;
 
     if dest.exists() {
         let cached_version = read_cached_schema_version(Some(&dest)).unwrap_or(0);
-        let cached_mtime = dest
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok();
+        let cached_mtime = dest.metadata().and_then(|m| m.modified()).ok();
         let mut search_dir = std::env::current_dir().ok();
         for _ in 0..5 {
             if let Some(dir) = search_dir {
@@ -251,10 +243,7 @@ pub fn seed_from_local_build(
                         // version check alone misses content-only recompiles
                         // (added/edited mods at an unchanged schema version),
                         // leaving the dev cache stale.
-                        let local_mtime = candidate
-                            .metadata()
-                            .and_then(|m| m.modified())
-                            .ok();
+                        let local_mtime = candidate.metadata().and_then(|m| m.modified()).ok();
                         let newer_mtime = match (cached_mtime, local_mtime) {
                             (Some(c), Some(l)) => l > c,
                             _ => false,
@@ -271,7 +260,9 @@ pub fn seed_from_local_build(
                             }
                             eprintln!(
                                 "Re-seeded registry.db (schema {} -> {}) from local build at {}",
-                                cached_version, local_version, candidate.display()
+                                cached_version,
+                                local_version,
+                                candidate.display()
                             );
                             return Ok(true);
                         }
@@ -340,10 +331,7 @@ impl GitHubRelease {
     /// The Assets endpoint 302-redirects to a signed `objects.githubusercontent.com`
     /// URL that `reqwest` follows automatically and works for public repos.
     fn find_asset(&self, name: &str) -> Option<u64> {
-        self.assets
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.id)
+        self.assets.iter().find(|a| a.name == name).map(|a| a.id)
     }
 }
 
@@ -437,11 +425,10 @@ fn verify_signature(db_bytes: &[u8], sig_bytes: &[u8]) -> LauncherResult<()> {
         }
     }
 
-    let pubkey_bytes =
-        hex::decode(REGISTRY_PUBKEY_HEX).map_err(|_| LauncherError::Generic {
-            code: "ERR_REGISTRY_PUBKEY".to_string(),
-            message: "Invalid compiled-in registry public key.".to_string(),
-        })?;
+    let pubkey_bytes = hex::decode(REGISTRY_PUBKEY_HEX).map_err(|_| LauncherError::Generic {
+        code: "ERR_REGISTRY_PUBKEY".to_string(),
+        message: "Invalid compiled-in registry public key.".to_string(),
+    })?;
 
     if pubkey_bytes.len() != PUBLIC_KEY_LENGTH {
         return Err(LauncherError::Generic {
@@ -489,8 +476,7 @@ fn read_schema_version_from_bytes(
     // Clean up any stale file from a prior failed run.
     let _ = std::fs::remove_file(&temp_db);
 
-    std::fs::write(&temp_db, db_bytes)
-        .map_err(|_| LauncherError::RegistryDownloadFailed)?;
+    std::fs::write(&temp_db, db_bytes).map_err(|_| LauncherError::RegistryDownloadFailed)?;
 
     let result = (|| -> LauncherResult<i64> {
         let conn = rusqlite::Connection::open_with_flags(
@@ -588,10 +574,7 @@ fn get_cached_tag(local_state_path: &std::path::Path) -> LauncherResult<Option<S
         .map(|v| v.and_then(|v| v.as_str().map(|s| s.to_string())))
 }
 
-fn set_cached_tag(
-    local_state_path: &std::path::Path,
-    tag: &str,
-) -> LauncherResult<()> {
+fn set_cached_tag(local_state_path: &std::path::Path, tag: &str) -> LauncherResult<()> {
     let conn = db::local_state_connection(local_state_path)
         .map_err(|_| LauncherError::LocalStateFailed)?;
     db::set_setting(
@@ -602,9 +585,7 @@ fn set_cached_tag(
     .map_err(|_| LauncherError::LocalStateFailed)
 }
 
-fn get_last_check_time(
-    local_state_path: &std::path::Path,
-) -> LauncherResult<Option<i64>> {
+fn get_last_check_time(local_state_path: &std::path::Path) -> LauncherResult<Option<i64>> {
     let conn = db::local_state_connection(local_state_path)
         .map_err(|_| LauncherError::LocalStateFailed)?;
     db::get_setting(&conn, "last_registry_check")
@@ -612,10 +593,7 @@ fn get_last_check_time(
         .map(|v| v.and_then(|v| v.as_i64()))
 }
 
-fn set_last_check_time(
-    local_state_path: &std::path::Path,
-    timestamp: i64,
-) -> LauncherResult<()> {
+fn set_last_check_time(local_state_path: &std::path::Path, timestamp: i64) -> LauncherResult<()> {
     let conn = db::local_state_connection(local_state_path)
         .map_err(|_| LauncherError::LocalStateFailed)?;
     db::set_setting(
@@ -792,7 +770,7 @@ mod tests {
         let db_bytes = b"test data";
         let sig_bytes = b"00000000000000000000000000000000\
                          00000000000000000000000000000000"; // 64 zero bytes
-        // This will fail verification (wrong key), but should not panic.
+                                                            // This will fail verification (wrong key), but should not panic.
         let result = verify_signature(db_bytes, sig_bytes);
         assert!(result.is_err());
     }

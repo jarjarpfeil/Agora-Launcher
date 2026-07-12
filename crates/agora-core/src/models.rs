@@ -52,8 +52,12 @@ impl JvmConfig {
     }
 }
 
-fn default_true() -> bool { true }
-fn default_mod_content_type() -> String { "mod".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_mod_content_type() -> String {
+    "mod".to_string()
+}
 
 /// An installed mod tracked by `instance_manifest.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +66,8 @@ pub struct InstalledMod {
     pub registry_id: Option<String>,
     pub modrinth_id: Option<String>,
     pub source: String,
+    #[serde(default)]
+    pub source_url: Option<String>,
     pub version: Option<String>,
     pub sha256: String,
     pub installed_at: String,
@@ -104,6 +110,12 @@ pub struct ModVersionCandidate {
     pub is_compatible: bool,
     #[serde(default)]
     pub sha1: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub sha512: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
     #[serde(default)]
     pub version_compat: String,
 }
@@ -257,24 +269,23 @@ mod tests {
             loader: "forge".to_string(),
             loader_version: "52.0.0".to_string(),
             is_locked: true,
-            mods: vec![
-                InstalledMod {
-                    filename: "rt-mod.jar".to_string(),
-                    registry_id: Some("reg-1".to_string()),
-                    modrinth_id: None,
-                    source: "github".to_string(),
-                    version: Some("1.0.0".to_string()),
-                    sha256: "sha123".to_string(),
-                    installed_at: "2024-06-01T12:00:00Z".to_string(),
-                    java_packages: vec!["com.example.mod".to_string()],
-                    mod_jar_id: Some("jar-1".to_string()),
-                    depends_on: vec!["core-lib".to_string()],
-                    optional_deps: vec!["opt-mod".to_string()],
-                    incompatible_deps: vec!["bad-mod".to_string()],
-                    enabled: true,
-                    content_type: "mod".to_string(),
-                },
-            ],
+            mods: vec![InstalledMod {
+                filename: "rt-mod.jar".to_string(),
+                registry_id: Some("reg-1".to_string()),
+                modrinth_id: None,
+                source: "github".to_string(),
+                source_url: Some("https://example.com/rt-mod.jar".to_string()),
+                version: Some("1.0.0".to_string()),
+                sha256: "sha123".to_string(),
+                installed_at: "2024-06-01T12:00:00Z".to_string(),
+                java_packages: vec!["com.example.mod".to_string()],
+                mod_jar_id: Some("jar-1".to_string()),
+                depends_on: vec!["core-lib".to_string()],
+                optional_deps: vec!["opt-mod".to_string()],
+                incompatible_deps: vec!["bad-mod".to_string()],
+                enabled: true,
+                content_type: "mod".to_string(),
+            }],
             resourcepacks: vec![],
             shaders: vec![],
             datapacks: vec![],
@@ -294,17 +305,35 @@ mod tests {
         assert_eq!(deserialized.is_locked, manifest.is_locked);
         assert_eq!(deserialized.mods.len(), manifest.mods.len());
         assert_eq!(deserialized.mods[0].filename, manifest.mods[0].filename);
-        assert_eq!(deserialized.mods[0].registry_id, manifest.mods[0].registry_id);
-        assert_eq!(deserialized.mods[0].modrinth_id, manifest.mods[0].modrinth_id);
+        assert_eq!(
+            deserialized.mods[0].registry_id,
+            manifest.mods[0].registry_id
+        );
+        assert_eq!(
+            deserialized.mods[0].modrinth_id,
+            manifest.mods[0].modrinth_id
+        );
         assert_eq!(deserialized.mods[0].source, manifest.mods[0].source);
         assert_eq!(deserialized.mods[0].version, manifest.mods[0].version);
         assert_eq!(deserialized.mods[0].sha256, manifest.mods[0].sha256);
-        assert_eq!(deserialized.mods[0].installed_at, manifest.mods[0].installed_at);
-        assert_eq!(deserialized.mods[0].java_packages, manifest.mods[0].java_packages);
+        assert_eq!(
+            deserialized.mods[0].installed_at,
+            manifest.mods[0].installed_at
+        );
+        assert_eq!(
+            deserialized.mods[0].java_packages,
+            manifest.mods[0].java_packages
+        );
         assert_eq!(deserialized.mods[0].mod_jar_id, manifest.mods[0].mod_jar_id);
         assert_eq!(deserialized.mods[0].depends_on, manifest.mods[0].depends_on);
-        assert_eq!(deserialized.mods[0].optional_deps, manifest.mods[0].optional_deps);
-        assert_eq!(deserialized.mods[0].incompatible_deps, manifest.mods[0].incompatible_deps);
+        assert_eq!(
+            deserialized.mods[0].optional_deps,
+            manifest.mods[0].optional_deps
+        );
+        assert_eq!(
+            deserialized.mods[0].incompatible_deps,
+            manifest.mods[0].incompatible_deps
+        );
         assert_eq!(deserialized.user_preferences, manifest.user_preferences);
     }
 }

@@ -4,26 +4,21 @@ import {
   checkInstanceCrash,
   checkInstanceUpdates,
   createInstance,
-  createSnapshot,
   deleteInstance,
   getSetting,
   listInstances,
   listLoaderVersions,
   listManifestLoaders,
   listManifestMcVersions,
-  restoreSnapshot,
   formatError,
   type CreateInstanceRequest,
   type InstanceRow,
   type LoaderVersionSummary,
   type UpdateInfo,
 } from '../lib/tauri';
-import {
-  resolveInstallPlan,
-  applyInstallPlan,
-} from '../lib/installFlow';
+import type { InstallIntent } from '../lib/installFlow';
 import { type ProcessState } from '../lib/useProcessController';
-import { CrashInvestigator } from '../components/CrashInvestigator';
+import { InstallFlow } from '../components/InstallFlow';
 import {
   Dialog,
   DialogContent,
@@ -37,22 +32,24 @@ export function Instances({
   processLogs,
   onStartLaunch,
   onKillProcess,
+  onStartCrashInvestigation,
 }: {
   onEditInstance: (id: string) => void;
   processState: ProcessState;
   processLogs: import('../lib/useProcessController').LogLine[];
   onStartLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
   onKillProcess: () => Promise<void>;
+  onStartCrashInvestigation: (investigation: {
+    instanceId: string;
+    crashFilename: string | null;
+    manualLogText: string | null;
+    directLaunch: boolean;
+  }) => void;
 }) {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  const [crashInvestigation, setCrashInvestigation] = useState<{
-    instanceId: string;
-    crashFilename: string | null;
-    manualLogText: string | null;
-  } | null>(null);
 
   // Load direct launch mode once
   const [directLaunch, setDirectLaunch] = useState(false);
@@ -82,10 +79,11 @@ export function Instances({
         if (!lastLaunch) return;
         const report = await checkInstanceCrash(lastLaunch.instance_id);
         if (!cancelled && report) {
-          setCrashInvestigation({
+          onStartCrashInvestigation({
             instanceId: lastLaunch.instance_id,
             crashFilename: report.filename,
             manualLogText: null,
+            directLaunch,
           });
         }
       } catch {
@@ -95,7 +93,7 @@ export function Instances({
     return () => {
       cancelled = true;
     };
-  }, [instances]);
+  }, [instances, directLaunch, onStartCrashInvestigation]);
 
   // Load launch mode setting on mount
   useEffect(() => {
@@ -121,10 +119,11 @@ export function Instances({
   const submitPasteLog = (text: string) => {
     if (!pasteLog) return;
     setPasteLog(null);
-    setCrashInvestigation({
+    onStartCrashInvestigation({
       instanceId: pasteLog.instanceId,
       crashFilename: null,
       manualLogText: text || null,
+      directLaunch,
     });
   };
 
@@ -203,16 +202,6 @@ export function Instances({
             setShowCreate(false);
             refresh();
           }}
-        />
-      )}
-
-      {crashInvestigation && (
-        <CrashInvestigator
-          instanceId={crashInvestigation.instanceId}
-          crashFilename={crashInvestigation.crashFilename}
-          manualLogText={crashInvestigation.manualLogText}
-          onClose={() => setCrashInvestigation(null)}
-          onLaunch={() => onStartLaunch(crashInvestigation.instanceId, directLaunch)}
         />
       )}
 
@@ -373,9 +362,11 @@ function UpdatesSection({
   const [updatesByInstance, setUpdatesByInstance] = useState<Record<string, UpdateInfo[]>>({});
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [checking, setChecking] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<string | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [batchFlow, setBatchFlow] = useState<{
+    intent: InstallIntent;
+    instanceName: string;
+  } | null>(null);
   const [showConfirm, setShowConfirm] = useState<{
     instanceId: string;
     instanceName: string;
@@ -386,17 +377,21 @@ function UpdatesSection({
     setChecking(true);
     setUpdateError(null);
     const results: Record<string, UpdateInfo[]> = {};
+    let failedChecks = 0;
     for (const inst of instances) {
       if (inst.is_locked) continue; // skip locked instances
       try {
         const updates = await checkInstanceUpdates(inst.instance_id);
         if (updates.length > 0) results[inst.instance_id] = updates;
       } catch {
-        // skip instances that fail
+        failedChecks += 1;
       }
     }
     setUpdatesByInstance(results);
     setSelected(new Set());
+    if (failedChecks > 0) {
+      setUpdateError(`Could not check ${failedChecks} instance${failedChecks === 1 ? '' : 's'} for updates.`);
+    }
     setChecking(false);
   };
 
@@ -411,100 +406,38 @@ function UpdatesSection({
     });
   };
 
-  const applyUpdates = async () => {
+  const applyUpdates = () => {
     if (!showConfirm) return;
-    const { instanceId, updates } = showConfirm;
-    setShowConfirm(null);
-    setUpdating(true);
-    setUpdateProgress(null);
-    setUpdateError(null);
 
-    // Filter to selected items; if nothing selected, update all.
+    const { instanceId, instanceName, updates } = showConfirm;
     const toUpdate = selected.size > 0
-      ? updates.filter((u) => selected.has(`${instanceId}:${u.mod_jar_id}`))
+      ? updates.filter((update) => selected.has(`${instanceId}:${update.mod_jar_id}`))
       : updates;
-    if (toUpdate.length === 0) { setUpdating(false); return; }
+    if (toUpdate.length === 0) return;
 
-    // Step 1: Snapshot before any mutation
-    setUpdateProgress('Creating pre-update snapshot…');
-    let snapshotId: string | undefined;
-    try {
-      const snap = await createSnapshot(instanceId, `batch-update-${Date.now()}`);
-      snapshotId = snap.id;
-    } catch (e) {
-      setUpdateError(`Snapshot failed: ${formatError(e)} — updates cancelled.`);
-      setUpdating(false);
-      return;
-    }
-
-    // Step 2: Apply each selected update sequentially via the canonical pipeline.
-    // For each update we construct an InstallIntent and resolve+execute through
-    // the backend's `resolve_install_plan` + `apply_install_plan` Tauri commands.
-    let failedCount = 0;
-    for (let i = 0; i < toUpdate.length; i++) {
-      const u = toUpdate[i];
-      setUpdateProgress(`Updating ${i + 1}/${toUpdate.length}: ${u.filename}…`);
-      try {
-        // Full pipeline: resolve a plan, then execute it.
-        // The backend install_pipeline handles staging, verification, and
-        // atomic application.
-        const intent: import('../lib/installFlow').InstallIntent = {
-          action: {
-            type: 'update',
-            itemId: u.mod_jar_id,
-            targetVersion: u.latest_version,
-          },
-          targetInstance: instanceId,
-          optionalDeps: { type: 'exclude-all' },
-          requestedBy: 'auto-update',
-          overrides: { allowReplace: false, skipHealthScan: false, forceConflictResolution: {} },
-        };
-        const plan = await resolveInstallPlan(intent);
-        const outcome = await applyInstallPlan(plan);
-        if (outcome.type === 'failed') {
-          throw new Error(outcome.error);
-        }
-        // Success via pipeline — outcome includes health scan results.
-      } catch (e) {
-        setUpdateError(`Update failed for ${u.filename}: ${formatError(e)}`);
-        failedCount++;
-        break; // Stop on first failure — rollback
-      }
-    }
-
-    if (failedCount > 0 && snapshotId) {
-      setUpdateProgress('Restoring snapshot…');
-      try {
-        await restoreSnapshot(instanceId, snapshotId);
-        setUpdateError(`Update failed after ${toUpdate.length - failedCount + 1} of ${toUpdate.length} mods. Snapshot restored.`);
-      } catch (rollbackErr) {
-        setUpdateError(`Update failed AND snapshot restore also failed. Instance may be in an inconsistent state. Error: ${formatError(rollbackErr)}`);
-      }
-    } else if (failedCount === 0) {
-      setUpdateProgress('All updates applied successfully.');
-      await checkAll(); // refresh
-    }
-    setUpdating(false);
+    setShowConfirm(null);
+    setUpdateError(null);
+    setBatchFlow({
+      instanceName,
+      intent: {
+        action: {
+          type: 'batch-update',
+          items: toUpdate.map((update) => ({
+            itemId: update.mod_jar_id,
+            targetVersion: update.target_version,
+          })),
+        },
+        targetInstance: instanceId,
+        optionalDeps: { type: 'prompt' },
+        requestedBy: 'auto-update',
+        overrides: {
+          allowReplace: false,
+          skipHealthScan: false,
+          forceConflictResolution: {},
+        },
+      },
+    });
   };
-
-  if (updating) {
-    return (
-      <div className="mt-6 rounded-xl border border-border bg-card p-4 space-y-3">
-        <h3 className="font-semibold">Applying Updates</h3>
-        <div className="flex items-center gap-2 text-sm">
-          {updateProgress && !updateError && (
-            <>
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-              <span>{updateProgress}</span>
-            </>
-          )}
-        </div>
-        {updateError && (
-          <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{updateError}</div>
-        )}
-      </div>
-    );
-  }
 
   if (totalUpdates === 0 && !checking) {
     return (
@@ -535,6 +468,11 @@ function UpdatesSection({
           {checking ? 'Checking…' : 'Refresh'}
         </button>
       </div>
+      {updateError && (
+        <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+          {updateError}
+        </div>
+      )}
       {Object.entries(updatesByInstance).map(([instId, updates]) => {
         const inst = instances.find((i) => i.instance_id === instId);
         const locked = inst?.is_locked ?? false;
@@ -607,45 +545,58 @@ function UpdatesSection({
         );
       })}
 
-      {/* Update confirmation dialog */}
-      {showConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => { if (!updating) setShowConfirm(null); }}>
-          <div className="rounded-xl border border-border bg-card p-6 max-w-md w-full mx-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-semibold mb-2">Update {showConfirm.updates.filter((u) => selected.has(`${showConfirm.instanceId}:${u.mod_jar_id}`) || selected.size === 0).length} mods?</h3>
-            <p className="text-xs text-muted-foreground mb-4">
-              Instance: {showConfirm.instanceName}
-            </p>
-            <ul className="text-xs space-y-1 mb-4 max-h-40 overflow-y-auto">
+      <Dialog open={showConfirm !== null} onOpenChange={(open) => { if (!open) setShowConfirm(null); }}>
+        {showConfirm && (
+          <DialogContent>
+            <DialogTitle>
+              Review {showConfirm.updates.filter((update) => selected.has(`${showConfirm.instanceId}:${update.mod_jar_id}`) || selected.size === 0).length} updates
+            </DialogTitle>
+            <DialogDescription>
+              Agora will resolve dependencies and conflicts for {showConfirm.instanceName} before anything changes.
+            </DialogDescription>
+            <ul className="max-h-48 space-y-1 overflow-y-auto text-xs">
               {showConfirm.updates
-                .filter((u) => selected.has(`${showConfirm.instanceId}:${u.mod_jar_id}`) || selected.size === 0)
-                .map((u) => (
-                  <li key={u.mod_jar_id} className="flex justify-between">
-                    <span>{u.filename}</span>
-                    <span className="text-muted-foreground">{u.current_version} → <span className="text-primary">{u.latest_version}</span></span>
+                .filter((update) => selected.has(`${showConfirm.instanceId}:${update.mod_jar_id}`) || selected.size === 0)
+                .map((update) => (
+                  <li key={update.mod_jar_id} className="flex justify-between gap-4">
+                    <span className="truncate">{update.filename}</span>
+                    <span className="shrink-0 text-muted-foreground">
+                      {update.current_version} → <span className="text-primary">{update.latest_version}</span>
+                    </span>
                   </li>
                 ))}
             </ul>
-            <p className="text-xs text-muted-foreground mb-4">
-              A recovery snapshot will be created before updating. If any update fails, the snapshot will be restored.
+            <p className="text-xs text-muted-foreground">
+              The complete batch is staged and verified first, then applied atomically behind one recovery snapshot.
             </p>
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setShowConfirm(null)}
-                disabled={updating}
-                className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+                className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent"
               >
                 Cancel
               </button>
               <button
                 onClick={applyUpdates}
-                disabled={updating}
-                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
               >
-                {updating ? 'Updating…' : 'Update'}
+                Review Plan
               </button>
             </div>
-          </div>
-        </div>
+          </DialogContent>
+        )}
+      </Dialog>
+
+      {batchFlow && (
+        <InstallFlow
+          open
+          intent={batchFlow.intent}
+          instanceName={batchFlow.instanceName}
+          onClose={() => {
+            setBatchFlow(null);
+            void checkAll();
+          }}
+        />
       )}
     </div>
   );

@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,9 +48,7 @@ pub fn detect_installed_jres() -> Vec<JavaInstallation> {
         if base.is_dir() {
             if let Ok(entries) = std::fs::read_dir(&base) {
                 for entry in entries.flatten() {
-                    let path = entry
-                        .path()
-                        .join("Contents/Home/bin/java");
+                    let path = entry.path().join("Contents/Home/bin/java");
                     if path.is_file() {
                         if let Some(inst) = check_java_at(&path) {
                             results.push(inst);
@@ -64,10 +62,7 @@ pub fn detect_installed_jres() -> Vec<JavaInstallation> {
     // Linux paths
     #[cfg(target_os = "linux")]
     {
-        let linux_roots = [
-            "/usr/lib/jvm",
-            "/opt/jdk",
-        ];
+        let linux_roots = ["/usr/lib/jvm", "/opt/jdk"];
         for root in &linux_roots {
             let dir = PathBuf::from(root);
             if dir.is_dir() {
@@ -113,9 +108,7 @@ fn check_java_at(path: &PathBuf) -> Option<JavaInstallation> {
     let path_for_result = path.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let result = std::process::Command::new(&cloned)
-            .arg("-version")
-            .output();
+        let result = std::process::Command::new(&cloned).arg("-version").output();
         let _ = tx.send(result);
     });
     let output = rx.recv_timeout(std::time::Duration::from_secs(5)).ok()?;
@@ -203,4 +196,3 @@ mod tests {
         assert_eq!(parse_version_string(input), Some("17.0.9"));
     }
 }
-

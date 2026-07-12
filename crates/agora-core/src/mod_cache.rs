@@ -42,7 +42,9 @@ impl ModCache {
             return Ok(cache_path);
         }
 
-        let parent = cache_path.parent().ok_or_else(|| "Invalid cache path".to_string())?;
+        let parent = cache_path
+            .parent()
+            .ok_or_else(|| "Invalid cache path".to_string())?;
         fs::create_dir_all(parent).map_err(|e| format!("failed to create cache dir: {}", e))?;
         fs::copy(jar_path, &cache_path).map_err(|e| format!("failed to copy to cache: {}", e))?;
 
@@ -64,11 +66,8 @@ impl ModCache {
             .parent()
             .ok_or_else(|| "Invalid cache path".to_string())?
             .join("metadata.json");
-        fs::write(
-            &meta_path,
-            serde_json::to_string_pretty(&metadata).unwrap(),
-        )
-        .map_err(|e| format!("failed to write metadata: {}", e))?;
+        fs::write(&meta_path, serde_json::to_string_pretty(&metadata).unwrap())
+            .map_err(|e| format!("failed to write metadata: {}", e))?;
 
         Ok(cache_path)
     }
@@ -110,8 +109,8 @@ impl ModCache {
             return Ok(jars);
         }
 
-        let entries =
-            fs::read_dir(&self.cache_dir).map_err(|e| format!("failed to read cache dir: {}", e))?;
+        let entries = fs::read_dir(&self.cache_dir)
+            .map_err(|e| format!("failed to read cache dir: {}", e))?;
 
         for entry in entries {
             let entry = entry.map_err(|e| format!("failed to read entry: {}", e))?;
@@ -123,7 +122,8 @@ impl ModCache {
                 .map_err(|e| format!("failed to read hash dir: {}", e))?;
 
             for hash_entry in hash_entries {
-                let hash_entry = hash_entry.map_err(|e| format!("failed to read hash entry: {}", e))?;
+                let hash_entry =
+                    hash_entry.map_err(|e| format!("failed to read hash entry: {}", e))?;
                 if !hash_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                     continue;
                 }
@@ -158,10 +158,7 @@ impl ModCache {
 
     fn cache_path_for(&self, sha256: &str) -> PathBuf {
         let prefix = &sha256[..2.min(sha256.len())];
-        self.cache_dir
-            .join(prefix)
-            .join(sha256)
-            .join("file.jar")
+        self.cache_dir.join(prefix).join(sha256).join("file.jar")
     }
 }
 
@@ -230,7 +227,9 @@ mod tests {
         cache.store_jar(&jar_path, &expected).unwrap();
 
         let target_dir = tmp.path().join("mods");
-        let linked = cache.resolve_and_link(&expected, &target_dir, "mymod.jar").unwrap();
+        let linked = cache
+            .resolve_and_link(&expected, &target_dir, "mymod.jar")
+            .unwrap();
         assert!(linked.exists());
         assert_eq!(fs::read(&linked).unwrap(), b"mod data");
     }

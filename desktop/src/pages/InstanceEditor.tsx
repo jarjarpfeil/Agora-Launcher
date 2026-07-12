@@ -1,23 +1,20 @@
 import { useEffect, useState, useRef } from 'react';
 import { useAdvancedMode } from '../components/AdvancedModeContext';
-import { DependencyPrompt } from '../components/DependencyPrompt';
 import { ConsoleView } from '../components/ConsoleView';
+import { InstallFlow } from '../components/InstallFlow';
+import type { BatchInstallItem, InstallIntent } from '../lib/installFlow';
 import {
   getInstanceDetail,
-  removeModFromInstance,
   enableInstanceMod,
   disableInstanceMod,
-  addManualMod,
   exportInstancePack,
   pickOpenFile,
   importInstancePack,
   browseItems,
   listCategories,
   listModVersions,
-  installModVersion,
   listPackMods,
   formatError,
-  getRemovalPlan,
   unlockInstance,
   lockInstance,
   renameInstance,
@@ -31,16 +28,20 @@ import {
   applyLoadoutProfile,
   deleteLoadoutProfile,
   importInstance,
+  exportLockfile,
+  verifyLockfile,
+  repairLockfile,
+  importLockfile,
   type InstanceDetail,
   type RegistryItem,
   type CategoryInfo,
   type ModVersionCandidate,
   type SortOption,
   type PackModRow,
-  type DependentInfo,
   type InstalledMod,
   type Snapshot,
   type LoadoutProfile,
+  type LockfileDriftReport,
 } from '../lib/tauri';
 
 const SORTS: { label: string; value: SortOption }[] = [
@@ -58,13 +59,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [removeBusy, setRemoveBusy] = useState<string | null>(null);
   const [exportBusy, setExportBusy] = useState(false);
 
   const { advancedMode } = useAdvancedMode();
 
   // Sub-sidebar active tab
-  const [activeTab, setActiveTab] = useState<'mods' | 'resourcepacks' | 'shaders' | 'datapacks' | 'snapshots' | 'loadout-profiles' | 'import' | 'console' | 'java-args' | 'advanced'>('mods');
+  const [activeTab, setActiveTab] = useState<'mods' | 'resourcepacks' | 'shaders' | 'datapacks' | 'snapshots' | 'loadout-profiles' | 'import' | 'reproducible' | 'console' | 'java-args' | 'advanced'>('mods');
 
   // Snapshots state (Phase 6)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -81,11 +81,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   // Import state (Phase 6)
   const [symlinkSaves, setSymlinkSaves] = useState(true);
   const [importBusy, setImportBusy] = useState(false);
+  const [lockfileText, setLockfileText] = useState('');
+  const [lockfileBusy, setLockfileBusy] = useState<'export' | 'verify' | 'repair' | 'clone' | 'copy' | null>(null);
+  const [lockfileReport, setLockfileReport] = useState<LockfileDriftReport | null>(null);
+  const [lockfileNotice, setLockfileNotice] = useState<string | null>(null);
 
 
-
-  // Removal plan prompt state
-  const [removePlanTarget, setRemovePlanTarget] = useState<{ filename: string; dependents: DependentInfo[] } | null>(null);
 
   // Add-mod state
   const [showAdd, setShowAdd] = useState(false);
@@ -99,8 +100,11 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const [selectedAddItem, setSelectedAddItem] = useState<RegistryItem | null>(null);
   const [candidates, setCandidates] = useState<ModVersionCandidate[]>([]);
   const [selectedCandidate, setSelectedCandidate] = useState<ModVersionCandidate | null>(null);
-  const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  const [canonicalOperation, setCanonicalOperation] = useState<{
+    intent: InstallIntent;
+    instanceName: string;
+  } | null>(null);
 
   // Pack install state
   const [packInstallOpen, setPackInstallOpen] = useState(false);
@@ -193,26 +197,27 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     return () => { cancelled = true; };
   }, [instanceId, activeTab]);
 
-  const handleRemove = async (filename: string) => {
-    if (!confirm(`Remove "${filename}" from this instance?`)) return;
-    setRemoveBusy(filename);
+  const beginCanonicalOperation = (action: InstallIntent['action']) => {
+    setCanonicalOperation({
+      instanceName: detail?.row.name ?? instanceId,
+      intent: {
+        action,
+        targetInstance: instanceId,
+        optionalDeps: { type: 'prompt' },
+        requestedBy: 'interactive',
+        overrides: {
+          allowReplace: false,
+          skipHealthScan: false,
+          forceConflictResolution: {},
+        },
+      },
+    });
+  };
+
+  const handleRemove = (filename: string) => {
+    if (!confirm(`Review a safe removal plan for "${filename}"?`)) return;
     setError(null);
-    try {
-      const plan = await getRemovalPlan(instanceId, filename);
-      if (plan.dependents.length === 0) {
-        // No dependents — proceed directly
-        await removeModFromInstance(instanceId, filename);
-        const result = await getInstanceDetail(instanceId);
-        setDetail(result);
-      } else {
-        // Show dependency prompt for removal
-        setRemovePlanTarget({ filename, dependents: plan.dependents });
-      }
-    } catch (e) {
-      setError(formatError(e));
-    } finally {
-      setRemoveBusy(null);
-    }
+    beginCanonicalOperation({ type: 'remove', filename });
   };
 
   const handleToggleMod = async (mod: InstalledMod) => {
@@ -227,40 +232,6 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
       setDetail(result);
     } catch (e) {
       setError(formatError(e));
-    }
-  };
-
-  const handleRemoveConfirm = async (selectedKeys: string[]) => {
-    if (!removePlanTarget) return;
-    const { filename, dependents } = removePlanTarget;
-    setRemoveBusy(filename);
-    setError(null);
-    try {
-      // Build set of all filenames to remove (target + selected dependents)
-      const selectedSet = new Set(selectedKeys);
-      const allFilenames = [filename, ...dependents
-        .filter((d) => selectedSet.has(d.mod_id))
-        .map((d) => d.filename)];
-
-      // Best-effort: continue past individual failures
-      const errors: string[] = [];
-      for (const fn of allFilenames) {
-        try {
-          await removeModFromInstance(instanceId, fn);
-        } catch (e) {
-          errors.push(`${fn}: ${formatError(e)}`);
-        }
-      }
-      const result = await getInstanceDetail(instanceId);
-      setDetail(result);
-      if (errors.length > 0) {
-        setError(`Removed ${allFilenames.length - errors.length} of ${allFilenames.length} mods. Errors: ${errors.join('; ')}`);
-      }
-    } catch (e) {
-      setError(formatError(e));
-    } finally {
-      setRemoveBusy(null);
-      setRemovePlanTarget(null);
     }
   };
 
@@ -289,23 +260,16 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     }
   };
 
-  const handleConfirmAdd = async () => {
+  const handleConfirmAdd = () => {
     if (!selectedAddItem || !selectedCandidate) return;
-    setAdding(true);
     setAddError(null);
-    try {
-      await installModVersion(instanceId, selectedAddItem.id, selectedCandidate);
-      const result = await getInstanceDetail(instanceId);
-      setDetail(result);
-      setShowAdd(false);
-      setSelectedAddItem(null);
-      setCandidates([]);
-      setSelectedCandidate(null);
-    } catch (e) {
-      setAddError(formatError(e));
-    } finally {
-      setAdding(false);
-    }
+    beginCanonicalOperation({
+      type: 'install',
+      sourceType: 'curated',
+      itemId: selectedAddItem.id,
+      candidateVersion: selectedCandidate.version,
+    });
+    setShowAdd(false);
   };
 
   const handleInstallPackMods = async () => {
@@ -313,7 +277,6 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     const packId = packIdInput.trim();
     setError(null);
 
-    // Fetch pack mods and initialize progress state
     let mods: PackModRow[];
     try {
       mods = await listPackMods(packId);
@@ -321,59 +284,59 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
       setError(formatError(e));
       return;
     }
-
     if (mods.length === 0) {
       setError(`No mods found for pack "${packId}".`);
       return;
     }
 
-    // Initialize progress
-    setPackProgress(
-      mods.map((m) => ({ modId: m.mod_id, status: 'pending' as const }))
-    );
+    setPackProgress(mods.map((mod) => ({ modId: mod.mod_id, status: 'pending' as const })));
+    const items: BatchInstallItem[] = [];
+    let resolutionFailed = false;
 
-    // Sequential install
-    for (let i = 0; i < mods.length; i++) {
-      const mod = mods[i];
-      setPackProgress((prev) =>
-        prev?.map((p, idx) =>
-          idx === i ? { ...p, status: 'installing' as const } : p
-        ) ?? prev
+    for (let index = 0; index < mods.length; index += 1) {
+      const mod = mods[index];
+      setPackProgress((previous) =>
+        previous?.map((progress, current) =>
+          current === index ? { ...progress, status: 'installing' as const } : progress
+        ) ?? previous
       );
-
       try {
-        const candidates = await listModVersions(instanceId, mod.mod_id);
-        const items = candidates.items;
+        const page = await listModVersions(instanceId, mod.mod_id);
         const candidate =
-          items.find((c) => c.version_compat === 'compatible')
-          ?? items.find((c) => c.version_compat === 'major_match')
-          ?? items[0];
-        if (!candidate) {
-          setPackProgress((prev) =>
-            prev?.map((p, idx) =>
-              idx === i
-                ? { ...p, status: 'failed' as const, error: 'No compatible versions found' }
-                : p
-            ) ?? prev
-          );
-          continue;
-        }
-        await installModVersion(instanceId, mod.mod_id, candidate);
-        setPackProgress((prev) =>
-          prev?.map((p, idx) =>
-            idx === i ? { ...p, status: 'done' as const } : p
-          ) ?? prev
+          page.items.find((version) => version.version_compat === 'compatible')
+          ?? page.items.find((version) => version.version_compat === 'major_match')
+          ?? page.items[0];
+        if (!candidate) throw new Error('No compatible verified version is available.');
+        items.push({
+          sourceType: 'curated',
+          itemId: mod.mod_id,
+          candidateVersion: candidate.version,
+        });
+        setPackProgress((previous) =>
+          previous?.map((progress, current) =>
+            current === index ? { ...progress, status: 'done' as const } : progress
+          ) ?? previous
         );
       } catch (e) {
-        setPackProgress((prev) =>
-          prev?.map((p, idx) =>
-            idx === i
-              ? { ...p, status: 'failed' as const, error: formatError(e) }
-              : p
-          ) ?? prev
+        resolutionFailed = true;
+        setPackProgress((previous) =>
+          previous?.map((progress, current) =>
+            current === index
+              ? { ...progress, status: 'failed' as const, error: formatError(e) }
+              : progress
+          ) ?? previous
         );
       }
     }
+
+    if (resolutionFailed) {
+      setError('The pack plan could not be resolved completely. No instance files were changed.');
+      return;
+    }
+
+    setPackProgress(null);
+    setPackInstallOpen(false);
+    beginCanonicalOperation({ type: 'batch-install', items });
   };
 
   const handleDismissPackProgress = () => {
@@ -461,14 +424,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     setStatus(null);
     const path = await pickOpenFile('Import Mod', ['jar']);
     if (path === null) return;
-    try {
-      await addManualMod(instanceId, path);
-      const result = await getInstanceDetail(instanceId);
-      setDetail(result);
-      setStatus(`Added mod: ${path.split(/[\\/]/).pop()}`);
-    } catch (e) {
-      setError(formatError(e));
-    }
+    beginCanonicalOperation({
+      type: 'install',
+      sourceType: 'manual',
+      itemId: path.split(/[\\/]/).pop() ?? 'manual-mod',
+      candidateVersion: path,
+    });
   };
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -488,10 +449,12 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
       const ext = file.name.toLowerCase();
       // .jar → manual mod install
       if (ext.endsWith('.jar')) {
-        await addManualMod(instanceId, filePath);
-        const result = await getInstanceDetail(instanceId);
-        setDetail(result);
-        setStatus(`Added "${file.name}" to instance.`);
+        beginCanonicalOperation({
+          type: 'install',
+          sourceType: 'manual',
+          itemId: file.name,
+          candidateVersion: filePath,
+        });
       }
       // .mrpack, .agora-pack.json, or .json → pack import
       else if (ext.endsWith('.mrpack') || ext.endsWith('.agora-pack.json') || (ext.endsWith('.json') && file.name.toLowerCase().endsWith('.json'))) {
@@ -521,6 +484,141 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
       setError(formatError(e));
     } finally {
       setExportBusy(false);
+    }
+  };
+
+  const requireLockfileText = () => {
+    if (lockfileText.trim()) return lockfileText;
+    setError('Export this instance or paste a lockfile before continuing.');
+    return null;
+  };
+
+  const handleExportLockfile = async () => {
+    setLockfileBusy('export');
+    setError(null);
+    setLockfileNotice(null);
+    setLockfileReport(null);
+    try {
+      const lockfile = await exportLockfile(instanceId);
+      setLockfileText(JSON.stringify(lockfile, null, 2));
+      const artifacts = Array.isArray(lockfile.artifacts) ? lockfile.artifacts : [];
+      const unresolved = artifacts.filter((artifact) => {
+        if (!artifact || typeof artifact !== 'object') return false;
+        return Boolean((artifact as Record<string, unknown>).unresolvedReason);
+      }).length;
+      setLockfileNotice(
+        unresolved === 0
+          ? 'Canonical lockfile exported. It contains hashes and settings, never private config contents.'
+          : `Lockfile exported with ${unresolved} unreproducible artifact${unresolved === 1 ? '' : 's'} clearly marked. Verification still works, but clone and repair will refuse substitution.`,
+      );
+    } catch (cause) {
+      setError(formatError(cause));
+    } finally {
+      setLockfileBusy(null);
+    }
+  };
+
+  const handleCopyLockfile = async () => {
+    const text = requireLockfileText();
+    if (!text) return;
+    setLockfileBusy('copy');
+    setError(null);
+    try {
+      await navigator.clipboard.writeText(text);
+      setLockfileNotice('Lockfile copied to the clipboard.');
+    } catch (cause) {
+      setError(`Could not copy the lockfile: ${formatError(cause)}`);
+    } finally {
+      setLockfileBusy(null);
+    }
+  };
+
+  const handleVerifyLockfile = async () => {
+    const text = requireLockfileText();
+    if (!text) return;
+    setLockfileBusy('verify');
+    setError(null);
+    setLockfileNotice(null);
+    try {
+      const report = await verifyLockfile(instanceId, text);
+      setLockfileReport(report);
+      setLockfileNotice(
+        report.status === 'in-sync'
+          ? 'This instance exactly matches the lockfile artifacts and tracked config hash.'
+          : `${report.differences.length} difference${report.differences.length === 1 ? '' : 's'} found. Review them before repairing.`,
+      );
+    } catch (cause) {
+      setLockfileReport(null);
+      setError(formatError(cause));
+    } finally {
+      setLockfileBusy(null);
+    }
+  };
+
+  const handleRepairLockfile = async () => {
+    const text = requireLockfileText();
+    if (!text) return;
+    if (!window.confirm(
+      'Repair this instance to the pasted lockfile? Agora will create one recovery snapshot, download exact hashes, and remove managed artifacts that are not in the lockfile. Private config contents cannot be repaired because lockfiles never contain them.',
+    )) return;
+
+    setLockfileBusy('repair');
+    setError(null);
+    setLockfileNotice(null);
+    try {
+      const outcome = await repairLockfile(instanceId, text);
+      if (outcome.type === 'success') {
+        await refreshDetail();
+        const report = await verifyLockfile(instanceId, text);
+        setLockfileReport(report);
+        setLockfileNotice(
+          report.status === 'in-sync'
+            ? 'Repair completed and the instance now matches the lockfile.'
+            : 'Artifact repair completed. Remaining differences cannot be reproduced from this privacy-preserving lockfile (usually private config changes).',
+        );
+      } else if (outcome.type === 'health-rollback') {
+        setLockfileReport(null);
+        setError('Repair introduced a health blocker, so Agora restored the recovery snapshot.');
+      } else if (outcome.type === 'cancelled') {
+        setLockfileReport(null);
+        setLockfileNotice(
+          outcome.rollbackPerformed
+            ? 'Repair was cancelled and the recovery snapshot was restored.'
+            : 'Repair was cancelled before the instance changed.',
+        );
+      } else {
+        setLockfileReport(null);
+        setError(
+          outcome.rollbackPerformed
+            ? `${outcome.error} The recovery snapshot was restored.`
+            : outcome.error,
+        );
+      }
+    } catch (cause) {
+      setLockfileReport(null);
+      setError(formatError(cause));
+    } finally {
+      setLockfileBusy(null);
+    }
+  };
+
+  const handleCloneLockfile = async () => {
+    const text = requireLockfileText();
+    if (!text) return;
+    setLockfileBusy('clone');
+    setError(null);
+    setLockfileNotice(null);
+    try {
+      const newInstanceId = await importLockfile(text);
+      if (onOpenInstanceEditor) {
+        onOpenInstanceEditor(newInstanceId);
+      } else {
+        setLockfileNotice(`Reproduced the lockfile as new instance "${newInstanceId}".`);
+      }
+    } catch (cause) {
+      setError(formatError(cause));
+    } finally {
+      setLockfileBusy(null);
     }
   };
 
@@ -656,7 +754,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
       {/* Sub-sidebar tabs */}
       <div className="flex border-b border-border gap-0">
-        {(['mods', 'resourcepacks', 'shaders', 'datapacks', 'snapshots', 'loadout-profiles', 'import', 'console'] as const).map((tab) => (
+        {(['mods', 'resourcepacks', 'shaders', 'datapacks', 'snapshots', 'loadout-profiles', 'import', 'reproducible', 'console'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -667,7 +765,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             ].join(' ')}
           >
-            {tab === 'mods' ? `Mods (${mods.length})` : tab === 'resourcepacks' ? `Resource Packs (${manifest?.resourcepacks?.length ?? 0})` : tab === 'shaders' ? `Shaders (${manifest?.shaders?.length ?? 0})` : tab === 'datapacks' ? `Data Packs (${manifest?.datapacks?.length ?? 0})` : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : tab === 'import' ? 'Import' : 'Console'}
+            {tab === 'mods' ? `Mods (${mods.length})` : tab === 'resourcepacks' ? `Resource Packs (${manifest?.resourcepacks?.length ?? 0})` : tab === 'shaders' ? `Shaders (${manifest?.shaders?.length ?? 0})` : tab === 'datapacks' ? `Data Packs (${manifest?.datapacks?.length ?? 0})` : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : tab === 'import' ? 'Import' : tab === 'reproducible' ? 'Reproducible' : 'Console'}
           </button>
         ))}
         {advancedMode && (
@@ -908,11 +1006,11 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 )}
                 <button
                   onClick={() => handleRemove(mod.filename)}
-                  disabled={removeBusy === mod.filename || !!row?.is_locked}
+                  disabled={!!row?.is_locked}
                   className="ml-2 text-xs text-destructive hover:underline disabled:opacity-50 whitespace-nowrap"
                   title={row?.is_locked ? 'Unlock the instance to remove mods.' : undefined}
                 >
-                  {removeBusy === mod.filename ? 'Removing…' : row?.is_locked ? '🔒' : 'Remove'}
+                  {row?.is_locked ? '🔒' : 'Remove'}
                 </button>
               </div>
             ))}
@@ -1092,10 +1190,9 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
               {selectedCandidate && (
                 <button
                   onClick={handleConfirmAdd}
-                  disabled={adding}
-                  className="mt-3 w-full rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                  className="mt-3 w-full rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
                 >
-                  {adding ? 'Installing…' : `Install ${selectedCandidate.filename}`}
+                  Review install plan for {selectedCandidate.filename}
                 </button>
               )}
             </div>
@@ -1103,21 +1200,6 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         </section>
       )}
 
-      {/* Dependency removal prompt */}
-      {removePlanTarget && (
-        <DependencyPrompt
-          title="Remove mod and dependents"
-          actionLabel="Remove selected"
-          candidates={removePlanTarget.dependents.map((d) => ({
-            key: d.mod_id,
-            label: d.mod_id || d.filename,
-            requirement: d.requirement,
-            source: d.source,
-          }))}
-          onConfirm={handleRemoveConfirm}
-          onCancel={() => setRemovePlanTarget(null)}
-        />
-      )}
         </>
       )}
 
@@ -1519,6 +1601,94 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         </section>
       )}
 
+      {activeTab === 'reproducible' && (
+        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
+          <h3 className="font-semibold text-sm">Reproducible Instance</h3>
+          <p className="text-xs text-muted-foreground">
+            Export a privacy-preserving lockfile that records exact hashes, sources, and versions.
+            Any installation with the same lockfile reproduces identical artifacts. Private config
+            contents are never included.
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void handleExportLockfile()}
+              disabled={lockfileBusy !== null}
+              className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              {lockfileBusy === 'export' ? 'Exporting…' : 'Export Lockfile'}
+            </button>
+            {lockfileText && (
+              <button
+                onClick={() => void handleCopyLockfile()}
+                disabled={lockfileBusy !== null}
+                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+              >
+                {lockfileBusy === 'copy' ? 'Copying…' : 'Copy'}
+              </button>
+            )}
+          </div>
+
+          {lockfileText && (
+            <>
+              <textarea
+                readOnly
+                value={lockfileText}
+                rows={12}
+                className="w-full rounded-lg border border-input bg-background p-3 text-xs font-mono resize-y"
+              />
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => void handleVerifyLockfile()}
+                  disabled={lockfileBusy !== null}
+                  className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                >
+                  {lockfileBusy === 'verify' ? 'Verifying…' : 'Verify'}
+                </button>
+                <button
+                  onClick={() => void handleRepairLockfile()}
+                  disabled={lockfileBusy !== null}
+                  className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                >
+                  {lockfileBusy === 'repair' ? 'Repairing…' : 'Repair'}
+                </button>
+                <button
+                  onClick={() => void handleCloneLockfile()}
+                  disabled={lockfileBusy !== null}
+                  className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                >
+                  {lockfileBusy === 'clone' ? 'Cloning…' : 'Clone'}
+                </button>
+              </div>
+            </>
+          )}
+
+          {lockfileNotice && (
+            <div className="rounded-lg bg-accent/20 p-3 text-xs text-muted-foreground">{lockfileNotice}</div>
+          )}
+
+          {lockfileReport && (
+            <div className="rounded-lg border border-border bg-card p-3 space-y-1 text-xs">
+              <p className="font-medium">
+                {lockfileReport.status === 'in-sync' ? 'In sync' : 'Drift detected'}
+              </p>
+              {lockfileReport.differences?.map((diff, idx) => (
+                <p key={idx} className="text-muted-foreground">
+                  {diff.path}: {diff.kind} {diff.expectedSha256 && `(expected ${diff.expectedSha256})`} {diff.actualSha256 && `(got ${diff.actualSha256})`}
+                </p>
+              ))}
+            </div>
+          )}
+
+          {!lockfileText && (
+            <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+              Export the lockfile above to see verification and repair options.
+            </div>
+          )}
+        </section>
+      )}
+
       {activeTab === 'console' && (
         <section className="rounded-xl border border-border bg-card p-4 space-y-3">
           <h3 className="font-semibold text-sm">Game Console</h3>
@@ -1545,6 +1715,19 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
             Instance-level advanced settings: custom launch commands, environment variables, wrapper scripts. (Coming soon.)
           </p>
         </section>
+      )}
+
+      {canonicalOperation && (
+        <InstallFlow
+          open
+          intent={canonicalOperation.intent}
+          instanceName={canonicalOperation.instanceName}
+          onOpenInstance={onOpenInstanceEditor}
+          onClose={() => {
+            setCanonicalOperation(null);
+            void getInstanceDetail(instanceId).then(setDetail).catch((cause) => setError(formatError(cause)));
+          }}
+        />
       )}
     </div>
   );

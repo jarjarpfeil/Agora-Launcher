@@ -188,12 +188,14 @@ pub fn build_system_prompt(mcp_skill_content: &str) -> String {
 }
 
 /// Start the GitHub Copilot device code flow.
-pub async fn start_copilot_flow(client: &reqwest::Client) -> LauncherResult<CopilotDeviceFlowResponse> {
-    check_network_enabled("network_github_oauth_enabled", "GitHub Copilot is disabled in Privacy settings.")?;
-    let params = [
-        ("client_id", COPILOT_CLIENT_ID),
-        ("scope", "read:user"),
-    ];
+pub async fn start_copilot_flow(
+    client: &reqwest::Client,
+) -> LauncherResult<CopilotDeviceFlowResponse> {
+    check_network_enabled(
+        "network_github_oauth_enabled",
+        "GitHub Copilot is disabled in Privacy settings.",
+    )?;
+    let params = [("client_id", COPILOT_CLIENT_ID), ("scope", "read:user")];
 
     let resp = client
         .post(COPILOT_DEVICE_CODE_URL)
@@ -211,10 +213,12 @@ pub async fn start_copilot_flow(client: &reqwest::Client) -> LauncherResult<Copi
         });
     }
 
-    resp.json::<CopilotDeviceFlowResponse>().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_COPILOT_DEVICE_FLOW_PARSE".to_string(),
-        message: format!("Failed to parse device flow response: {}", e),
-    })
+    resp.json::<CopilotDeviceFlowResponse>()
+        .await
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_COPILOT_DEVICE_FLOW_PARSE".to_string(),
+            message: format!("Failed to parse device flow response: {}", e),
+        })
 }
 
 /// Poll the device flow until the user approves or it expires.
@@ -223,7 +227,10 @@ pub async fn poll_copilot_flow(
     device_code: &str,
     interval: u64,
 ) -> LauncherResult<String> {
-    check_network_enabled("network_github_oauth_enabled", "GitHub Copilot is disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_github_oauth_enabled",
+        "GitHub Copilot is disabled in Privacy settings.",
+    )?;
     let params = [
         ("client_id", COPILOT_CLIENT_ID),
         ("device_code", device_code),
@@ -257,7 +264,8 @@ pub async fn poll_copilot_flow(
                 "expired_token" => {
                     return Err(LauncherError::Generic {
                         code: "ERR_COPILOT_FLOW_EXPIRED".to_string(),
-                        message: "Device code expired. Please restart the login process.".to_string(),
+                        message: "Device code expired. Please restart the login process."
+                            .to_string(),
                     });
                 }
                 "access_denied" => {
@@ -284,7 +292,10 @@ pub async fn poll_copilot_flow(
             return Ok(token.to_string());
         }
 
-        let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let error = body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         match error {
             "authorization_pending" => continue,
             "slow_down" => {
@@ -333,7 +344,10 @@ pub async fn resolve_copilot_endpoint(
     client: &reqwest::Client,
     ghu_token: &str,
 ) -> LauncherResult<CopilotToken> {
-    check_network_enabled("network_github_oauth_enabled", "GitHub Copilot is disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_github_oauth_enabled",
+        "GitHub Copilot is disabled in Privacy settings.",
+    )?;
     let resp = client
         .get(COPILOT_INTERNAL_USER_URL)
         .header("Authorization", format!("Bearer {}", ghu_token))
@@ -348,14 +362,18 @@ pub async fn resolve_copilot_endpoint(
     if !status.is_success() {
         return Err(LauncherError::Generic {
             code: "ERR_COPILOT_INTERNAL_USER".to_string(),
-            message: format!("Copilot internal user endpoint returned HTTP {}", status.as_u16()),
+            message: format!(
+                "Copilot internal user endpoint returned HTTP {}",
+                status.as_u16()
+            ),
         });
     }
 
-    let internal_user: serde_json::Value = resp.json().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_COPILOT_INTERNAL_USER_PARSE".to_string(),
-        message: format!("Failed to parse copilot_internal/user response: {}", e),
-    })?;
+    let internal_user: serde_json::Value =
+        resp.json().await.map_err(|e| LauncherError::Generic {
+            code: "ERR_COPILOT_INTERNAL_USER_PARSE".to_string(),
+            message: format!("Failed to parse copilot_internal/user response: {}", e),
+        })?;
 
     let plan = internal_user
         .get("copilot_plan")
@@ -403,10 +421,14 @@ pub async fn resolve_copilot_endpoint(
     let exchange_status = exchange_resp.status();
     let (copilot_token, copilot_token_expires_at) = if exchange_status.is_success() {
         eprintln!("[copilot] token exchange OK — using Copilot session token");
-        let token_json: serde_json::Value = exchange_resp.json().await.map_err(|e| LauncherError::Generic {
-            code: "ERR_COPILOT_TOKEN_EXCHANGE_PARSE".to_string(),
-            message: format!("Failed to parse token exchange response: {}", e),
-        })?;
+        let token_json: serde_json::Value =
+            exchange_resp
+                .json()
+                .await
+                .map_err(|e| LauncherError::Generic {
+                    code: "ERR_COPILOT_TOKEN_EXCHANGE_PARSE".to_string(),
+                    message: format!("Failed to parse token exchange response: {}", e),
+                })?;
 
         let session_token = token_json
             .get("token")
@@ -436,7 +458,11 @@ pub async fn resolve_copilot_endpoint(
         (None, None)
     } else {
         let body_text = exchange_resp.text().await.unwrap_or_default();
-        eprintln!("[copilot] token exchange returned {} body={}", exchange_status.as_u16(), body_text);
+        eprintln!(
+            "[copilot] token exchange returned {} body={}",
+            exchange_status.as_u16(),
+            body_text
+        );
         return Err(LauncherError::Generic {
             code: "ERR_COPILOT_TOKEN_EXCHANGE".to_string(),
             message: format!("Token exchange returned HTTP {}", exchange_status.as_u16()),
@@ -486,35 +512,42 @@ pub async fn resolve_copilot_endpoint(
 
 /// Store the Copilot token in the OS keyring.
 pub fn store_copilot_token(token: &CopilotToken) -> LauncherResult<()> {
-    let entry = keyring::Entry::new(COPILOT_KEYRING_SERVICE, COPILOT_KEYRING_ACCOUNT)
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_COPILOT_KEYRING".to_string(),
-            message: format!("Failed to access keyring: {}", e),
+    let entry =
+        keyring::Entry::new(COPILOT_KEYRING_SERVICE, COPILOT_KEYRING_ACCOUNT).map_err(|e| {
+            LauncherError::Generic {
+                code: "ERR_COPILOT_KEYRING".to_string(),
+                message: format!("Failed to access keyring: {}", e),
+            }
         })?;
 
     let json = serde_json::to_string(token).unwrap_or_default();
-    entry.set_password(&json).map_err(|e| LauncherError::Generic {
-        code: "ERR_COPILOT_KEYRING_WRITE".to_string(),
-        message: format!("Failed to write token to keyring: {}", e),
-    })?;
+    entry
+        .set_password(&json)
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_COPILOT_KEYRING_WRITE".to_string(),
+            message: format!("Failed to write token to keyring: {}", e),
+        })?;
 
     Ok(())
 }
 
 /// Load the stored Copilot token from the OS keyring, if any.
 pub fn load_copilot_token() -> LauncherResult<Option<CopilotToken>> {
-    let entry = keyring::Entry::new(COPILOT_KEYRING_SERVICE, COPILOT_KEYRING_ACCOUNT)
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_COPILOT_KEYRING".to_string(),
-            message: format!("Failed to access keyring: {}", e),
+    let entry =
+        keyring::Entry::new(COPILOT_KEYRING_SERVICE, COPILOT_KEYRING_ACCOUNT).map_err(|e| {
+            LauncherError::Generic {
+                code: "ERR_COPILOT_KEYRING".to_string(),
+                message: format!("Failed to access keyring: {}", e),
+            }
         })?;
 
     match entry.get_password() {
         Ok(json) => {
-            let token: CopilotToken = serde_json::from_str(&json).map_err(|e| LauncherError::Generic {
-                code: "ERR_COPILOT_STORED_PARSE".to_string(),
-                message: format!("Failed to parse stored token: {}", e),
-            })?;
+            let token: CopilotToken =
+                serde_json::from_str(&json).map_err(|e| LauncherError::Generic {
+                    code: "ERR_COPILOT_STORED_PARSE".to_string(),
+                    message: format!("Failed to parse stored token: {}", e),
+                })?;
             Ok(Some(token))
         }
         Err(e) => {
@@ -532,10 +565,12 @@ pub fn load_copilot_token() -> LauncherResult<Option<CopilotToken>> {
 
 /// Clear the stored Copilot token from the OS keyring.
 pub fn clear_copilot_token() -> LauncherResult<()> {
-    let entry = keyring::Entry::new(COPILOT_KEYRING_SERVICE, COPILOT_KEYRING_ACCOUNT)
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_COPILOT_KEYRING".to_string(),
-            message: format!("Failed to access keyring: {}", e),
+    let entry =
+        keyring::Entry::new(COPILOT_KEYRING_SERVICE, COPILOT_KEYRING_ACCOUNT).map_err(|e| {
+            LauncherError::Generic {
+                code: "ERR_COPILOT_KEYRING".to_string(),
+                message: format!("Failed to access keyring: {}", e),
+            }
         })?;
 
     match entry.delete_password() {
@@ -557,7 +592,10 @@ pub async fn chat_completion(
     messages: Vec<ChatMessage>,
     token: &CopilotToken,
 ) -> LauncherResult<ChatResponse> {
-    check_network_enabled("network_github_oauth_enabled", "GitHub Copilot is disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_github_oauth_enabled",
+        "GitHub Copilot is disabled in Privacy settings.",
+    )?;
 
     let client = reqwest::Client::builder()
         .user_agent("GitHubCopilotChat/1.95.0") // Keep verified extension UA to ensure modern routing
@@ -583,8 +621,15 @@ pub async fn chat_completion(
 
     // Direct assignment instead of candidate arrays and loops
     let model = "gpt-4o";
-    let auth_token = token.copilot_token.as_deref().unwrap_or(&token.access_token);
-    let auth_source = if token.copilot_token.is_some() { "session" } else { "oauth" };
+    let auth_token = token
+        .copilot_token
+        .as_deref()
+        .unwrap_or(&token.access_token);
+    let auth_source = if token.copilot_token.is_some() {
+        "session"
+    } else {
+        "oauth"
+    };
 
     let body = serde_json::json!({
         "messages": messages,
@@ -638,13 +683,13 @@ pub async fn chat_completion(
     }
 
     if status.is_success() {
-        let parsed = resp
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|_| LauncherError::Generic {
-                code: "ERR_AI_PARSE".to_string(),
-                message: "Failed to parse Copilot response.".to_string(),
-            })?;
+        let parsed =
+            resp.json::<serde_json::Value>()
+                .await
+                .map_err(|_| LauncherError::Generic {
+                    code: "ERR_AI_PARSE".to_string(),
+                    message: "Failed to parse Copilot response.".to_string(),
+                })?;
 
         let content = parsed
             .get("choices")
@@ -731,7 +776,8 @@ pub fn build_context_message_with_app(
     if let Some(ref manifest_path) = manifest_path {
         if manifest_path.exists() {
             if let Ok(text) = std::fs::read_to_string(manifest_path) {
-                if let Ok(manifest) = serde_json::from_str::<crate::models::InstanceManifest>(&text) {
+                if let Ok(manifest) = serde_json::from_str::<crate::models::InstanceManifest>(&text)
+                {
                     let mut mod_lines: Vec<String> = Vec::new();
                     for mod_ in &manifest.mods {
                         let ver = mod_.version.as_deref().unwrap_or("unknown");
@@ -764,5 +810,4 @@ pub fn build_context_message_with_app(
     );
 
     parts.join("\n\n")
-
 }

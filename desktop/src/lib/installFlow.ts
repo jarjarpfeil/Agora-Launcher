@@ -12,7 +12,13 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 export type InstallAction =
   | { type: 'install'; sourceType: SourceType; itemId: string; candidateVersion?: string }
   | { type: 'update'; itemId: string; targetVersion: string }
-  | { type: 'remove'; filename: string };
+  | { type: 'remove'; filename: string }
+  | { type: 'batch-update'; items: BatchUpdateItem[] }
+  | { type: 'batch-install'; items: BatchInstallItem[] }
+  | { type: 'repair-lockfile'; contentHash: string };
+
+export interface BatchUpdateItem { itemId: string; targetVersion: string; }
+export interface BatchInstallItem { sourceType: SourceType; itemId: string; candidateVersion?: string; }
 
 export type SourceType = 'curated' | 'modrinth' | 'manual';
 export type OptionalDepsPolicy = { type: 'include'; deps: string[] }
@@ -58,11 +64,21 @@ export interface ResolvedInstallPlan {
 export type ResolvedOperation =
   | { type: 'install'; artifact: ResolvedArtifact }
   | { type: 'update'; oldVersionId: string; newArtifact: ResolvedArtifact }
-  | { type: 'remove'; targetFilename: string; reverseDependents: ReverseDepInfo[] };
+  | { type: 'remove'; targetFilename: string; reverseDependents: ReverseDepInfo[] }
+  | { type: 'batch-update'; operations: ResolvedOperation[] }
+  | { type: 'batch-install'; operations: ResolvedOperation[] }
+  | { type: 'reconcile'; operations: ResolvedOperation[] };
 
 export type ResolvedArtifact =
-  | { type: 'download'; itemId: string; versionId: string; source: ArtifactSource; hashes: HashSpec; size: number; filename: string }
-  | { type: 'local-file'; itemId: string; sourcePath: string; hashes: HashSpec; size: number; filename: string };
+  | { type: 'download'; itemId: string; versionId: string; source: ArtifactSource; hashes: HashSpec; size: number; filename: string; metadata: ArtifactMetadata }
+  | { type: 'local-file'; itemId: string; sourcePath: string; hashes: HashSpec; size: number; filename: string; metadata: ArtifactMetadata };
+
+export interface ArtifactMetadata {
+  sourceType: SourceType;
+  registryId: string | null;
+  modrinthId: string | null;
+  contentType: string;
+}
 
 export type ArtifactSource = { type: 'download'; url: string } | { type: 'local-file'; path: string };
 
@@ -97,7 +113,7 @@ export interface DepConflict {
 export type ConflictKind = 'version-conflict' | 'duplicate-mod' | 'loader-mismatch' | 'game-version-mismatch' | 'incompatible-mod' | 'broken-reverse-dep';
 export type ConflictResolution = 'replace' | 'skip' | 'disable-existing' | 'abort';
 
-export interface FileAdd { targetFilename: string; stagingFilename: string; hashes: HashSpec; size: number; }
+export interface FileAdd { targetFilename: string; stagingFilename: string; artifact: ResolvedArtifact; hashes: HashSpec; size: number; }
 export interface FileRemove { filename: string; }
 export interface FileDisable { filename: string; }
 
@@ -136,7 +152,7 @@ export type InstallOutcome =
   | { type: 'success'; installedItems: string[]; existingItemsReused: string[]; warnings: PlanWarning[]; health: HealthOutcome; snapshotId: string }
   | { type: 'health-rollback'; healthReport: unknown; snapshotId: string; warnings: PlanWarning[] }
   | { type: 'cancelled'; phase: string; rollbackPerformed: boolean }
-  | { type: 'failed'; error: string; rollbackPerformed: boolean; snapshotId?: string };
+  | { type: 'failed'; error: string; rollbackPerformed: boolean; snapshotId: string | null };
 
 export type HealthOutcome =
   | { type: 'completed'; report: unknown }
@@ -158,7 +174,7 @@ export const resolveInstallPlan = (intent: InstallIntent) =>
   invoke<ResolvedInstallPlan>('resolve_install_plan', { intent });
 
 export const applyInstallPlan = (plan: ResolvedInstallPlan) =>
-  invoke<InstallOutcome>('apply_install_plan', { plan });
+  invoke<InstallOutcome>('apply_install_plan', { planId: plan.fingerprint });
 
 export const cancelInstall = (planId: string) =>
   invoke<void>('cancel_install', { planId });

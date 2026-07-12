@@ -3,6 +3,8 @@
 //! Pure logic — no filesystem or process dependencies.
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Launch outcome
@@ -28,13 +30,17 @@ pub enum LaunchOutcome {
 // LKG state
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LkgState {
     pub current_lkg_snapshot_id: Option<String>,
     pub last_promoted_at: Option<String>,
     pub last_launch_session_id: Option<String>,
     pub last_launch_outcome: Option<LaunchOutcome>,
+    /// Newest-first promotion history used by retention. Legacy markers omit
+    /// this field and deserialize to an empty list.
+    #[serde(default)]
+    pub promoted_snapshot_ids: Vec<String>,
     pub schema_version: u32,
 }
 
@@ -45,6 +51,7 @@ impl Default for LkgState {
             last_promoted_at: None,
             last_launch_session_id: None,
             last_launch_outcome: None,
+            promoted_snapshot_ids: Vec::new(),
             schema_version: 1,
         }
     }
@@ -101,6 +108,83 @@ pub fn promotes_to_lkg(outcome: &LaunchOutcome) -> bool {
     matches!(outcome, LaunchOutcome::Success)
 }
 
+/// Read an instance's LKG pointer. Missing files produce the default state;
+/// malformed state is surfaced so callers never overwrite recovery metadata
+/// they could not understand.
+pub fn read_lkg_state(instance_dir: &Path) -> Result<LkgState, String> {
+    let path = instance_dir.join("lkg.json");
+    if !path.is_file() {
+        return Ok(LkgState::default());
+    }
+    let text =
+        std::fs::read_to_string(&path).map_err(|e| format!("failed to read LKG state: {e}"))?;
+    serde_json::from_str(&text).map_err(|e| format!("failed to parse LKG state: {e}"))
+}
+
+/// Atomically record a classified launch and promote the exact pre-launch
+/// snapshot only for a genuine success.
+pub fn record_launch_outcome(
+    instance_dir: &Path,
+    pre_launch_snapshot_id: Option<&str>,
+    launch_session_id: &str,
+    outcome: LaunchOutcome,
+) -> Result<LkgState, String> {
+    if promotes_to_lkg(&outcome) && pre_launch_snapshot_id.is_none() {
+        return Err("successful launch cannot be promoted without a pre-launch snapshot id".into());
+    }
+    if let (LaunchOutcome::Success, Some(snapshot_id)) = (&outcome, pre_launch_snapshot_id) {
+        crate::snapshot::snapshot_file_index(instance_dir, snapshot_id).map_err(|error| {
+            format!("successful launch snapshot {snapshot_id} is unavailable or invalid: {error}")
+        })?;
+    }
+
+    let mut state = read_lkg_state(instance_dir)?;
+    state.last_launch_session_id = Some(launch_session_id.to_string());
+    state.last_launch_outcome = Some(outcome.clone());
+    if let (LaunchOutcome::Success, Some(snapshot_id)) = (&outcome, pre_launch_snapshot_id) {
+        state.current_lkg_snapshot_id = Some(snapshot_id.to_string());
+        state.last_promoted_at = Some(chrono::Utc::now().to_rfc3339());
+        state
+            .promoted_snapshot_ids
+            .retain(|existing| existing != snapshot_id);
+        state
+            .promoted_snapshot_ids
+            .insert(0, snapshot_id.to_string());
+    }
+
+    std::fs::create_dir_all(instance_dir)
+        .map_err(|e| format!("failed to ensure instance directory: {e}"))?;
+    let path = instance_dir.join("lkg.json");
+    let temp = instance_dir.join("lkg.json.tmp");
+    let bytes = serde_json::to_vec_pretty(&state)
+        .map_err(|e| format!("failed to serialize LKG state: {e}"))?;
+    let mut file = std::fs::File::create(&temp)
+        .map_err(|e| format!("failed to create temporary LKG state: {e}"))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("failed to write temporary LKG state: {e}"))?;
+    file.sync_all()
+        .map_err(|e| format!("failed to sync temporary LKG state: {e}"))?;
+    std::fs::rename(&temp, &path).map_err(|e| format!("failed to commit LKG state: {e}"))?;
+
+    let audit = serde_json::json!({
+        "recordedAt": chrono::Utc::now().to_rfc3339(),
+        "launchSessionId": launch_session_id,
+        "preLaunchSnapshotId": pre_launch_snapshot_id,
+        "outcome": outcome,
+    });
+    let mut launches = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(instance_dir.join("launches.jsonl"))
+        .map_err(|e| format!("failed to open launch audit: {e}"))?;
+    writeln!(launches, "{}", audit).map_err(|e| format!("failed to append launch audit: {e}"))?;
+    launches
+        .sync_all()
+        .map_err(|e| format!("failed to sync launch audit: {e}"))?;
+
+    Ok(state)
+}
+
 // ---------------------------------------------------------------------------
 // Diff
 // ---------------------------------------------------------------------------
@@ -129,7 +213,8 @@ pub struct Diff {
 }
 
 /// A simplified file index for diff computation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub path: String,
     pub sha256: String,
@@ -220,6 +305,17 @@ pub struct RetentionPolicy {
     pub size_cap_bytes: u64,
 }
 
+/// Snapshot metadata needed to enforce both category counts and the storage
+/// cap. Entries must be supplied newest-first.
+#[derive(Debug, Clone)]
+pub struct RetentionEntry {
+    pub id: String,
+    pub size_bytes: u64,
+    pub is_lkg: bool,
+    pub is_current_lkg: bool,
+    pub is_pre_restore: bool,
+}
+
 impl Default for RetentionPolicy {
     fn default() -> Self {
         Self {
@@ -238,43 +334,97 @@ pub fn retention_plan(
     pre_restore_ids: &[String],
     policy: &RetentionPolicy,
 ) -> Vec<String> {
-    let mut keep = Vec::new();
-    let mut evict = Vec::new();
+    let current = lkg_ids.first();
+    let entries: Vec<RetentionEntry> = snapshot_ids
+        .iter()
+        .rev() // the legacy API historically receives oldest-first ids
+        .map(|id| RetentionEntry {
+            id: id.clone(),
+            size_bytes: 0,
+            is_lkg: lkg_ids.contains(id),
+            is_current_lkg: current == Some(id),
+            is_pre_restore: pre_restore_ids.contains(id),
+        })
+        .collect();
+    retention_plan_with_sizes(&entries, policy)
+}
 
-    // Always keep current LKG.
-    if let Some(current_lkg) = lkg_ids.first() {
-        keep.push(current_lkg.clone());
+/// Compute snapshot eviction with configurable category counts and a hard
+/// size cap. The current LKG is never removed merely to satisfy the cap; if it
+/// alone exceeds the cap it remains available and all other snapshots are
+/// evicted.
+pub fn retention_plan_with_sizes(
+    entries_newest_first: &[RetentionEntry],
+    policy: &RetentionPolicy,
+) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let mut keep = HashSet::new();
+    if let Some(current) = entries_newest_first
+        .iter()
+        .find(|entry| entry.is_current_lkg)
+    {
+        keep.insert(current.id.clone());
     }
 
-    // Keep N most recent LKG snapshots.
-    for id in lkg_ids.iter().take(policy.keep_lkg_count as usize) {
-        if !keep.contains(id) {
-            keep.push(id.clone());
+    let mut kept_lkg = usize::from(!keep.is_empty());
+    let mut kept_non_lkg = 0usize;
+    let mut kept_pre_restore = 0usize;
+    for entry in entries_newest_first {
+        if entry.is_current_lkg {
+            continue;
+        }
+        if entry.is_lkg {
+            if kept_lkg < policy.keep_lkg_count as usize {
+                keep.insert(entry.id.clone());
+                kept_lkg += 1;
+            }
+        } else if entry.is_pre_restore {
+            if kept_pre_restore < policy.keep_pre_restore_count as usize {
+                keep.insert(entry.id.clone());
+                kept_pre_restore += 1;
+            }
+        } else if kept_non_lkg < policy.keep_non_lkg_count as usize {
+            keep.insert(entry.id.clone());
+            kept_non_lkg += 1;
         }
     }
 
-    // Keep most recent non-LKG snapshot.
-    for id in snapshot_ids.iter().rev() {
-        if !keep.contains(id) && !lkg_ids.contains(id) {
-            keep.push(id.clone());
-            break;
+    let mut retained_size: u64 = entries_newest_first
+        .iter()
+        .filter(|entry| keep.contains(&entry.id))
+        .map(|entry| entry.size_bytes)
+        .sum();
+    if retained_size > policy.size_cap_bytes {
+        let mut candidates: Vec<&RetentionEntry> = entries_newest_first
+            .iter()
+            .rev() // oldest first within each safety tier
+            .filter(|entry| keep.contains(&entry.id) && !entry.is_current_lkg)
+            .collect();
+        candidates.sort_by_key(|entry| {
+            if !entry.is_lkg && !entry.is_pre_restore {
+                0u8
+            } else if entry.is_pre_restore {
+                1
+            } else {
+                2
+            }
+        });
+        for entry in candidates {
+            if retained_size <= policy.size_cap_bytes {
+                break;
+            }
+            if keep.remove(&entry.id) {
+                retained_size = retained_size.saturating_sub(entry.size_bytes);
+            }
         }
     }
 
-    // Keep most recent pre-restore.
-    if let Some(pr) = pre_restore_ids.first() {
-        if !keep.contains(pr) {
-            keep.push(pr.clone());
-        }
-    }
-
-    for id in snapshot_ids {
-        if !keep.contains(id) {
-            evict.push(id.clone());
-        }
-    }
-
-    evict
+    entries_newest_first
+        .iter()
+        .filter(|entry| !keep.contains(&entry.id))
+        .map(|entry| entry.id.clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +434,14 @@ pub fn retention_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_snapshot(instance_dir: &Path, label: &str) -> String {
+        std::fs::write(instance_dir.join("instance_manifest.json"), b"{}\n").unwrap();
+        crate::snapshot::create_snapshot(instance_dir, Some(label))
+            .unwrap()
+            .id
+    }
 
     #[test]
     fn test_classify_success() {
@@ -379,6 +537,77 @@ mod tests {
     }
 
     #[test]
+    fn test_success_records_exact_snapshot_as_lkg() {
+        let tmp = TempDir::new().unwrap();
+        let snapshot_id = create_test_snapshot(tmp.path(), "known-good");
+        let state = record_launch_outcome(
+            tmp.path(),
+            Some(&snapshot_id),
+            "launch-1",
+            LaunchOutcome::Success,
+        )
+        .unwrap();
+        assert_eq!(
+            state.current_lkg_snapshot_id.as_deref(),
+            Some(snapshot_id.as_str())
+        );
+        assert_eq!(state.promoted_snapshot_ids, vec![snapshot_id]);
+        assert_eq!(
+            read_lkg_state(tmp.path()).unwrap().last_launch_outcome,
+            Some(LaunchOutcome::Success)
+        );
+        assert!(tmp.path().join("launches.jsonl").is_file());
+    }
+
+    #[test]
+    fn test_failed_launch_does_not_replace_current_lkg() {
+        let tmp = TempDir::new().unwrap();
+        let known_good = create_test_snapshot(tmp.path(), "known-good");
+        record_launch_outcome(
+            tmp.path(),
+            Some(&known_good),
+            "launch-1",
+            LaunchOutcome::Success,
+        )
+        .unwrap();
+        let state = record_launch_outcome(
+            tmp.path(),
+            Some("failed-candidate"),
+            "launch-2",
+            LaunchOutcome::Crash,
+        )
+        .unwrap();
+        assert_eq!(
+            state.current_lkg_snapshot_id.as_deref(),
+            Some(known_good.as_str())
+        );
+        assert_eq!(state.last_launch_outcome, Some(LaunchOutcome::Crash));
+    }
+
+    #[test]
+    fn test_success_without_snapshot_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let error = record_launch_outcome(tmp.path(), None, "launch-1", LaunchOutcome::Success)
+            .unwrap_err();
+        assert!(error.contains("snapshot id"));
+        assert!(!tmp.path().join("lkg.json").exists());
+    }
+
+    #[test]
+    fn test_success_with_missing_snapshot_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let error = record_launch_outcome(
+            tmp.path(),
+            Some("missing"),
+            "launch-1",
+            LaunchOutcome::Success,
+        )
+        .unwrap_err();
+        assert!(error.contains("unavailable or invalid"));
+        assert!(!tmp.path().join("lkg.json").exists());
+    }
+
+    #[test]
     fn test_compute_diff_empty() {
         let diff = compute_diff(&[], &[], None, None);
         assert_eq!(diff.added.len(), 0);
@@ -389,12 +618,28 @@ mod tests {
     #[test]
     fn test_compute_diff_added_removed_modified() {
         let from = vec![
-            FileEntry { path: "mod-a.jar".into(), sha256: "aaa".into(), size: 100 },
-            FileEntry { path: "mod-b.jar".into(), sha256: "bbb".into(), size: 200 },
+            FileEntry {
+                path: "mod-a.jar".into(),
+                sha256: "aaa".into(),
+                size: 100,
+            },
+            FileEntry {
+                path: "mod-b.jar".into(),
+                sha256: "bbb".into(),
+                size: 200,
+            },
         ];
         let to = vec![
-            FileEntry { path: "mod-b.jar".into(), sha256: "bbb-changed".into(), size: 210 },
-            FileEntry { path: "mod-c.jar".into(), sha256: "ccc".into(), size: 300 },
+            FileEntry {
+                path: "mod-b.jar".into(),
+                sha256: "bbb-changed".into(),
+                size: 210,
+            },
+            FileEntry {
+                path: "mod-c.jar".into(),
+                sha256: "ccc".into(),
+                size: 300,
+            },
         ];
         let diff = compute_diff(&from, &to, None, None);
         assert_eq!(diff.added.len(), 1);
@@ -430,5 +675,77 @@ mod tests {
         assert!(evict.contains(&"snap-7".to_string()));
         assert!(!evict.contains(&"snap-9".to_string()));
         assert!(!evict.contains(&"snap-8".to_string()));
+    }
+
+    #[test]
+    fn test_retention_plan_honors_all_configured_counts() {
+        let entries = vec![
+            retention("current", 10, true, true, false),
+            retention("non-1", 10, false, false, false),
+            retention("non-2", 10, false, false, false),
+            retention("pre-1", 10, false, false, true),
+            retention("pre-2", 10, false, false, true),
+            retention("lkg-old", 10, true, false, false),
+        ];
+        let policy = RetentionPolicy {
+            keep_lkg_count: 2,
+            keep_non_lkg_count: 2,
+            keep_pre_restore_count: 2,
+            size_cap_bytes: 1_000,
+        };
+        assert!(retention_plan_with_sizes(&entries, &policy).is_empty());
+    }
+
+    #[test]
+    fn test_retention_size_cap_evicts_lower_value_snapshots_first() {
+        let entries = vec![
+            retention("current", 60, true, true, false),
+            retention("new-regular", 30, false, false, false),
+            retention("pre", 30, false, false, true),
+            retention("old-lkg", 30, true, false, false),
+        ];
+        let policy = RetentionPolicy {
+            keep_lkg_count: 2,
+            keep_non_lkg_count: 1,
+            keep_pre_restore_count: 1,
+            size_cap_bytes: 90,
+        };
+        let evicted = retention_plan_with_sizes(&entries, &policy);
+        assert!(evicted.contains(&"new-regular".to_string()));
+        assert!(evicted.contains(&"pre".to_string()));
+        assert!(!evicted.contains(&"current".to_string()));
+        assert!(!evicted.contains(&"old-lkg".to_string()));
+    }
+
+    #[test]
+    fn test_retention_keeps_oversized_current_lkg_as_last_recovery_point() {
+        let entries = vec![
+            retention("current", 200, true, true, false),
+            retention("regular", 10, false, false, false),
+        ];
+        let policy = RetentionPolicy {
+            keep_lkg_count: 1,
+            keep_non_lkg_count: 1,
+            keep_pre_restore_count: 0,
+            size_cap_bytes: 100,
+        };
+        let evicted = retention_plan_with_sizes(&entries, &policy);
+        assert_eq!(evicted, vec!["regular".to_string()]);
+    }
+
+    fn retention(
+        id: &str,
+        size_bytes: u64,
+        is_lkg: bool,
+        is_current_lkg: bool,
+        is_pre_restore: bool,
+    ) -> RetentionEntry {
+        RetentionEntry {
+            id: id.into(),
+            size_bytes,
+            is_lkg,
+            is_current_lkg,
+            is_pre_restore,
+        }
     }
 }

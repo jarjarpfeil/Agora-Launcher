@@ -229,7 +229,10 @@ fn natives_subdir() -> &'static str {
 pub async fn fetch_version_manifest(
     client: &reqwest::Client,
 ) -> LauncherResult<MojangVersionManifest> {
-    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_modrinth_cdn_enabled",
+        "Modrinth CDN downloads are disabled in Privacy settings.",
+    )?;
     let url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
     let resp = client
         .get(url)
@@ -242,12 +245,10 @@ pub async fn fetch_version_manifest(
             message: format!("Version manifest returned HTTP {}", resp.status()),
         });
     }
-    resp.json()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_VERSION_MANIFEST_PARSE".into(),
-            message: format!("Failed to parse version manifest: {e}"),
-        })
+    resp.json().await.map_err(|e| LauncherError::Generic {
+        code: "ERR_VERSION_MANIFEST_PARSE".into(),
+        message: format!("Failed to parse version manifest: {e}"),
+    })
 }
 
 /// Fetch version-specific metadata JSON.
@@ -255,7 +256,10 @@ pub async fn fetch_version_info(
     client: &reqwest::Client,
     url: &str,
 ) -> LauncherResult<VersionInfo> {
-    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_modrinth_cdn_enabled",
+        "Modrinth CDN downloads are disabled in Privacy settings.",
+    )?;
     let resp = client
         .get(url)
         .send()
@@ -267,12 +271,10 @@ pub async fn fetch_version_info(
             message: format!("Version info at {url} returned HTTP {}", resp.status()),
         });
     }
-    resp.json()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_VERSION_INFO_PARSE".into(),
-            message: format!("Failed to parse version info: {e}"),
-        })
+    resp.json().await.map_err(|e| LauncherError::Generic {
+        code: "ERR_VERSION_INFO_PARSE".into(),
+        message: format!("Failed to parse version info: {e}"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +399,11 @@ fn check_lib_allowed(lib: &Library) -> bool {
         }
     }
 
-    if has_allow { allowed } else { true }
+    if has_allow {
+        allowed
+    } else {
+        true
+    }
 }
 
 /// Filter a library list by OS rules.
@@ -502,9 +508,9 @@ fn expand_game_argument(
     if let Some(s) = value.as_str() {
         out.push(substitute_template(s, options, version));
     } else if let Some(obj) = value.as_object() {
-        let rules_opt = obj.get("rules").and_then(|v| {
-            serde_json::from_value::<Vec<LibraryRule>>(v.clone()).ok()
-        });
+        let rules_opt = obj
+            .get("rules")
+            .and_then(|v| serde_json::from_value::<Vec<LibraryRule>>(v.clone()).ok());
         if let Some(rules) = rules_opt {
             if !arg_rules_pass(&rules) {
                 return;
@@ -588,7 +594,10 @@ pub fn build_launch_command(
 /// Full launch flow: fetch manifest → resolve version → download libs →
 /// build classpath → construct args → spawn Java.
 pub async fn spawn_java(options: &LaunchOptions) -> LauncherResult<SpawnResult> {
-    check_network_enabled("network_adoptium_enabled", "Java runtime downloads are disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_adoptium_enabled",
+        "Java runtime downloads are disabled in Privacy settings.",
+    )?;
     let client = reqwest::Client::new();
 
     // 1. Fetch version manifest
@@ -649,10 +658,7 @@ pub async fn spawn_java(options: &LaunchOptions) -> LauncherResult<SpawnResult> 
                 if p.is_empty() {
                     p.to_string()
                 } else {
-                    cache_dir
-                        .join(p)
-                        .to_string_lossy()
-                        .to_string()
+                    cache_dir.join(p).to_string_lossy().to_string()
                 }
             })
             .collect::<Vec<_>>()
@@ -699,7 +705,11 @@ pub fn maven_name_to_path(name: &str) -> String {
     let group = parts[0].replace('.', "/");
     let artifact = parts[1];
     let version = parts[2];
-    let classifier = if parts.len() > 3 { Some(parts[3]) } else { None };
+    let classifier = if parts.len() > 3 {
+        Some(parts[3])
+    } else {
+        None
+    };
     let jar_name = match classifier {
         Some(c) => format!("{artifact}-{version}-{c}.jar"),
         None => format!("{artifact}-{version}.jar"),
@@ -718,7 +728,10 @@ pub async fn load_install_profile(
     installer_jar_url: &str,
     cache_dir: &Path,
 ) -> LauncherResult<InstallProfile> {
-    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_modrinth_cdn_enabled",
+        "Modrinth CDN downloads are disabled in Privacy settings.",
+    )?;
     let installer_dir = cache_dir.join("forge_installers");
     std::fs::create_dir_all(&installer_dir).map_err(|e| LauncherError::Generic {
         code: "ERR_FORGE_CACHE_DIR".into(),
@@ -729,7 +742,8 @@ pub async fn load_install_profile(
         .rsplit('/')
         .next()
         .unwrap_or("installer.jar");
-    let jar_name: String = jar_name.chars()
+    let jar_name: String = jar_name
+        .chars()
         .filter(|&c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
         .collect();
     if jar_name.is_empty() {
@@ -758,12 +772,12 @@ pub async fn load_install_profile(
         })?;
         if entry.name() == "install_profile.json" {
             let mut buf = String::new();
-            entry.read_to_string(&mut buf).map_err(|e| {
-                LauncherError::Generic {
+            entry
+                .read_to_string(&mut buf)
+                .map_err(|e| LauncherError::Generic {
                     code: "ERR_FORGE_READ_PROFILE".into(),
                     message: format!("Failed to read install_profile.json: {e}"),
-                }
-            })?;
+                })?;
             return serde_json::from_str(&buf).map_err(|e| LauncherError::Generic {
                 code: "ERR_FORGE_PARSE_PROFILE".into(),
                 message: format!("Failed to parse install_profile.json: {e}"),
@@ -794,7 +808,10 @@ pub async fn download_processor_deps(
     profile: &InstallProfile,
     cache_dir: &Path,
 ) -> LauncherResult<Vec<PathBuf>> {
-    check_network_enabled("network_modrinth_cdn_enabled", "Modrinth CDN downloads are disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_modrinth_cdn_enabled",
+        "Modrinth CDN downloads are disabled in Privacy settings.",
+    )?;
     let maven_cache = cache_dir.join("forge_maven");
     let mut unique_names: Vec<String> = Vec::new();
 
@@ -835,11 +852,9 @@ pub async fn download_processor_deps(
             if let Ok(r) = resp {
                 if r.status().is_success() {
                     let data = r.bytes().await.map_err(|_| LauncherError::NetworkOffline)?;
-                    std::fs::write(&cache_path, &data).map_err(|e| {
-                        LauncherError::Generic {
-                            code: "ERR_FORGE_MAVEN_WRITE".into(),
-                            message: format!("Failed to write {}: {e}", cache_path.display()),
-                        }
+                    std::fs::write(&cache_path, &data).map_err(|e| LauncherError::Generic {
+                        code: "ERR_FORGE_MAVEN_WRITE".into(),
+                        message: format!("Failed to write {}: {e}", cache_path.display()),
                     })?;
                     downloaded = true;
                     break;
@@ -911,8 +926,7 @@ pub fn substitute_processor_args(
                 .replace_all(&result, |caps: &regex::Captures| {
                     let key = &caps[1];
                     if data.contains_key(key) {
-                        resolve_data_value(data, key, side)
-                            .unwrap_or_else(|| format!("${{{key}}}"))
+                        resolve_data_value(data, key, side).unwrap_or_else(|| format!("${{{key}}}"))
                     } else {
                         format!("${{{key}}}")
                     }
@@ -977,10 +991,7 @@ pub async fn run_processors(
             if !cp.is_file() {
                 return Err(LauncherError::Generic {
                     code: "ERR_FORGE_CP_MISSING".into(),
-                    message: format!(
-                        "Processor classpath entry missing: {}",
-                        cp.display()
-                    ),
+                    message: format!("Processor classpath entry missing: {}", cp.display()),
                 });
             }
         }
@@ -1074,7 +1085,9 @@ pub fn merge_forge_version(partial: &VersionInfo, base: &VersionInfo) -> Version
         (None, b) => b.clone(),
     };
 
-    let minecraft_arguments = partial.minecraft_arguments.clone()
+    let minecraft_arguments = partial
+        .minecraft_arguments
+        .clone()
         .or_else(|| base.minecraft_arguments.clone());
 
     let assets = base.assets.clone();
@@ -1119,7 +1132,10 @@ pub async fn prepare_loader(
     java_path: &Path,
     cache_dir: &Path,
 ) -> LauncherResult<VersionInfo> {
-    check_network_enabled("network_adoptium_enabled", "Java runtime downloads are disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_adoptium_enabled",
+        "Java runtime downloads are disabled in Privacy settings.",
+    )?;
     let manifest = fetch_version_manifest(client).await?;
     let version_ref = manifest
         .versions
@@ -1130,8 +1146,7 @@ pub async fn prepare_loader(
 
     match loader.loader_type.as_str() {
         "forge" | "neoforge" => {
-            let profile =
-                load_install_profile(client, &loader.version_url, cache_dir).await?;
+            let profile = load_install_profile(client, &loader.version_url, cache_dir).await?;
             run_processors(client, &profile, java_path, game_dir, cache_dir).await?;
 
             match &profile.version {
@@ -1490,8 +1505,7 @@ mod tests {
             main_class: "net.minecraft.client.main.Main".into(),
             arguments: None,
             minecraft_arguments: Some(
-                "--username ${auth_player_name} --accessToken ${auth_access_token}"
-                    .into(),
+                "--username ${auth_player_name} --accessToken ${auth_access_token}".into(),
             ),
             libraries: vec![],
             asset_index: None,
@@ -1509,11 +1523,7 @@ mod tests {
     fn natives_subdir_is_valid() {
         let sub = natives_subdir();
         assert!(sub.starts_with("natives/"));
-        assert!(
-            sub == "natives/windows"
-                || sub == "natives/osx"
-                || sub == "natives/linux"
-        );
+        assert!(sub == "natives/windows" || sub == "natives/osx" || sub == "natives/linux");
     }
 
     // -----------------------------------------------------------------------
@@ -1538,10 +1548,7 @@ mod tests {
 
     #[test]
     fn maven_name_to_path_short() {
-        assert_eq!(
-            maven_name_to_path("a:b:1:classy"),
-            "a/b/1/b-1-classy.jar"
-        );
+        assert_eq!(maven_name_to_path("a:b:1:classy"), "a/b/1/b-1-classy.jar");
     }
 
     #[test]
@@ -1672,8 +1679,14 @@ mod tests {
         assert_eq!(merged.main_class, "net.minecraftforge.Main");
         // dedup: minecraft library should appear only once (from base)
         assert_eq!(merged.libraries.len(), 2);
-        assert!(merged.libraries.iter().any(|l| l.name == "net.minecraft:minecraft:1.21"));
-        assert!(merged.libraries.iter().any(|l| l.name == "net.minecraftforge:forge:47.1.0"));
+        assert!(merged
+            .libraries
+            .iter()
+            .any(|l| l.name == "net.minecraft:minecraft:1.21"));
+        assert!(merged
+            .libraries
+            .iter()
+            .any(|l| l.name == "net.minecraftforge:forge:47.1.0"));
         // base assets win
         assert_eq!(merged.assets.as_deref(), Some("1.21"));
     }

@@ -10,7 +10,7 @@
 
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
-use crate::models::{InstanceManifest, InstanceRow, InstalledMod};
+use crate::models::{InstalledMod, InstanceManifest, InstanceRow};
 use crate::paths;
 
 use serde::{Deserialize, Serialize};
@@ -473,20 +473,18 @@ pub async fn list_modrinth_categories(
         });
     }
     require_modrinth_enabled(conn)?;
-    modrinth_get_json::<Vec<ModrinthCategoryTag>>(
-        "https://api.modrinth.com/v2/tag/category",
-    )
-    .await
-    .map(|tags| {
-        tags.into_iter()
-            .filter(|t| t.project_type == "mod")
-            .map(|t| ModrinthCategoryInfo {
-                name: t.name,
-                project_type: t.project_type,
-                header: t.header,
-            })
-            .collect()
-    })
+    modrinth_get_json::<Vec<ModrinthCategoryTag>>("https://api.modrinth.com/v2/tag/category")
+        .await
+        .map(|tags| {
+            tags.into_iter()
+                .filter(|t| t.project_type == "mod")
+                .map(|t| ModrinthCategoryInfo {
+                    name: t.name,
+                    project_type: t.project_type,
+                    header: t.header,
+                })
+                .collect()
+        })
 }
 
 /// Fetch the full list of Modrinth loader tags (for filter UI).
@@ -500,23 +498,17 @@ pub async fn list_modrinth_loaders(
         });
     }
     require_modrinth_enabled(conn)?;
-    modrinth_get_json::<Vec<ModrinthLoaderTag>>(
-        "https://api.modrinth.com/v2/tag/loader",
-    )
-    .await
-    .map(|tags| {
-        tags.into_iter()
-            .filter(|t| {
-                t.supported_project_types
-                    .iter()
-                    .any(|p| p == "mod")
-            })
-            .map(|t| ModrinthLoaderInfo {
-                name: t.name,
-                supported_project_types: t.supported_project_types,
-            })
-            .collect()
-    })
+    modrinth_get_json::<Vec<ModrinthLoaderTag>>("https://api.modrinth.com/v2/tag/loader")
+        .await
+        .map(|tags| {
+            tags.into_iter()
+                .filter(|t| t.supported_project_types.iter().any(|p| p == "mod"))
+                .map(|t| ModrinthLoaderInfo {
+                    name: t.name,
+                    supported_project_types: t.supported_project_types,
+                })
+                .collect()
+        })
 }
 
 /// Fetch the full list of Modrinth game version tags (for filter UI).
@@ -530,20 +522,18 @@ pub async fn list_modrinth_game_versions(
         });
     }
     require_modrinth_enabled(conn)?;
-    modrinth_get_json::<Vec<ModrinthGameVersionTag>>(
-        "https://api.modrinth.com/v2/tag/game_version",
-    )
-    .await
-    .map(|tags| {
-        tags.into_iter()
-            .map(|t| ModrinthGameVersionInfo {
-                version: t.version,
-                version_type: t.version_type,
-                date: t.date,
-                major: t.major,
-            })
-            .collect()
-    })
+    modrinth_get_json::<Vec<ModrinthGameVersionTag>>("https://api.modrinth.com/v2/tag/game_version")
+        .await
+        .map(|tags| {
+            tags.into_iter()
+                .map(|t| ModrinthGameVersionInfo {
+                    version: t.version,
+                    version_type: t.version_type,
+                    date: t.date,
+                    major: t.major,
+                })
+                .collect()
+        })
 }
 
 /// Internal: GET a JSON endpoint from the Modrinth v2 API with the standard
@@ -643,9 +633,10 @@ pub async fn fetch_project_full(
             message: "Failed to parse Modrinth project response.".to_string(),
         })?;
 
-    let page_url = resp.slug.as_ref().map(|slug| {
-        format!("https://modrinth.com/{}/{}", resp.project_type, slug)
-    });
+    let page_url = resp
+        .slug
+        .as_ref()
+        .map(|slug| format!("https://modrinth.com/{}/{}", resp.project_type, slug));
 
     Ok(ModrinthProjectFull {
         id: resp.id,
@@ -687,14 +678,8 @@ pub async fn resolve_modrinth_file_metadata(
         pid = urlencoding::encode(project_id),
     );
 
-    let versions: Vec<ModrinthVersionRaw> = client
-        .get(&url)
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
+    let versions: Vec<ModrinthVersionRaw> =
+        client.get(&url).send().await.ok()?.json().await.ok()?;
 
     for version in &versions {
         // Prefer the primary file matching filename.
@@ -767,8 +752,8 @@ pub async fn list_raw_modrinth_versions(
     if let Some(inst) = instance {
         let gv = serde_json::to_string(&[inst.minecraft_version.as_str()])
             .unwrap_or_else(|_| "[]".to_string());
-        let lv = serde_json::to_string(&[inst.loader.as_str()])
-            .unwrap_or_else(|_| "[]".to_string());
+        let lv =
+            serde_json::to_string(&[inst.loader.as_str()]).unwrap_or_else(|_| "[]".to_string());
         // Modrinth expects query params game_versions=[...]&loaders=[...]
         url.push_str("?game_versions=");
         url.push_str(&urlencoding::encode(&gv));
@@ -825,7 +810,12 @@ pub async fn list_raw_modrinth_versions(
                 download_url,
                 sha1,
                 mc_versions: v.game_versions.unwrap_or_default(),
-                loaders: v.loaders.unwrap_or_default().into_iter().map(|l| l.to_lowercase()).collect(),
+                loaders: v
+                    .loaders
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|l| l.to_lowercase())
+                    .collect(),
                 release_date: v.date_published,
                 primary: primary_file.map(|f| f.primary).unwrap_or(false),
                 changelog: v.changelog,
@@ -861,7 +851,12 @@ pub async fn install_raw_modrinth(
     project_id: &str,
     candidate: &RawModrinthVersionCandidate,
     project_type: &str,
-    download_mod_bytes: impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = LauncherResult<Vec<u8>>> + Send>> + Send + Sync,
+    download_mod_bytes: impl Fn(
+            &str,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = LauncherResult<Vec<u8>>> + Send>>
+        + Send
+        + Sync,
     available_disk_space_bytes: impl Fn(&std::path::Path) -> Option<u64> + Send + Sync,
     parse_jar_metadata: impl Fn(&std::path::Path) -> crate::crash_diagnostics::JarMetadata + Send + Sync,
     app_data_dir: &PathBuf,
@@ -944,6 +939,7 @@ pub async fn install_raw_modrinth(
         registry_id: None,
         modrinth_id: Some(project_id.to_string()),
         source: "modrinth_raw".to_string(),
+        source_url: Some(candidate.download_url.clone()),
         version: Some(candidate.version.clone()),
         sha256,
         installed_at: chrono::Utc::now().to_rfc3339(),
@@ -959,11 +955,10 @@ pub async fn install_raw_modrinth(
     manifest.mods.push(installed_mod.clone());
 
     let tmp_path = manifest_path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(&manifest)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    let text =
+        serde_json::to_string_pretty(&manifest).map_err(|_| LauncherError::InstanceCreateFailed)?;
     std::fs::write(&tmp_path, text).map_err(|_| LauncherError::InstanceCreateFailed)?;
-    std::fs::rename(&tmp_path, &manifest_path)
-        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    std::fs::rename(&tmp_path, &manifest_path).map_err(|_| LauncherError::InstanceCreateFailed)?;
 
     Ok(installed_mod)
 }

@@ -1,4 +1,10 @@
 import { useState } from 'react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 export interface DependencyPromptCandidate {
   key: string;
@@ -48,12 +54,12 @@ export function DependencyPrompt({
   const hasAny = selected.size > 0;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-border bg-card p-6 shadow-xl">
-        <h3 className="text-lg font-bold mb-1">{title}</h3>
-        {description && (
-          <p className="text-xs text-muted-foreground mb-4">{description}</p>
-        )}
+    <Dialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <DialogContent className="max-w-lg">
+        <DialogTitle>{title}</DialogTitle>
+        <DialogDescription>
+          {description ?? 'Review the dependency effects before continuing.'}
+        </DialogDescription>
 
         <div className="max-h-72 overflow-y-auto space-y-2 mb-4">
           {candidates.map((cand) => {
@@ -136,7 +142,7 @@ export function DependencyPrompt({
             {actionLabel}
           </button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

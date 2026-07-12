@@ -1,5 +1,7 @@
-use crate::msa::LoginFlow;
 use crate::browse_cache::SharedBrowseCache;
+use crate::install_pipeline::{CancellationToken, ResolvedInstallPlan};
+use crate::msa::LoginFlow;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -10,6 +12,15 @@ pub struct RunningProcess {
     pub pid: u32,
     /// Monotonically increasing launch session ID, used to disambiguate
     /// late events from a previous launch of the same instance.
+    pub session_id: u64,
+}
+
+/// Reservation held while a direct launch is preparing network assets and the
+/// Java command.  It closes the check-then-spawn race without keeping the
+/// application-state mutex locked across asynchronous work.
+#[derive(Debug, Clone)]
+pub struct LaunchReservation {
+    pub instance_id: String,
     pub session_id: u64,
 }
 
@@ -25,8 +36,20 @@ pub struct AppState {
     /// Tracked directly-launched process, stored so the frontend can recover
     /// running state after navigation or reload.
     pub running_process: Option<RunningProcess>,
+    /// A launch that has exclusive ownership but has not spawned Java yet.
+    pub launch_reservation: Option<LaunchReservation>,
+    /// Sessions for which the user explicitly requested termination.  The exit
+    /// classifier consumes these so a user stop is never reported as a crash.
+    pub user_cancelled_launches: HashSet<u64>,
     /// Session counter incremented on every direct launch.
     pub launch_session_counter: u64,
+    /// Backend-owned plans keyed by fingerprint. Clients submit only the id for
+    /// execution, preventing plan-body tampering between resolve and apply.
+    pub resolved_install_plans: HashMap<String, ResolvedInstallPlan>,
+    /// Per-plan cancellation flags shared with active executors.
+    pub install_cancellations: HashMap<String, CancellationToken>,
+    /// Instance IDs with an active install transaction.
+    pub active_install_instances: HashSet<String>,
 }
 
 impl AppState {
@@ -40,7 +63,12 @@ impl AppState {
             login_flow: None,
             browse_cache: crate::browse_cache::new_cache(),
             running_process: None,
+            launch_reservation: None,
+            user_cancelled_launches: HashSet::new(),
             launch_session_counter: 0,
+            resolved_install_plans: HashMap::new(),
+            install_cancellations: HashMap::new(),
+            active_install_instances: HashSet::new(),
         }
     }
 }

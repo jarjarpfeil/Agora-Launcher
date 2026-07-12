@@ -20,8 +20,8 @@ const ALLOWED_PREFIXES: &[&str] = &[
 
 /// Banned extensions (§7.2.2). Hard-banned even inside whitelisted directories.
 const BANNED_EXTENSIONS: &[&str] = &[
-    ".jar", ".class", ".exe", ".bat", ".cmd", ".sh", ".ps1",
-    ".dll", ".so", ".dylib", ".msi", ".dmg",
+    ".jar", ".class", ".exe", ".bat", ".cmd", ".sh", ".ps1", ".dll", ".so", ".dylib", ".msi",
+    ".dmg",
 ];
 
 /// Result of an override extraction.
@@ -42,10 +42,7 @@ pub struct ExtractionResult {
 /// 5. Prevents Zip Slip (path traversal) by rejecting `..` and absolute paths.
 /// 6. Tracks actual bytes written and aborts mid-stream if limits are exceeded.
 /// 7. On any security violation, deletes partially extracted files.
-pub fn extract_overrides(
-    zip_path: &Path,
-    dest_dir: &Path,
-) -> LauncherResult<ExtractionResult> {
+pub fn extract_overrides(zip_path: &Path, dest_dir: &Path) -> LauncherResult<ExtractionResult> {
     // Pre-check: compressed file size.
     let zip_size = zip_path
         .metadata()
@@ -81,15 +78,12 @@ pub fn extract_overrides(
     let mut entry_count: usize = 0;
 
     for i in 0..archive.len() {
-        let entry = archive
-            .by_index(i)
-            .map_err(|_| LauncherError::Generic {
-                code: "ERR_OVERRIDE_FAILED".to_string(),
-                message: "Could not read zip entry.".to_string(),
-            })?;
+        let entry = archive.by_index(i).map_err(|_| LauncherError::Generic {
+            code: "ERR_OVERRIDE_FAILED".to_string(),
+            message: "Could not read zip entry.".to_string(),
+        })?;
 
-        total_uncompressed = total_uncompressed
-            .saturating_add(entry.size());
+        total_uncompressed = total_uncompressed.saturating_add(entry.size());
         entry_count += 1;
 
         if total_uncompressed > MAX_EXTRACTED_SIZE {
@@ -119,12 +113,10 @@ pub fn extract_overrides(
     let mut bytes_written: u64 = 0;
 
     for i in 0..archive.len() {
-        let mut entry = archive
-            .by_index(i)
-            .map_err(|_| LauncherError::Generic {
-                code: "ERR_OVERRIDE_FAILED".to_string(),
-                message: "Could not read zip entry during extraction.".to_string(),
-            })?;
+        let mut entry = archive.by_index(i).map_err(|_| LauncherError::Generic {
+            code: "ERR_OVERRIDE_FAILED".to_string(),
+            message: "Could not read zip entry during extraction.".to_string(),
+        })?;
 
         let raw_name = entry.name().to_string();
 
@@ -258,7 +250,9 @@ fn sanitize_path(raw: &str) -> Option<String> {
 
 /// Check if a path starts with one of the whitelisted directory prefixes.
 fn is_whitelisted(path: &str) -> bool {
-    ALLOWED_PREFIXES.iter().any(|prefix| path.starts_with(prefix))
+    ALLOWED_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 /// Check if a filename has a banned extension.
@@ -338,6 +332,8 @@ mod tests {
         // .jar in shaderpacks is still banned — it should go through mods/
         assert!(has_banned_extension("shaderpacks/evil.jar"));
         // .zip is fine
-        assert!(!has_banned_extension("shaderpacks/ComplementaryShaders.zip"));
+        assert!(!has_banned_extension(
+            "shaderpacks/ComplementaryShaders.zip"
+        ));
     }
 }

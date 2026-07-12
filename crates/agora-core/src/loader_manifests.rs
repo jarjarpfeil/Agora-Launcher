@@ -47,9 +47,7 @@ fn manifest() -> &'static LoaderManifests {
 
 /// Parse the embedded Mojang version list once and cache the result.
 fn mc_versions_list() -> &'static [String] {
-    MC_VERSIONS_LIST.get_or_init(|| {
-        serde_json::from_str(MC_VERSIONS).unwrap_or_default()
-    })
+    MC_VERSIONS_LIST.get_or_init(|| serde_json::from_str(MC_VERSIONS).unwrap_or_default())
 }
 
 /// Find a pinned loader entry for a `(loader, mc_version, loader_version)` tuple.
@@ -58,14 +56,11 @@ pub fn find_entry(
     mc_version: &str,
     loader_version: &str,
 ) -> Option<&'static LoaderEntry> {
-    manifest()
-        .loaders
-        .get(loader)
-        .and_then(|entries| {
-            entries.iter().find(|e| {
-                e.mc_version == mc_version && e.loader_version == loader_version
-            })
-        })
+    manifest().loaders.get(loader).and_then(|entries| {
+        entries
+            .iter()
+            .find(|e| e.mc_version == mc_version && e.loader_version == loader_version)
+    })
 }
 
 /// Verify that a URL's host is on the hard-coded modloader domain allowlist.
@@ -181,7 +176,9 @@ mod tests {
 
     #[test]
     fn test_ensure_allowed_domain_valid() {
-        let result = ensure_allowed_domain("https://maven.fabricmc.net/v2/versions/loader/1.21/0.19.0/profile/json");
+        let result = ensure_allowed_domain(
+            "https://maven.fabricmc.net/v2/versions/loader/1.21/0.19.0/profile/json",
+        );
         assert!(result.is_ok());
     }
 
@@ -207,9 +204,19 @@ mod tests {
     fn test_list_mc_versions_includes_legacy() {
         let versions = list_mc_versions(None);
         // Mojang's manifest includes versions back to 1.0.
-        assert!(versions.len() > 50, "Expected 50+ versions, got {}", versions.len());
-        assert!(versions.contains(&"1.12.2".to_string()), "1.12.2 should be in the list");
-        assert!(versions.contains(&"1.7.10".to_string()), "1.7.10 should be in the list");
+        assert!(
+            versions.len() > 50,
+            "Expected 50+ versions, got {}",
+            versions.len()
+        );
+        assert!(
+            versions.contains(&"1.12.2".to_string()),
+            "1.12.2 should be in the list"
+        );
+        assert!(
+            versions.contains(&"1.7.10".to_string()),
+            "1.7.10 should be in the list"
+        );
     }
 
     #[test]
@@ -218,8 +225,14 @@ mod tests {
         let all = list_mc_versions(None);
         let fabric = list_mc_versions(Some("fabric"));
         // Fabric should have fewer versions than the full list (it doesn't support 1.7.10 etc).
-        assert!(fabric.len() < all.len(), "Fabric should have fewer versions than the full list");
+        assert!(
+            fabric.len() < all.len(),
+            "Fabric should have fewer versions than the full list"
+        );
         // Fabric shouldn't include 1.7.10 (too old for Fabric).
-        assert!(!fabric.contains(&"1.7.10".to_string()), "Fabric should not support 1.7.10");
+        assert!(
+            !fabric.contains(&"1.7.10".to_string()),
+            "Fabric should not support 1.7.10"
+        );
     }
 }

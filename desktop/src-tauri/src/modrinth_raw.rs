@@ -262,6 +262,8 @@ struct ModrinthVersion {
     loaders: Option<Vec<String>>,
     files: Vec<ModrinthVersionFile>,
     #[serde(default)]
+    dependencies: Vec<ModrinthDependency>,
+    #[serde(default)]
     changelog: Option<String>,
 }
 
@@ -274,6 +276,23 @@ struct ModrinthVersionFile {
     /// Per §6.3 the launcher verifies against the SHA-1 hash published by
     /// Modrinth's API.
     hashes: Option<ModrinthFileHashes>,
+    #[serde(default)]
+    size: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawModrinthDependency {
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub dependency_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ModrinthDependency {
+    project_id: Option<String>,
+    version_id: Option<String>,
+    dependency_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +338,9 @@ pub struct RawModrinthVersionCandidate {
     pub filename: String,
     pub download_url: String,
     pub sha1: Option<String>,
+    pub sha512: Option<String>,
+    pub size: Option<u64>,
+    pub dependencies: Vec<RawModrinthDependency>,
     pub mc_versions: Vec<String>,
     pub loaders: Vec<String>,
     pub release_date: Option<String>,
@@ -755,13 +777,15 @@ pub async fn list_raw_modrinth_versions(
                 .iter()
                 .find(|f| f.primary)
                 .or_else(|| v.files.first());
-            let (filename, download_url, sha1) = match primary_file {
+            let (filename, download_url, sha1, sha512, size) = match primary_file {
                 Some(f) => (
                     f.filename.clone(),
                     f.url.clone(),
                     f.hashes.as_ref().and_then(|h| h.sha1.clone()),
+                    f.hashes.as_ref().and_then(|h| h.sha512.clone()),
+                    f.size,
                 ),
-                None => (String::new(), String::new(), None),
+                None => (String::new(), String::new(), None, None, None),
             };
             RawModrinthVersionCandidate {
                 version: v.version_number,
@@ -770,6 +794,13 @@ pub async fn list_raw_modrinth_versions(
                 filename,
                 download_url,
                 sha1,
+                sha512,
+                size,
+                dependencies: v.dependencies.into_iter().map(|dependency| RawModrinthDependency {
+                    project_id: dependency.project_id,
+                    version_id: dependency.version_id,
+                    dependency_type: dependency.dependency_type,
+                }).collect(),
                 mc_versions: v.game_versions.unwrap_or_default(),
                 loaders: v.loaders.unwrap_or_default().into_iter().map(|l| l.to_lowercase()).collect(),
                 release_date: v.date_published,
@@ -877,6 +908,7 @@ pub async fn install_raw_modrinth(
         registry_id: None,
         modrinth_id: Some(project_id.to_string()),
         source: "modrinth_raw".to_string(),
+        source_url: Some(candidate.download_url.clone()),
         version: Some(candidate.version.clone()),
         sha256,
         installed_at: chrono::Utc::now().to_rfc3339(),

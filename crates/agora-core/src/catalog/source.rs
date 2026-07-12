@@ -1,6 +1,6 @@
-use std::path::Path;
 use crate::ctx::Ctx;
 use crate::error::LauncherError;
+use std::path::Path;
 
 /// How a project is referenced across sources. The join key for enrichment.
 /// `Modrinth("<project_id>")` is the canonical key when available; `Agora("<slug>")`
@@ -100,40 +100,20 @@ pub trait CatalogSource: Send + Sync {
     fn is_enabled(&self, ctx: &Ctx) -> bool;
 
     /// Search this source's catalog.
-    async fn search(
-        &self,
-        ctx: &Ctx,
-        q: &SearchQuery,
-    ) -> Result<Vec<CatalogItem>, LauncherError>;
+    async fn search(&self, ctx: &Ctx, q: &SearchQuery) -> Result<Vec<CatalogItem>, LauncherError>;
 
     /// Fetch a single project by its canonical reference.
-    async fn project(
-        &self,
-        ctx: &Ctx,
-        id: &ProjectRef,
-    ) -> Result<CatalogItem, LauncherError>;
+    async fn project(&self, ctx: &Ctx, id: &ProjectRef) -> Result<CatalogItem, LauncherError>;
 
     /// List all versions for a project.
-    async fn versions(
-        &self,
-        ctx: &Ctx,
-        id: &ProjectRef,
-    ) -> Result<Vec<Version>, LauncherError>;
+    async fn versions(&self, ctx: &Ctx, id: &ProjectRef) -> Result<Vec<Version>, LauncherError>;
 
     /// Resolve transitive dependencies for a version.
-    async fn resolve_dependencies(
-        &self,
-        ctx: &Ctx,
-        v: &Version,
-    ) -> Result<DepGraph, LauncherError>;
+    async fn resolve_dependencies(&self, ctx: &Ctx, v: &Version)
+        -> Result<DepGraph, LauncherError>;
 
     /// Download a version file to `dest`, returning verified hashes.
-    async fn download(
-        &self,
-        ctx: &Ctx,
-        v: &Version,
-        dest: &Path,
-    ) -> Result<Hashes, LauncherError>;
+    async fn download(&self, ctx: &Ctx, v: &Version, dest: &Path) -> Result<Hashes, LauncherError>;
 
     /// Verify a local file against expected hashes.
     async fn verify(&self, file: &Path, expected: &Hashes) -> Result<(), LauncherError>;

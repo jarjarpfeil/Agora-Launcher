@@ -39,10 +39,7 @@ pub fn instances_dir(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
 }
 
 /// Directory for a single instance (e.g. `instances/<instance_id>`).
-pub fn instance_dir(
-    app_data_dir: &PathBuf,
-    instance_id: &str,
-) -> anyhow::Result<PathBuf> {
+pub fn instance_dir(app_data_dir: &PathBuf, instance_id: &str) -> anyhow::Result<PathBuf> {
     Ok(instances_dir(app_data_dir)?.join(sanitize_id(instance_id)))
 }
 

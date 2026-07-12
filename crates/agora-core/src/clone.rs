@@ -193,8 +193,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let src = tmp.path().join("original");
 
-        for dir in ["mods", "saves", "config", "resourcepacks", "shaderpacks", "screenshots", "servers", "options"]
-        {
+        for dir in [
+            "mods",
+            "saves",
+            "config",
+            "resourcepacks",
+            "shaderpacks",
+            "screenshots",
+            "servers",
+            "options",
+        ] {
             fs::create_dir_all(src.join(dir)).unwrap();
             fs::write(src.join(dir).join("placeholder.txt"), b"data").unwrap();
         }
@@ -205,8 +213,16 @@ mod tests {
         let id = clone_instance(&src, &dst, &prefs).unwrap();
         assert!(!id.is_empty());
 
-        for dir in ["mods", "saves", "config", "resourcepacks", "shaderpacks", "screenshots", "servers", "options"]
-        {
+        for dir in [
+            "mods",
+            "saves",
+            "config",
+            "resourcepacks",
+            "shaderpacks",
+            "screenshots",
+            "servers",
+            "options",
+        ] {
             assert!(dst.join(dir).exists(), "missing {dir}");
         }
         assert!(dst.join("instance_manifest.json").exists());

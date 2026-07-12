@@ -148,10 +148,7 @@ pub fn triage(log: &str) -> CrashTriageResult {
 ///
 /// If the table is missing or the query errors, the embedded result is
 /// returned unchanged — the DB path never fails the triage.
-pub fn triage_with_db(
-    log: &str,
-    conn: Option<&rusqlite::Connection>,
-) -> CrashTriageResult {
+pub fn triage_with_db(log: &str, conn: Option<&rusqlite::Connection>) -> CrashTriageResult {
     // 1. Check embedded corpus first.
     let embedded_result = triage(log);
     if embedded_result.matched {
@@ -203,9 +200,11 @@ struct CrashSignatureRow {
 /// Returns `None` if the table doesn't exist or the query fails.
 fn load_db_signatures(conn: &rusqlite::Connection) -> Option<Vec<CrashSignatureRow>> {
     // Check if the table exists.
-    let mut stmt = conn.prepare(
-        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='crash_signatures'",
-    ).ok()?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='crash_signatures'",
+        )
+        .ok()?;
     let exists: i32 = stmt.query_row([], |row| row.get(0)).ok()?;
     if exists == 0 {
         return None;
@@ -213,19 +212,23 @@ fn load_db_signatures(conn: &rusqlite::Connection) -> Option<Vec<CrashSignatureR
     drop(stmt);
 
     // Query all signatures.
-    let mut stmt = conn.prepare(
-        "SELECT id, name, regex_pattern, solution_markdown, action_button_json \
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, regex_pattern, solution_markdown, action_button_json \
          FROM crash_signatures",
-    ).ok()?;
-    let rows = stmt.query_map([], |row| {
-        Ok(CrashSignatureRow {
-            id: row.get(0).unwrap_or_default(),
-            name: row.get(1).unwrap_or_default(),
-            regex_pattern: row.get(2).unwrap_or_default(),
-            solution_markdown: row.get(3).ok(),
-            action_button_json: row.get(4).ok(),
+        )
+        .ok()?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CrashSignatureRow {
+                id: row.get(0).unwrap_or_default(),
+                name: row.get(1).unwrap_or_default(),
+                regex_pattern: row.get(2).unwrap_or_default(),
+                solution_markdown: row.get(3).ok(),
+                action_button_json: row.get(4).ok(),
+            })
         })
-    }).ok()?;
+        .ok()?;
 
     let mut out = Vec::new();
     for r in rows {
@@ -412,10 +415,8 @@ mod tests {
     /// test_list_crash_reports_finds_txt: temp dir with .txt files finds them.
     #[test]
     fn test_list_crash_reports_finds_txt() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agora_test_crash_reports_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agora_test_crash_reports_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("crash-1.txt"), "crash data 1").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -433,10 +434,8 @@ mod tests {
     /// test_list_crash_reports_empty_dir: empty directory returns empty vec.
     #[test]
     fn test_list_crash_reports_empty_dir() {
-        let tmp = std::env::temp_dir().join(format!(
-            "agora_test_crash_empty_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("agora_test_crash_empty_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
 
         let reports = list_reports_from_dir(&tmp);
@@ -495,10 +494,14 @@ mod tests {
     /// test_triage_mixin_conflict: embedded mixin-conflict signature matches.
     #[test]
     fn test_triage_mixin_conflict() {
-        let log = "[06:12:33] [Worker-3/FABRIC]: Mixin apply failed mixins.fabric.json:debug.mixins.json";
+        let log =
+            "[06:12:33] [Worker-3/FABRIC]: Mixin apply failed mixins.fabric.json:debug.mixins.json";
         let result = triage(log);
         assert!(result.matched);
-        assert_eq!(result.signature_name.as_deref(), Some("Mixin Injection Conflict"));
+        assert_eq!(
+            result.signature_name.as_deref(),
+            Some("Mixin Injection Conflict")
+        );
         assert!(result.solution_markdown.is_some());
         assert!(result.action_button_json.is_some());
     }

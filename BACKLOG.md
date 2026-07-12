@@ -424,3 +424,45 @@ Tracking packages A1 through D5 from `Agora Desktop Upgrade.md`. Packages are co
 - [ ] **D3** — Last-known-good user flow
 - [ ] **D4** — Explainable Crash Doctor
 - [ ] **D5** — Reproducible sharing and drift detection
+
+---
+
+### Health-check follow-ups (post incompatibility/dependency bug fix)
+
+- [ ] **HF1** — Deduplicate the desktop JAR parser against `agora_core::jar_metadata`
+  - The pre-launch health check's false-positive incompatibility/blocker bug was
+    fixed in the **core** parser (`crates/agora-core/src/jar_metadata.rs`) — Forge
+    dependency blocks now read the inner `modId` (not the section header, which
+    caused self-conflicts), Fabric `breaks`/`conflicts` carry severity + version
+    ranges, NeoForge `neoforge.mods.toml` is parsed, `mandatory=false` → optional,
+    and `forge`/`neoforge` are ignored as loader deps.
+  - A **duplicate, still-buggy** copy lives in
+    `desktop/src-tauri/src/crash_investigator.rs::parse_jar_metadata`. It feeds the
+    install-plan path (`get_install_plan` → `build_install_plan`) and persists
+    `InstalledMod.incompatible_deps`. Health does NOT use it (it re-parses via
+    core), so the reported false-positive blocker issue is resolved, but:
+    Forge mods can still produce false `MissingRequiredDependency` entries in
+    install plans, and persisted `incompatible_deps` lists remain stale-wrong.
+  - Fix: make `crash_investigator::parse_jar_metadata` delegate to
+    `agora_core::jar_metadata::parse_jar_metadata` and add
+    `From<JarDeps> for JarMetadata` (drop the structured decls; keep the flat
+    list). Remove the now-dead `extract_fabric_deps`/`extract_forge_deps`/
+    `flush_forge`/`DEPENDENCY_IGNORE_LIST` copies. Update the Forge test fixture
+    at `crash_investigator.rs::~1762` whose `mods.toml` had no inner `modId`
+    (it asserted the old buggy header-as-dep behavior).
+
+- [ ] **HF2** — Implement real version-range matching for JAR incompatibilities
+  - Today: only `is_unconditional()` (`*`/empty/[,)) is matched; conditional
+    Fabric predicates (`<2.0`, `>=1.0 <2.0`) and Forge Maven ranges
+    (`[1.0,2.0)`) are treated as unverified → warning (never blocker).
+  - Need: Fabric predicate grammar (space=AND, array=OR) + Forge Maven range
+    grammar. Requires a `mod_version` field on `JarDeps` (Fabric `version`;
+    Forge `${file.jarVersion}` → `MANIFEST.MF` `Implementation-Version`).
+    Fabric versions are frequently non-SemVer (e.g. `MC1.20.1-3.2.1-build.42`),
+    so a lenient comparator is required. Until then, curated `known_conflicts`
+    remain the authoritative hard-blocker source.
+
+- [ ] **HF3** — Add `quilt.mod.json` parsing (`quilt_loader.breaks`/`.depends`)
+  - Deferred: Quilt-only mods (no `fabric.mod.json`) currently parse to
+    `UnknownMod` warning (no false-positive blocker). Reuse
+    `IncompatibilityDecl` + add `QuiltBreaks` to `IncompatibilitySource`.

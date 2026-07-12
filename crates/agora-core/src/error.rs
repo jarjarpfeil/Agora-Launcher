@@ -65,7 +65,9 @@ impl LauncherError {
             LauncherError::RegistrySignatureInvalid => "ERR_REGISTRY_SIGNATURE_INVALID".to_string(),
             LauncherError::SchemaTooNew => "ERR_SCHEMA_TOO_NEW".to_string(),
             LauncherError::ZipBomb => "ERR_ZIP_BOMB".to_string(),
-            LauncherError::OverrideSecurityViolation => "ERR_OVERRIDE_SECURITY_VIOLATION".to_string(),
+            LauncherError::OverrideSecurityViolation => {
+                "ERR_OVERRIDE_SECURITY_VIOLATION".to_string()
+            }
             LauncherError::HashMismatch => "ERR_HASH_MISMATCH".to_string(),
             LauncherError::UntrustedSource => "ERR_UNTRUSTED_SOURCE".to_string(),
             LauncherError::DiskFull => "ERR_DISKFULL".to_string(),
@@ -96,19 +98,34 @@ impl std::fmt::Display for LauncherError {
         match self {
             LauncherError::NetworkOffline => write!(f, "You're offline. Using cached data."),
             LauncherError::RegistryDownloadFailed => {
-                write!(f, "Could not download the latest registry. Using cached version.")
+                write!(
+                    f,
+                    "Could not download the latest registry. Using cached version."
+                )
             }
             LauncherError::RegistrySignatureInvalid => {
-                write!(f, "Registry signature check failed. The database may be compromised.")
+                write!(
+                    f,
+                    "Registry signature check failed. The database may be compromised."
+                )
             }
             LauncherError::SchemaTooNew => {
-                write!(f, "This registry requires a newer launcher version. Please update the app.")
+                write!(
+                    f,
+                    "This registry requires a newer launcher version. Please update the app."
+                )
             }
             LauncherError::ZipBomb => {
-                write!(f, "Installation aborted: this archive exceeds safety limits.")
+                write!(
+                    f,
+                    "Installation aborted: this archive exceeds safety limits."
+                )
             }
             LauncherError::OverrideSecurityViolation => {
-                write!(f, "Installation aborted: pack override contains forbidden files.")
+                write!(
+                    f,
+                    "Installation aborted: pack override contains forbidden files."
+                )
             }
             LauncherError::HashMismatch => {
                 write!(f, "Downloaded file does not match its expected hash. It may be corrupted or tampered with.")
@@ -120,7 +137,10 @@ impl std::fmt::Display for LauncherError {
                 write!(f, "Not enough disk space to complete this operation.")
             }
             LauncherError::AuthExpired => {
-                write!(f, "Your GitHub session has expired. Sign in again to continue.")
+                write!(
+                    f,
+                    "Your GitHub session has expired. Sign in again to continue."
+                )
             }
             LauncherError::AuthRequired => {
                 write!(f, "This feature requires GitHub sign-in.")
@@ -129,13 +149,19 @@ impl std::fmt::Display for LauncherError {
                 write!(f, "Modrinth integration is disabled. Enable it in Settings or install this mod manually.")
             }
             LauncherError::InstanceLocked => {
-                write!(f, "This instance is locked. Unlock it to add or remove mods.")
+                write!(
+                    f,
+                    "This instance is locked. Unlock it to add or remove mods."
+                )
             }
             LauncherError::SandboxUnavailable => {
                 write!(f, "Dev Mode builds require Docker, Podman, or Firecracker.")
             }
             LauncherError::MojangNotFound => {
-                write!(f, "Minecraft Launcher not found. Please install it or set its path in Settings.")
+                write!(
+                    f,
+                    "Minecraft Launcher not found. Please install it or set its path in Settings."
+                )
             }
             LauncherError::LaunchFailed => {
                 write!(f, "Could not start Minecraft. Check the logs for details.")
@@ -153,22 +179,37 @@ impl std::fmt::Display for LauncherError {
                 write!(f, "The cached registry database is missing. Please connect to the internet and restart.")
             }
             LauncherError::UnsupportedLoader => {
-                write!(f, "This modloader version is not yet verified by the curation team.")
+                write!(
+                    f,
+                    "This modloader version is not yet verified by the curation team."
+                )
             }
             LauncherError::VersionNotFound => {
-                write!(f, "Requested mod version not found. Install the closest compatible version?")
+                write!(
+                    f,
+                    "Requested mod version not found. Install the closest compatible version?"
+                )
             }
             LauncherError::DependencyMissing => {
                 write!(f, "A mod requires a dependency. Try installing it?")
             }
             LauncherError::McpTooManyRequests => {
-                write!(f, "AI client sent too many requests. Approve or deny pending requests first.")
+                write!(
+                    f,
+                    "AI client sent too many requests. Approve or deny pending requests first."
+                )
             }
             LauncherError::McpDenied => {
-                write!(f, "AI tool request denied based on your saved approval preferences.")
+                write!(
+                    f,
+                    "AI tool request denied based on your saved approval preferences."
+                )
             }
             LauncherError::McpUnauthorized => {
-                write!(f, "AI client connection rejected: invalid or missing token.")
+                write!(
+                    f,
+                    "AI client connection rejected: invalid or missing token."
+                )
             }
             LauncherError::Generic { message, .. } => write!(f, "{}", message),
         }
@@ -189,15 +230,9 @@ impl serde::Serialize for LauncherError {
             LauncherError::HashMismatch => {
                 Some("The downloaded file may be corrupted or from an untrusted source. Try again.")
             }
-            LauncherError::NetworkOffline => {
-                Some("Check your internet connection and try again.")
-            }
-            LauncherError::AuthExpired => {
-                Some("Sign in again via Settings to continue.")
-            }
-            LauncherError::AuthRequired => {
-                Some("Sign in via Settings to use this feature.")
-            }
+            LauncherError::NetworkOffline => Some("Check your internet connection and try again."),
+            LauncherError::AuthExpired => Some("Sign in again via Settings to continue."),
+            LauncherError::AuthRequired => Some("Sign in via Settings to use this feature."),
             _ => None,
         };
 
@@ -226,7 +261,10 @@ mod tests {
         };
         let val = serde_json::to_value(err).unwrap();
         assert_eq!(val.get("code").unwrap().as_str().unwrap(), "ERR_TEST");
-        assert_eq!(val.get("message").unwrap().as_str().unwrap(), "test message");
+        assert_eq!(
+            val.get("message").unwrap().as_str().unwrap(),
+            "test message"
+        );
         assert_eq!(val.get("details"), Some(&serde_json::Value::Null));
         assert_eq!(val.get("suggested_action"), Some(&serde_json::Value::Null));
     }

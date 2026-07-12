@@ -15,7 +15,8 @@ use agora_core::dependency_ops::JarDeps;
 
 pub use agora_core::dependency_ops::{
     AliasMap, DepCandidate, DepConflict, DepSource, DependentInfo, DisablePlan,
-    InstallPlan, RemovalPlan, Requirement, ResolvedInstallDeps,
+    IncompatibilityDecl, IncompatibilitySource, InstallPlan, RemovalPlan, Requirement,
+    ResolvedInstallDeps,
 };
 
 // ---------------------------------------------------------------------------
@@ -24,12 +25,18 @@ pub use agora_core::dependency_ops::{
 
 impl From<JarMetadata> for JarDeps {
     fn from(jm: JarMetadata) -> Self {
+        // The desktop JarMetadata does not carry structured incompatibility
+        // decls (severity + version ranges). It is only used for the install
+        // plan flow, which ignores incompatibilities entirely, so an empty
+        // decl list is correct here. The health check re-parses JARs via the
+        // core parser and consumes the structured decls directly.
         Self {
             java_packages: jm.java_packages,
             mod_jar_id: jm.mod_jar_id,
             depends_on: jm.depends_on,
             optional_deps: jm.optional_deps,
             incompatible_deps: jm.incompatible_deps,
+            incompatibility_decls: Vec::new(),
         }
     }
 }

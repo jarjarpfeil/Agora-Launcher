@@ -2,14 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   confirmCrashFix,
+  createSnapshot,
   disableModForTest,
-  enableModForTest,
   formatError,
   getDisablePlan,
   investigateCrash,
   investigateManual,
   readCrashLog,
   reportStillCrashing,
+  restoreSnapshot,
   type DisablePlan,
   type InvestigationResult,
   type SuspectScore,
@@ -17,6 +18,12 @@ import {
 } from '../lib/tauri';
 import { DependencyPrompt } from './DependencyPrompt';
 import { AiAssistant } from './AiAssistant';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog';
 
 interface CrashInvestigatorProps {
   instanceId: string;
@@ -24,11 +31,24 @@ interface CrashInvestigatorProps {
   manualLogText?: string | null;
   onClose: () => void;
   /** Called to re-launch the instance after disabling a suspected mod. */
-  onLaunch: () => void;
+  onLaunch: () => Promise<void>;
 }
 
-/** Render a single breakdown entry as plain text. */
-function BreakdownEntry({ key, value }: { key: string; value: unknown }) {
+const SIGNAL_LABELS: Record<string, string> = {
+  stack_frames: 'Stack frames',
+  stack_frame_score: 'Stack frames',
+  curated_conflicts: 'Curated conflicts',
+  curated_conflict_score: 'Curated conflicts',
+  prior_local_crashes: 'Prior local crashes',
+  local_history_score: 'Prior local crashes',
+  dependency_relationships: 'Dependency relationships',
+  dependency_score: 'Dependency relationships',
+  confirmed_prior_fixes: 'Confirmed prior fixes',
+  confirmed_fix_score: 'Confirmed prior fixes',
+};
+
+/** Render one deterministic signal with its evidence source. */
+function BreakdownEntry({ signal, value }: { signal: string; value: unknown }) {
   let displayValue: string;
   if (value === null || value === undefined) {
     displayValue = '—';
@@ -45,8 +65,8 @@ function BreakdownEntry({ key, value }: { key: string; value: unknown }) {
   }
   return (
     <div className="flex items-center justify-between text-sm py-1">
-      <span className="text-muted-foreground" data-testid={`breakdown-key-${key}`}>
-        {key}
+      <span className="text-muted-foreground" data-testid={`breakdown-key-${signal}`}>
+        {SIGNAL_LABELS[signal] ?? signal.replace(/_/g, ' ')}
       </span>
       <span className="font-mono text-xs text-muted-foreground">
         {displayValue}
@@ -62,7 +82,7 @@ function BreakdownList({ breakdown }: { breakdown: Record<string, unknown> }) {
   return (
     <div className="mt-2 space-y-0.5 border-t border-border pt-2">
       {entries.map(([k, v]) => (
-        <BreakdownEntry key={k} value={v} />
+        <BreakdownEntry key={k} signal={k} value={v} />
       ))}
     </div>
   );
@@ -271,6 +291,8 @@ export function CrashInvestigator({
   } | null>(null);
   // Success state
   const [success, setSuccess] = useState<string | null>(null);
+  const [recoverySnapshotId, setRecoverySnapshotId] = useState<string | null>(null);
+  const [disabledByTest, setDisabledByTest] = useState<string[]>([]);
   // Disable dependency prompt state
   const [disablePlanTarget, setDisablePlanTarget] = useState<{
     originalFilename: string;
@@ -282,12 +304,20 @@ export function CrashInvestigator({
   const [aiExplanation, setAiExplanation] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+  const cancelledRef = useRef(false);
 
   // Run investigation on mount
   useEffect(() => {
     let cancelled = false;
     const runInvestigation = async () => {
       try {
+        const snapshot = await createSnapshot(
+          instanceId,
+          `crash-doctor-${Date.now()}`,
+        );
+        if (cancelled) return;
+        setRecoverySnapshotId(snapshot.id);
+
         // For file-based investigation, fetch the raw log text first
         if (crashFilename) {
           const rawText = await readCrashLog(instanceId, crashFilename);
@@ -315,6 +345,36 @@ export function CrashInvestigator({
     };
   }, [instanceId, crashFilename, manualLogText]);
 
+  const restoreInvestigationSnapshot = useCallback(async () => {
+    if (!recoverySnapshotId) {
+      throw new Error('The pre-investigation recovery snapshot is unavailable.');
+    }
+    await restoreSnapshot(instanceId, recoverySnapshotId);
+    setDisabledByTest([]);
+    setPostLaunch(null);
+  }, [instanceId, recoverySnapshotId]);
+
+  const handleClose = useCallback(async () => {
+    if (success) {
+      onClose();
+      return;
+    }
+    if (!recoverySnapshotId && disabledByTest.length === 0) {
+      onClose();
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      await restoreInvestigationSnapshot();
+      onClose();
+    } catch (cause) {
+      setError(`Could not restore the pre-investigation snapshot: ${formatError(cause)}`);
+    } finally {
+      if (!cancelledRef.current) setLoading(false);
+    }
+  }, [disabledByTest.length, onClose, recoverySnapshotId, restoreInvestigationSnapshot, success]);
+
   const handleDisableAndRelaunch = useCallback(async () => {
     if (!result) return;
     setLoading(true);
@@ -338,6 +398,7 @@ export function CrashInvestigator({
       return;
     }
 
+    let modified = false;
     try {
       const plan = await getDisablePlan(instanceId, filename);
       if (plan.dependents.length > 0) {
@@ -346,18 +407,30 @@ export function CrashInvestigator({
         return;
       }
       await disableModForTest(instanceId, filename);
+      modified = true;
+      setDisabledByTest([filename]);
       await onLaunch();
       if (!cancelledRef.current) {
         setPostLaunch({ filename, modId });
       }
     } catch (e) {
+      if (modified) {
+        try {
+          await restoreInvestigationSnapshot();
+        } catch (restoreError) {
+          if (!cancelledRef.current) {
+            setError(`Test launch failed and recovery also failed: ${formatError(restoreError)}`);
+          }
+          return;
+        }
+      }
       if (!cancelledRef.current) {
         setError(formatError(e));
       }
     } finally {
       if (!cancelledRef.current && !disablePlanTarget) setLoading(false);
     }
-  }, [result, instanceId]);
+  }, [result, instanceId, onLaunch, restoreInvestigationSnapshot]);
 
   const handleDisableConfirm = useCallback(async (selectedKeys: string[]) => {
     if (!disablePlanTarget) return;
@@ -367,23 +440,29 @@ export function CrashInvestigator({
 
     try {
       const selectedSet = new Set(selectedKeys);
-      // Best-effort: disable selected dependents first
-      for (const dep of plan.dependents) {
-        if (selectedSet.has(dep.mod_id)) {
-          try {
-            await disableModForTest(instanceId, dep.filename);
-          } catch {
-            // continue past individual failures
-          }
-        }
+      const filenames = [
+        ...plan.dependents
+          .filter((dependent) => selectedSet.has(dependent.mod_id))
+          .map((dependent) => dependent.filename),
+        originalFilename,
+      ];
+      for (const filename of filenames) {
+        await disableModForTest(instanceId, filename);
       }
-      // Then disable the original suspect
-      await disableModForTest(instanceId, originalFilename);
+      setDisabledByTest(filenames);
       await onLaunch();
       if (!cancelledRef.current) {
         setPostLaunch({ filename: originalFilename, modId: result?.suggested_action.kind === 'GuidedDisable' ? result.suggested_action.next_suspect.mod_id : result?.suggested_action.kind === 'ConfidenceAutoDisable' ? result.suggested_action.mod_id : '' });
       }
     } catch (e) {
+      try {
+        await restoreInvestigationSnapshot();
+      } catch (restoreError) {
+        if (!cancelledRef.current) {
+          setError(`Disable test failed and recovery also failed: ${formatError(restoreError)}`);
+        }
+        return;
+      }
       if (!cancelledRef.current) {
         setError(formatError(e));
       }
@@ -393,10 +472,9 @@ export function CrashInvestigator({
         setLoading(false);
       }
     }
-  }, [disablePlanTarget, instanceId, result]);
+  }, [disablePlanTarget, instanceId, onLaunch, restoreInvestigationSnapshot, result]);
 
   // Track whether the component is still mounted
-  const cancelledRef = useRef(false);
   useEffect(() => {
     return () => {
       cancelledRef.current = true;
@@ -434,8 +512,8 @@ export function CrashInvestigator({
     setError(null);
 
     try {
-      // Restore the disabled mod so the instance is whole again
-      await enableModForTest(instanceId, postLaunch.filename);
+      // Restore the complete pre-investigation state, including any dependents.
+      await restoreInvestigationSnapshot();
 
       // Determine the crash log text to pass
       let logText: string;
@@ -469,7 +547,7 @@ export function CrashInvestigator({
     } finally {
       if (!cancelledRef.current) setLoading(false);
     }
-  }, [result, postLaunch, instanceId, manualLogText, crashLogText, crashFilename]);
+  }, [result, postLaunch, instanceId, manualLogText, crashLogText, crashFilename, restoreInvestigationSnapshot]);
 
   const handleViewTriage = useCallback(() => {
     onClose();
@@ -505,34 +583,48 @@ export function CrashInvestigator({
 
   if (loading && !result) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-        <div className="rounded-2xl border border-border bg-card p-8 w-full max-w-lg mx-4">
-          <div className="flex flex-col items-center gap-3">
+      <Dialog open onOpenChange={(open) => { if (!open) void handleClose(); }}>
+        <DialogContent>
+          <DialogTitle>Crash Doctor</DialogTitle>
+          <DialogDescription>
+            Creating a recovery snapshot and analyzing deterministic crash signals.
+          </DialogDescription>
+          <div className="flex flex-col items-center gap-3 py-8">
             <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
             <p className="text-sm text-muted-foreground">Investigating crash…</p>
           </div>
-        </div>
-      </div>
+        </DialogContent>
+      </Dialog>
     );
   }
 
   if (error) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-        <div className="rounded-2xl border border-border bg-card p-8 w-full max-w-lg mx-4">
-          <div className="flex items-start justify-between mb-4">
-            <h2 className="text-lg font-bold">Crash Investigator</h2>
+      <Dialog open onOpenChange={(open) => { if (!open) void handleClose(); }}>
+        <DialogContent>
+          <DialogTitle>Crash Doctor</DialogTitle>
+          <DialogDescription>
+            The investigation stopped safely. Restore the recovery snapshot before closing if any test changes were made.
+          </DialogDescription>
+          <ErrorBanner message={error} />
+          <div className="flex justify-end gap-2">
+            {recoverySnapshotId && (
+              <button
+                onClick={() => { void restoreInvestigationSnapshot().then(onClose).catch((cause) => setError(formatError(cause))); }}
+                className="rounded-lg border border-destructive/40 px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+              >
+                Restore All & Close
+              </button>
+            )}
             <button
-              onClick={onClose}
-              className="rounded-lg p-1 text-muted-foreground hover:text-foreground transition-colors"
-              aria-label="Close"
+              onClick={() => { void handleClose(); }}
+              className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent"
             >
-              ✕
+              Close Safely
             </button>
           </div>
-          <ErrorBanner message={error} />
-        </div>
-      </div>
+        </DialogContent>
+      </Dialog>
     );
   }
 
@@ -549,12 +641,15 @@ export function CrashInvestigator({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto">
-      <div className="rounded-2xl border border-border bg-card w-full max-w-lg mx-4 my-8">
-        {/* Header */}
-        <div className="flex items-start justify-between p-6 pb-4 border-b border-border">
+    <>
+      <Dialog open onOpenChange={(open) => { if (!open) void handleClose(); }}>
+        <DialogContent className="max-h-[90vh] max-w-lg overflow-y-auto">
+          <div className="flex items-start justify-between gap-4 border-b border-border pb-4 pr-6">
           <div className="flex-1 min-w-0">
-            <h2 className="text-lg font-bold">Crash Investigator</h2>
+            <DialogTitle>Crash Doctor</DialogTitle>
+            <DialogDescription>
+              Ranked deterministic evidence with reversible one-mod-at-a-time tests.
+            </DialogDescription>
             {fingerprint && (
               <p className="text-sm text-muted-foreground mt-1 truncate">
                 {fingerprint.exception_class}
@@ -573,17 +668,22 @@ export function CrashInvestigator({
             >
               Ask AI Assistant
             </button>
-            <button
-              onClick={onClose}
-              className="rounded-lg p-1 text-muted-foreground hover:text-foreground transition-colors"
-              aria-label="Close"
-            >
-              ✕
-            </button>
           </div>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="space-y-4">
+          {recoverySnapshotId && (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border p-3 text-xs text-muted-foreground">
+              <span>Recovery snapshot ready: {recoverySnapshotId}</span>
+              <button
+                onClick={() => { void restoreInvestigationSnapshot().then(onClose).catch((cause) => setError(formatError(cause))); }}
+                disabled={loading}
+                className="shrink-0 rounded-md border border-destructive/40 px-2 py-1 font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+              >
+                Restore All & Close
+              </button>
+            </div>
+          )}
           {/* AI Assistant panel or suspect list */}
           {showAiAssistant ? (
             <div className="h-[480px]">
@@ -699,7 +799,8 @@ export function CrashInvestigator({
             </>
           )}
         </div>
-      </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Disable dependency prompt */}
       {disablePlanTarget && (
@@ -716,6 +817,6 @@ export function CrashInvestigator({
           onCancel={() => setDisablePlanTarget(null)}
         />
       )}
-    </div>
+    </>
   );
 }

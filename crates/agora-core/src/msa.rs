@@ -1,4 +1,4 @@
-﻿//! Microsoft Account (MSA) authentication for direct Minecraft launching.
+//! Microsoft Account (MSA) authentication for direct Minecraft launching.
 //!
 //! Implements the Xbox Live device-token flow (p256 ECDSA signed requests)
 //! adapted from the Theseus/Modrinth App reference implementation. This is the
@@ -20,8 +20,8 @@ use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 use base64::Engine;
 use chrono::{DateTime, Utc};
-use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use p256::ecdsa::signature::Signer;
+use p256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -128,7 +128,10 @@ impl std::fmt::Debug for LoginFlow {
         f.debug_struct("LoginFlow")
             .field("auth_uri", &self.auth_uri)
             .field("verifier", &"[REDACTED]")
-            .field("session_id", &self.session_id.as_deref().map(|_| "[PRESENT]"))
+            .field(
+                "session_id",
+                &self.session_id.as_deref().map(|_| "[PRESENT]"),
+            )
             .field("key_json", &"[REDACTED]")
             .field("device_token", &"[REDACTED]")
             .field("state", &"[REDACTED]")
@@ -162,14 +165,17 @@ impl DeviceTokenKey {
         let public_key = VerifyingKey::from(&signing_key);
         let point = public_key.to_encoded_point(false);
 
-        let b64 = |bytes: &[u8]| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-        };
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
 
         let x = point.x().map(|x| b64(x.as_slice())).unwrap_or_default();
         let y = point.y().map(|y| b64(y.as_slice())).unwrap_or_default();
 
-        Self { id, key: signing_key, x, y }
+        Self {
+            id,
+            key: signing_key,
+            x,
+            y,
+        }
     }
 
     /// Serialize the key for storage in LoginFlow (the key must survive across
@@ -188,30 +194,35 @@ impl DeviceTokenKey {
     }
 
     fn from_json(json: &str) -> LauncherResult<Self> {
-        let v: serde_json::Value = serde_json::from_str(json).map_err(|_| LauncherError::Generic {
-            code: "ERR_MSA_KEY_DECODE".into(),
-            message: "Failed to decode device token key.".into(),
-        })?;
-        let id: Uuid = v["id"].as_str()
+        let v: serde_json::Value =
+            serde_json::from_str(json).map_err(|_| LauncherError::Generic {
+                code: "ERR_MSA_KEY_DECODE".into(),
+                message: "Failed to decode device token key.".into(),
+            })?;
+        let id: Uuid = v["id"]
+            .as_str()
             .and_then(|s| Uuid::parse_str(s).ok())
             .unwrap_or_else(Uuid::new_v4);
         let x = v["x"].as_str().unwrap_or("").to_string();
         let y = v["y"].as_str().unwrap_or("").to_string();
         let der_b64 = v["der"].as_str().unwrap_or("");
-        let der = base64::engine::general_purpose::STANDARD.decode(der_b64).unwrap_or_default();
-        let key = p256::pkcs8::DecodePrivateKey::from_pkcs8_der(&der)
-            .map_err(|_| LauncherError::Generic {
+        let der = base64::engine::general_purpose::STANDARD
+            .decode(der_b64)
+            .unwrap_or_default();
+        let key = p256::pkcs8::DecodePrivateKey::from_pkcs8_der(&der).map_err(|_| {
+            LauncherError::Generic {
                 code: "ERR_MSA_KEY_DECODE".into(),
                 message: "Failed to reconstruct signing key from PKCS8 DER.".into(),
-            })?;
+            }
+        })?;
         Ok(Self { id, key, x, y })
     }
 }
 
 /// Response shapes (PascalCase = Xbox Live convention)
 mod xbox_types {
-    use serde::Deserialize;
     use chrono::{DateTime, Utc};
+    use serde::Deserialize;
     use std::collections::HashMap;
 
     #[derive(Deserialize, Clone)]
@@ -317,8 +328,8 @@ fn sign_request(
     let mut wire = Vec::new();
     wire.extend_from_slice(&1i32.to_be_bytes());
     wire.extend_from_slice(&(time as u64).to_be_bytes());
-    wire.extend_from_slice(&sig_bytes[..32]);  // r
-    wire.extend_from_slice(&sig_bytes[32..]);   // s
+    wire.extend_from_slice(&sig_bytes[..32]); // r
+    wire.extend_from_slice(&sig_bytes[32..]); // s
 
     base64::engine::general_purpose::STANDARD.encode(&wire)
 }
@@ -371,7 +382,10 @@ async fn send_signed_request<T: for<'de> serde::Deserialize<'de>>(
 
     let parsed: T = serde_json::from_str(&raw).map_err(|e| LauncherError::Generic {
         code: "ERR_MSA_DESERIALIZE".into(),
-        message: format!("Failed to parse response from {}: {} (response suppressed)", url, e),
+        message: format!(
+            "Failed to parse response from {}: {} (response suppressed)",
+            url, e
+        ),
     })?;
 
     Ok((current_date, parsed))
@@ -410,9 +424,15 @@ async fn get_device_token(
     });
 
     let (_, token) = send_signed_request(
-        client, DEVICE_AUTH_URL, "/device/authenticate",
-        body, key, None, false,
-    ).await?;
+        client,
+        DEVICE_AUTH_URL,
+        "/device/authenticate",
+        body,
+        key,
+        None,
+        false,
+    )
+    .await?;
     Ok(token)
 }
 
@@ -441,7 +461,9 @@ async fn sisu_authenticate(
     challenge: &str,
     key: &DeviceTokenKey,
 ) -> LauncherResult<(Option<String>, String, String)> {
-    let state: String = (0..32).map(|_| format!("{:x}", rand::random::<u8>() % 16)).collect();
+    let state: String = (0..32)
+        .map(|_| format!("{:x}", rand::random::<u8>() % 16))
+        .collect();
 
     let body = serde_json::json!({
         "AppId": MICROSOFT_CLIENT_ID,
@@ -481,10 +503,11 @@ async fn sisu_authenticate(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    let redirect: xbox_types::SisuRedirect = resp.json().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_SISU_AUTH_PARSE".into(),
-        message: format!("Failed to parse SISU redirect: {}", e),
-    })?;
+    let redirect: xbox_types::SisuRedirect =
+        resp.json().await.map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_SISU_AUTH_PARSE".into(),
+            message: format!("Failed to parse SISU redirect: {}", e),
+        })?;
 
     Ok((session_id, redirect.msa_oauth_redirect, state))
 }
@@ -539,14 +562,19 @@ async fn exchange_oauth_token(
         let _body = resp.text().await.unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_OAUTH_TOKEN_HTTP".into(),
-            message: format!("OAuth token endpoint returned HTTP {} (response suppressed)", status),
+            message: format!(
+                "OAuth token endpoint returned HTTP {} (response suppressed)",
+                status
+            ),
         });
     }
 
-    resp.json::<OAuthToken>().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_OAUTH_TOKEN_PARSE".into(),
-        message: format!("Failed to parse OAuth token: {}", e),
-    })
+    resp.json::<OAuthToken>()
+        .await
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_OAUTH_TOKEN_PARSE".into(),
+            message: format!("Failed to parse OAuth token: {}", e),
+        })
 }
 
 async fn refresh_oauth_token(
@@ -576,14 +604,19 @@ async fn refresh_oauth_token(
         let _body = resp.text().await.unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_OAUTH_REFRESH_HTTP".into(),
-            message: format!("OAuth refresh endpoint returned HTTP {} (response suppressed)", status),
+            message: format!(
+                "OAuth refresh endpoint returned HTTP {} (response suppressed)",
+                status
+            ),
         });
     }
 
-    resp.json::<OAuthToken>().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_OAUTH_REFRESH_PARSE".into(),
-        message: format!("Failed to parse refreshed OAuth token: {}", e),
-    })
+    resp.json::<OAuthToken>()
+        .await
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_OAUTH_REFRESH_PARSE".into(),
+            message: format!("Failed to parse refreshed OAuth token: {}", e),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -610,9 +643,15 @@ async fn sisu_authorize(
     });
 
     let (_, result) = send_signed_request(
-        client, SISU_AUTHORIZE_URL, "/authorize",
-        body, key, None, false,
-    ).await?;
+        client,
+        SISU_AUTHORIZE_URL,
+        "/authorize",
+        body,
+        key,
+        None,
+        false,
+    )
+    .await?;
     Ok(result)
 }
 
@@ -712,22 +751,23 @@ async fn get_minecraft_token(
         let _body = resp.text().await.unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_MC_TOKEN_HTTP".into(),
-            message: format!("Minecraft login returned HTTP {} (response suppressed)", status),
+            message: format!(
+                "Minecraft login returned HTTP {} (response suppressed)",
+                status
+            ),
         });
     }
 
-    let token: xbox_types::MinecraftToken = resp.json().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_MC_TOKEN_PARSE".into(),
-        message: format!("Failed to parse Minecraft token: {}", e),
-    })?;
+    let token: xbox_types::MinecraftToken =
+        resp.json().await.map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_MC_TOKEN_PARSE".into(),
+            message: format!("Failed to parse Minecraft token: {}", e),
+        })?;
 
     Ok(token.access_token)
 }
 
-async fn check_entitlements(
-    client: &reqwest::Client,
-    access_token: &str,
-) -> LauncherResult<()> {
+async fn check_entitlements(client: &reqwest::Client, access_token: &str) -> LauncherResult<()> {
     let url = format!("{}?requestId={}", MC_ENTITLEMENTS_URL, Uuid::new_v4());
     let resp = client
         .get(&url)
@@ -771,14 +811,18 @@ async fn get_minecraft_profile(
         let _body = resp.text().await.unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_PROFILE_HTTP".into(),
-            message: format!("Profile endpoint returned HTTP {} (response suppressed)", status),
+            message: format!(
+                "Profile endpoint returned HTTP {} (response suppressed)",
+                status
+            ),
         });
     }
 
-    let profile: xbox_types::MinecraftProfile = resp.json().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_PROFILE_PARSE".into(),
-        message: format!("Failed to parse Minecraft profile: {}", e),
-    })?;
+    let profile: xbox_types::MinecraftProfile =
+        resp.json().await.map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_PROFILE_PARSE".into(),
+            message: format!("Failed to parse Minecraft profile: {}", e),
+        })?;
 
     Ok((profile.name, profile.id))
 }
@@ -791,7 +835,10 @@ async fn get_minecraft_profile(
 /// be opened in a browser. The caller captures the `?code=` from the redirect
 /// and passes it to [`finish_login`].
 pub async fn begin_login(client: &reqwest::Client) -> LauncherResult<LoginFlow> {
-    check_network_enabled("network_msa_enabled", "Microsoft account login is disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_msa_enabled",
+        "Microsoft account login is disabled in Privacy settings.",
+    )?;
     // Step 1: Generate p256 key + get device token
     let key = DeviceTokenKey::generate();
     let device_token = get_device_token(client, &key).await?;
@@ -799,7 +846,8 @@ pub async fn begin_login(client: &reqwest::Client) -> LauncherResult<LoginFlow> 
     // Step 2: Generate PKCE challenge + SISU authenticate
     let verifier = generate_pkce_verifier();
     let challenge = pkce_challenge(&verifier);
-    let (session_id, auth_uri, state) = sisu_authenticate(client, &device_token.token, &challenge, &key).await?;
+    let (session_id, auth_uri, state) =
+        sisu_authenticate(client, &device_token.token, &challenge, &key).await?;
 
     Ok(LoginFlow {
         auth_uri,
@@ -823,13 +871,17 @@ pub async fn finish_login(
     flow: &LoginFlow,
     state: Option<&str>,
 ) -> LauncherResult<MsaCredentials> {
-    check_network_enabled("network_msa_enabled", "Microsoft account login is disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_msa_enabled",
+        "Microsoft account login is disabled in Privacy settings.",
+    )?;
     // CSRF check: verify state parameter if provided and flow has one
     if let Some(passed_state) = state {
         if !flow.state.is_empty() && flow.state != passed_state {
             return Err(LauncherError::Generic {
                 code: "ERR_MSA_STATE_MISMATCH".into(),
-                message: "OAuth state parameter mismatch — possible CSRF attack. Aborting login.".into(),
+                message: "OAuth state parameter mismatch — possible CSRF attack. Aborting login."
+                    .into(),
             });
         }
     } else if !flow.state.is_empty() {
@@ -852,10 +904,12 @@ pub async fn finish_login(
         &oauth.access_token,
         &flow.device_token,
         &key,
-    ).await?;
+    )
+    .await?;
 
     // Step 6: XSTS authorize → user hash + Xbox token
-    let (uhs, xsts_token) = xsts_authorize(client, &sisu, &flow.device_token, &key, auth_date).await?;
+    let (uhs, xsts_token) =
+        xsts_authorize(client, &sisu, &flow.device_token, &key, auth_date).await?;
 
     // Step 7: Minecraft login → access token
     let mc_access_token = get_minecraft_token(client, &uhs, &xsts_token).await?;
@@ -884,7 +938,10 @@ pub async fn refresh_credentials(
     client: &reqwest::Client,
     creds: &MsaCredentials,
 ) -> LauncherResult<MsaCredentials> {
-    check_network_enabled("network_msa_enabled", "Microsoft account login is disabled in Privacy settings.")?;
+    check_network_enabled(
+        "network_msa_enabled",
+        "Microsoft account login is disabled in Privacy settings.",
+    )?;
     // Step 4 (refresh): Get new OAuth token from refresh token
     let oauth = refresh_oauth_token(client, &creds.refresh_token).await?;
     let auth_date = Utc::now();
@@ -895,7 +952,8 @@ pub async fn refresh_credentials(
 
     // Steps 5-7: SISU authorize → XSTS → Minecraft token
     let sisu = sisu_authorize(client, None, &oauth.access_token, &device_token.token, &key).await?;
-    let (uhs, xsts_token) = xsts_authorize(client, &sisu, &device_token.token, &key, auth_date).await?;
+    let (uhs, xsts_token) =
+        xsts_authorize(client, &sisu, &device_token.token, &key, auth_date).await?;
     let mc_access_token = get_minecraft_token(client, &uhs, &xsts_token).await?;
 
     let refreshed = MsaCredentials {
@@ -912,18 +970,20 @@ pub async fn refresh_credentials(
 
 /// Get stored credentials from the OS keyring, or None if not authenticated.
 pub fn load_credentials() -> LauncherResult<Option<MsaCredentials>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| LauncherError::Generic {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
+        LauncherError::Generic {
             code: "ERR_MSA_KEYRING".into(),
             message: format!("Failed to access keyring: {}", e),
-        })?;
+        }
+    })?;
 
     match entry.get_password() {
         Ok(json) => {
-            let creds: MsaCredentials = serde_json::from_str(&json).map_err(|e| LauncherError::Generic {
-                code: "ERR_MSA_STORED_PARSE".into(),
-                message: format!("Failed to parse stored credentials: {}", e),
-            })?;
+            let creds: MsaCredentials =
+                serde_json::from_str(&json).map_err(|e| LauncherError::Generic {
+                    code: "ERR_MSA_STORED_PARSE".into(),
+                    message: format!("Failed to parse stored credentials: {}", e),
+                })?;
             Ok(Some(creds))
         }
         Err(e) => {
@@ -941,27 +1001,31 @@ pub fn load_credentials() -> LauncherResult<Option<MsaCredentials>> {
 
 /// Store credentials in the OS keyring as JSON.
 pub fn store_credentials(creds: &MsaCredentials) -> LauncherResult<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| LauncherError::Generic {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
+        LauncherError::Generic {
             code: "ERR_MSA_KEYRING".into(),
             message: format!("Failed to access keyring: {}", e),
-        })?;
+        }
+    })?;
 
     let json = serde_json::to_string(creds).unwrap_or_default();
-    entry.set_password(&json).map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_KEYRING_WRITE".into(),
-        message: format!("Failed to write credentials to keyring: {}", e),
-    })?;
+    entry
+        .set_password(&json)
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_KEYRING_WRITE".into(),
+            message: format!("Failed to write credentials to keyring: {}", e),
+        })?;
     Ok(())
 }
 
 /// Clear stored MSA credentials (sign out).
 pub fn clear_credentials() -> LauncherResult<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(|e| LauncherError::Generic {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
+        LauncherError::Generic {
             code: "ERR_MSA_KEYRING".into(),
             message: format!("Failed to access keyring: {}", e),
-        })?;
+        }
+    })?;
 
     match entry.delete_password() {
         Ok(_) => Ok(()),
@@ -1030,4 +1094,3 @@ mod tests {
         assert!(!future.needs_refresh());
     }
 }
-

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-use crate::models::{InstanceManifest, InstalledMod};
+use crate::models::{InstalledMod, InstanceManifest};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoadoutProfile {
@@ -89,8 +89,7 @@ pub fn create_profile(instance_dir: &Path, name: &str) -> Result<LoadoutProfile,
     };
 
     let profiles_dir = loadouts_dir(instance_dir);
-    fs::create_dir_all(&profiles_dir)
-        .map_err(|e| format!("Cannot create loadouts dir: {e}"))?;
+    fs::create_dir_all(&profiles_dir).map_err(|e| format!("Cannot create loadouts dir: {e}"))?;
 
     let safe_name = sanitize_profile_name(name);
     let profile_path = profiles_dir.join(format!("{safe_name}.json"));
@@ -109,8 +108,8 @@ pub fn list_profiles(instance_dir: &Path) -> Result<Vec<LoadoutProfile>, String>
     }
 
     let mut profiles = Vec::new();
-    let entries = fs::read_dir(&profiles_dir)
-        .map_err(|e| format!("Cannot read loadouts dir: {e}"))?;
+    let entries =
+        fs::read_dir(&profiles_dir).map_err(|e| format!("Cannot read loadouts dir: {e}"))?;
 
     for entry in entries {
         let entry = entry.map_err(|e| format!("Cannot read entry: {e}"))?;
@@ -216,6 +215,7 @@ mod tests {
                 registry_id: None,
                 modrinth_id: None,
                 source: "test".to_string(),
+                source_url: None,
                 version: None,
                 sha256: String::new(),
                 installed_at: String::new(),
@@ -342,7 +342,11 @@ mod tests {
         }
         write_manifest(&dir, &manifest).unwrap();
         let mods_dir = dir.join("mods");
-        fs::rename(mods_dir.join("sodium.jar"), mods_dir.join("sodium.jar.disabled")).unwrap();
+        fs::rename(
+            mods_dir.join("sodium.jar"),
+            mods_dir.join("sodium.jar.disabled"),
+        )
+        .unwrap();
         fs::rename(
             mods_dir.join("lithium.jar"),
             mods_dir.join("lithium.jar.disabled"),
@@ -403,6 +407,7 @@ mod tests {
             registry_id: None,
             modrinth_id: None,
             source: "test".to_string(),
+            source_url: None,
             version: None,
             sha256: String::new(),
             installed_at: String::new(),

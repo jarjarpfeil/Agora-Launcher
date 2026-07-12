@@ -20,6 +20,8 @@ export type LaunchPhase =
   | 'awaiting-decision'
   | 'launching'
   | 'running'
+  | 'stopping'
+  | 'delegated'
   | 'exited'
   | 'failed';
 
@@ -31,6 +33,10 @@ export interface ProcessState {
   healthReport: HealthReport | null;
   /** The launch mode (direct vs delegated) captured at the start of the launch flow. */
   directLaunch: boolean;
+  exitCode: number | null;
+  outcome: 'success' | 'crash' | 'cancelled' | 'unknown' | 'abandoned' | null;
+  snapshotId: string | null;
+  exitedAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -60,6 +66,10 @@ const INITIAL_STATE: ProcessState = {
   error: null,
   healthReport: null,
   directLaunch: false,
+  exitCode: null,
+  outcome: null,
+  snapshotId: null,
+  exitedAt: null,
 };
 
 // Bounded log buffer per instance ID.
@@ -91,6 +101,10 @@ export function useProcessController(): ProcessController {
             error: null,
             healthReport: null,
             directLaunch: true,
+            exitCode: null,
+            outcome: null,
+            snapshotId: null,
+            exitedAt: null,
           });
         }
       } catch {
@@ -100,17 +114,33 @@ export function useProcessController(): ProcessController {
     return () => { cancelled = true; };
   }, []);
 
-  // Listen for game-exited events to clear running state.
+  // Preserve the terminal outcome so users can see whether the last session
+  // succeeded, crashed, or was cancelled after the process exits.
   useEffect(() => {
-    const unlisten = listen<{ instance_id: string; exit_code: number }>(
+    const unlisten = listen<{
+      instance_id: string;
+      exit_code: number | null;
+      outcome: 'success' | 'crash' | 'cancelled' | 'unknown' | 'abandoned';
+      snapshot_id: string;
+    }>(
       'game-exited',
       (event) => {
         const current = stateRef.current;
         if (
           current.instanceId === event.payload.instance_id &&
-          current.phase === 'running'
+          (current.phase === 'running' || current.phase === 'stopping' || current.phase === 'delegated')
         ) {
-          setState(INITIAL_STATE);
+          setState((previous) => ({
+            ...previous,
+            phase: 'exited',
+            pid: null,
+            error: null,
+            healthReport: null,
+            exitCode: event.payload.exit_code,
+            outcome: event.payload.outcome,
+            snapshotId: event.payload.snapshot_id,
+            exitedAt: new Date().toISOString(),
+          }));
         }
       },
     );
@@ -165,6 +195,10 @@ export function useProcessController(): ProcessController {
         error: null,
         healthReport: null,
         directLaunch,
+        exitCode: null,
+        outcome: null,
+        snapshotId: null,
+        exitedAt: null,
       });
 
       try {
@@ -229,12 +263,15 @@ export function useProcessController(): ProcessController {
     const current = stateRef.current;
     // Delegated launches have no owned PID — nothing to kill.
     if (current.pid == null) return;
+    setState((previous) => ({ ...previous, phase: 'stopping', error: null }));
     try {
       await killProcess(current.pid);
-      setState(INITIAL_STATE);
+      // The backend retains ownership until its process waiter emits the
+      // classified game-exited event.
     } catch (e) {
       setState((prev) => ({
         ...prev,
+        phase: 'running',
         error: formatError(e),
       }));
     }
@@ -265,12 +302,16 @@ function launchedState(
   pid: number | null,
 ): ProcessState {
   return {
-    phase: directLaunch ? 'running' : 'exited',
+    phase: directLaunch ? 'running' : 'delegated',
     instanceId,
     pid: directLaunch ? pid : null,
     error: null,
     healthReport: null,
     directLaunch,
+    exitCode: null,
+    outcome: null,
+    snapshotId: null,
+    exitedAt: null,
   };
 }
 

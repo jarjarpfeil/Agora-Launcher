@@ -1,4 +1,4 @@
-﻿use crate::models::InstanceRow;
+use crate::models::InstanceRow;
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -53,11 +53,7 @@ pub fn init_local_state_db(db_path: &std::path::PathBuf) -> anyhow::Result<()> {
     // comparing with `true` / `&Value::Bool(true)` match correctly. They are
     // integrations rather than prerequisites, so a new player must opt in
     // during onboarding before any of them can be used or auto-started.
-    for key in [
-        "modrinth_enabled",
-        "ai_chat_enabled",
-        "ai_mcp_enabled",
-    ] {
+    for key in ["modrinth_enabled", "ai_chat_enabled", "ai_mcp_enabled"] {
         if get_setting(&conn, key).ok().flatten().is_none() {
             set_setting(&conn, key, &serde_json::Value::Bool(false))?;
         }
@@ -74,10 +70,11 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
          );",
     )?;
 
-    let current: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |row| {
-            row.get(0)
-        })?;
+    let current: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get(0),
+    )?;
     let target = LOCAL_STATE_SCHEMA_VERSION;
 
     if current < 1 {
@@ -125,7 +122,10 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                   timestamp INTEGER NOT NULL
               );",
         )?;
-        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (1)", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (1)",
+            [],
+        )?;
     }
 
     // Migration v2: add flag_submissions table for comment-flag rate limiting (§5.5).
@@ -136,7 +136,10 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                  timestamp INTEGER NOT NULL
              );",
         )?;
-        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (2)", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (2)",
+            [],
+        )?;
     }
 
     // Migration v3: add crash-investigator tables for dynamic scoring algorithm.
@@ -180,7 +183,10 @@ pub fn run_migrations(conn: &Connection) -> anyhow::Result<()> {
                  PRIMARY KEY (fingerprint, mod_id)
              );",
         )?;
-        conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (3)", [])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version) VALUES (3)",
+            [],
+        )?;
     }
 
     // Migration: add jvm_always_pre_touch column to existing databases.
@@ -225,11 +231,7 @@ pub fn is_network_enabled(conn: &Connection, key: &str) -> bool {
 }
 
 /// Upsert a JSON-encoded setting into user_settings.
-pub fn set_setting(
-    conn: &Connection,
-    key: &str,
-    value: &serde_json::Value,
-) -> anyhow::Result<()> {
+pub fn set_setting(conn: &Connection, key: &str, value: &serde_json::Value) -> anyhow::Result<()> {
     let text = serde_json::to_string(value)?;
     conn.execute(
         "INSERT INTO user_settings (key, value_json) VALUES (?1, ?2)
@@ -454,9 +456,8 @@ pub fn get_flag_rate_limit_status(
     let remaining_day = (MAX_FLAGS_PER_DAY - day_count).max(0);
 
     let reset_hour_at_unix = if hour_count > 0 {
-        let mut stmt = conn.prepare(
-            "SELECT MIN(timestamp) FROM flag_submissions WHERE timestamp >= ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT MIN(timestamp) FROM flag_submissions WHERE timestamp >= ?1")?;
         let oldest_hour: i64 = stmt.query_row([hour_window_start], |row| row.get(0))?;
         oldest_hour + 3600
     } else {
@@ -464,9 +465,8 @@ pub fn get_flag_rate_limit_status(
     };
 
     let reset_day_at_unix = if day_count > 0 {
-        let mut stmt = conn.prepare(
-            "SELECT MIN(timestamp) FROM flag_submissions WHERE timestamp >= ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT MIN(timestamp) FROM flag_submissions WHERE timestamp >= ?1")?;
         let oldest_day: i64 = stmt.query_row([day_window_start], |row| row.get(0))?;
         oldest_day + 86400
     } else {
@@ -597,11 +597,7 @@ pub fn increment_confirmation(
 }
 
 /// Idempotently add a ruled-out mod for a fingerprint.
-pub fn add_ruled_out(
-    conn: &Connection,
-    fingerprint: &str,
-    mod_id: &str,
-) -> anyhow::Result<()> {
+pub fn add_ruled_out(conn: &Connection, fingerprint: &str, mod_id: &str) -> anyhow::Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR IGNORE INTO crash_ruled_out (fingerprint, mod_id, ruled_out_at) VALUES (?1, ?2, ?3)",
@@ -611,25 +607,15 @@ pub fn add_ruled_out(
 }
 
 /// Check whether a mod has been ruled out for a fingerprint.
-pub fn is_ruled_out(
-    conn: &Connection,
-    fingerprint: &str,
-    mod_id: &str,
-) -> anyhow::Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT 1 FROM crash_ruled_out WHERE fingerprint = ?1 AND mod_id = ?2",
-    )?;
+pub fn is_ruled_out(conn: &Connection, fingerprint: &str, mod_id: &str) -> anyhow::Result<bool> {
+    let mut stmt =
+        conn.prepare("SELECT 1 FROM crash_ruled_out WHERE fingerprint = ?1 AND mod_id = ?2")?;
     Ok(stmt.exists([fingerprint, mod_id])?)
 }
 
 /// Return the mod_ids ruled out for a fingerprint.
-pub fn get_ruled_out_mods(
-    conn: &Connection,
-    fingerprint: &str,
-) -> anyhow::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT mod_id FROM crash_ruled_out WHERE fingerprint = ?1",
-    )?;
+pub fn get_ruled_out_mods(conn: &Connection, fingerprint: &str) -> anyhow::Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT mod_id FROM crash_ruled_out WHERE fingerprint = ?1")?;
     let rows = stmt.query_map([fingerprint], |row| row.get(0))?;
     let mut out = Vec::new();
     for r in rows {
@@ -649,11 +635,7 @@ pub fn get_mod_survival_count(conn: &Connection, mod_id: &str) -> anyhow::Result
 }
 
 /// Return the number of survivals where both mods a and b appear together.
-pub fn get_pair_survival_count(
-    conn: &Connection,
-    a: &str,
-    b: &str,
-) -> anyhow::Result<i64> {
+pub fn get_pair_survival_count(conn: &Connection, a: &str, b: &str) -> anyhow::Result<i64> {
     let (first, second) = normalize_pair(a, b);
     conn.query_row(
         "SELECT COUNT(*) FROM crash_survival_mods x
@@ -667,12 +649,8 @@ pub fn get_pair_survival_count(
 
 /// Return the total number of crash_survivals rows.
 pub fn get_total_survival_count(conn: &Connection) -> anyhow::Result<i64> {
-    conn.query_row(
-        "SELECT COUNT(*) FROM crash_survivals",
-        [],
-        |row| row.get(0),
-    )
-    .map_err(Into::into)
+    conn.query_row("SELECT COUNT(*) FROM crash_survivals", [], |row| row.get(0))
+        .map_err(Into::into)
 }
 
 // ---------------------------------------------------------------------------
@@ -690,8 +668,7 @@ mod tests {
     /// Helper: create a unique temp-file-backed test database with migrations applied.
     fn test_db() -> (Connection, PathBuf) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir()
-            .join(format!("agora-test-{}.db", n));
+        let path = std::env::temp_dir().join(format!("agora-test-{}.db", n));
         let _ = std::fs::remove_file(&path);
         init_local_state_db(&path).expect("failed to init test db");
         let conn = Connection::open(&path).expect("failed to open test db");
@@ -746,7 +723,10 @@ mod tests {
     fn test_optional_integrations_default_to_disabled() {
         let (conn, _path) = test_db();
         for key in ["modrinth_enabled", "ai_chat_enabled", "ai_mcp_enabled"] {
-            assert_eq!(get_setting(&conn, key).unwrap(), Some(serde_json::json!(false)));
+            assert_eq!(
+                get_setting(&conn, key).unwrap(),
+                Some(serde_json::json!(false))
+            );
         }
     }
 
@@ -884,4 +864,3 @@ mod tests {
         assert_eq!(results[1].confirm_count, 1);
     }
 }
-

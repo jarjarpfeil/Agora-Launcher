@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
 
@@ -103,7 +103,10 @@ pub async fn start_device_flow() -> LauncherResult<DeviceFlowResponse> {
     })
 }
 
-pub async fn poll_device_flow(device_code: String, mut interval: u64) -> LauncherResult<Option<String>> {
+pub async fn poll_device_flow(
+    device_code: String,
+    mut interval: u64,
+) -> LauncherResult<Option<String>> {
     eprintln!(
         "[auth] poll_device_flow ENTERED device_code_len={} interval={}s",
         device_code.len(),
@@ -148,8 +151,7 @@ pub async fn poll_device_flow(device_code: String, mut interval: u64) -> Launche
                 // token. Log only status metadata, never the body.
                 eprintln!("[auth] poll status={status}");
 
-                let parsed: Option<DeviceFlowPollResponse> =
-                    serde_json::from_str(&body).ok();
+                let parsed: Option<DeviceFlowPollResponse> = serde_json::from_str(&body).ok();
 
                 if let Some(parsed) = parsed {
                     if let Some(token) = parsed.access_token {
@@ -159,8 +161,10 @@ pub async fn poll_device_flow(device_code: String, mut interval: u64) -> Launche
                     if let Some(err) = parsed.error.as_deref() {
                         match err {
                             "authorization_pending" => {
-                                eprintln!("[auth] awaiting user authorization (interval={})",
-                                    parsed.interval.unwrap_or(interval));
+                                eprintln!(
+                                    "[auth] awaiting user authorization (interval={})",
+                                    parsed.interval.unwrap_or(interval)
+                                );
                                 if let Some(next) = parsed.interval {
                                     interval = next;
                                 }
@@ -212,7 +216,12 @@ fn derive_fallback_key() -> Vec<u8> {
     let salt = format!("agora-fallback:{}:{}", username, std::env::consts::OS);
 
     let mut key = vec![0u8; 32];
-    pbkdf2_hmac::<Sha256>(b"agora-mcp-keyring-fallback", salt.as_bytes(), PBKDF2_ITERATIONS, &mut key);
+    pbkdf2_hmac::<Sha256>(
+        b"agora-mcp-keyring-fallback",
+        salt.as_bytes(),
+        PBKDF2_ITERATIONS,
+        &mut key,
+    );
     key
 }
 
@@ -231,12 +240,13 @@ fn encrypt_token(token: &str, key: &[u8]) -> LauncherResult<Vec<u8>> {
     let nonce_bytes: [u8; 12] = rand::thread_rng().gen();
     let nonce = Nonce::from_slice(&nonce_bytes);
 
-    let ciphertext = cipher
-        .encrypt(nonce, token.as_bytes())
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_AUTH_ENCRYPT".to_string(),
-            message: "AES-GCM encryption failed.".to_string(),
-        })?;
+    let ciphertext =
+        cipher
+            .encrypt(nonce, token.as_bytes())
+            .map_err(|_| LauncherError::Generic {
+                code: "ERR_AUTH_ENCRYPT".to_string(),
+                message: "AES-GCM encryption failed.".to_string(),
+            })?;
 
     let mut out = Vec::with_capacity(12 + ciphertext.len());
     out.extend_from_slice(&nonce_bytes);
@@ -284,8 +294,7 @@ pub fn store_token(token: &str) -> LauncherResult<()> {
     // Linux, so only falling back when Entry::new fails strands users.
     let path = fallback_token_path().ok_or_else(|| LauncherError::Generic {
         code: "ERR_AUTH_FALLBACK_PATH".to_string(),
-        message: "Could not determine data directory for fallback token storage."
-            .to_string(),
+        message: "Could not determine data directory for fallback token storage.".to_string(),
     })?;
 
     if let Some(parent) = path.parent() {
@@ -393,6 +402,3 @@ pub async fn get_github_user(token: String) -> LauncherResult<GithubProfile> {
         avatar_url: parsed.avatar_url,
     })
 }
-
-
-

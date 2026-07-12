@@ -389,13 +389,19 @@ pub fn import_mrpack(
                 let mut entry = archive.by_name(&idx_path).map_err(|_| {
                     import_error(
                         "ERR_IMPORT_MISSING_FILE",
-                        format!("Pack entry '{}' could not be downloaded or read locally.", file_entry.path),
+                        format!(
+                            "Pack entry '{}' could not be downloaded or read locally.",
+                            file_entry.path
+                        ),
                     )
                 })?;
                 if entry.size() > MAX_MRPACK_FILE_BYTES as u64 {
                     return Err(import_error(
                         "ERR_IMPORT_FILE_TOO_LARGE",
-                        format!("Pack entry '{}' exceeds the 500MB safety limit.", file_entry.path),
+                        format!(
+                            "Pack entry '{}' exceeds the 500MB safety limit.",
+                            file_entry.path
+                        ),
                     ));
                 }
                 let mut bytes = Vec::new();
@@ -409,9 +415,8 @@ pub fn import_mrpack(
             };
 
             let bytes = if let Some(url) = file_entry.downloads.first() {
-                download_bytes(url).or_else(|download_error| {
-                    read_embedded().map_err(|_| download_error)
-                })?
+                download_bytes(url)
+                    .or_else(|download_error| read_embedded().map_err(|_| download_error))?
             } else {
                 read_embedded()?
             };
@@ -556,7 +561,7 @@ fn download_bytes(url: &str) -> LauncherResult<Vec<u8>> {
         .map_err(|e| LauncherError::Generic {
             code: "ERR_IMPORT_RUNTIME".into(),
             message: format!("Cannot build runtime: {e}"),
-    })?;
+        })?;
     rt.block_on(async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))

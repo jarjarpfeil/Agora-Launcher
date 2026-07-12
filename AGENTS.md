@@ -25,7 +25,7 @@ Core values:
 | `.github/` | Workflows, issue templates, and governance forms |
 | `.kilo/` | Kilo AI tooling configuration, agent profiles, commands, and skills |
 | `.kilo/plans/MASTER_SPEC.md` | Authoritative engineering blueprint (read-only for agents) |
-| crates/ | Shared Rust workspace (gora-core shared lib, gora CLI binary) |
+| crates/ | Shared Rust workspace (agora-core shared lib, agora CLI binary) |
 | BACKLOG.md | Phase-by-phase task tracker |
 | CODE_OF_ENGAGEMENT.md | Canonical review-conduct rules |
 | REGISTRY_CURATION_REFERENCE.md | Self-contained manifest-authoring reference |

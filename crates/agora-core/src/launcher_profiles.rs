@@ -28,13 +28,21 @@ impl LauncherProfileEntry {
             "gameDir".to_string(),
             Value::String(self.game_dir.to_string_lossy().to_string()),
         );
-        obj.insert("javaArgs".to_string(), Value::String(self.java_args.clone()));
+        obj.insert(
+            "javaArgs".to_string(),
+            Value::String(self.java_args.clone()),
+        );
         Value::Object(obj)
     }
 }
 
-pub fn upsert_profile(entry: &LauncherProfileEntry, profiles_path: &std::path::Path) -> LauncherResult<()> {
-    let mc_dir = profiles_path.parent().ok_or(LauncherError::MojangNotFound)?;
+pub fn upsert_profile(
+    entry: &LauncherProfileEntry,
+    profiles_path: &std::path::Path,
+) -> LauncherResult<()> {
+    let mc_dir = profiles_path
+        .parent()
+        .ok_or(LauncherError::MojangNotFound)?;
     std::fs::create_dir_all(mc_dir).map_err(|_| LauncherError::ProfileWriteFailed)?;
 
     let mut root: Value = read_or_recover(profiles_path)?;
@@ -58,7 +66,9 @@ pub fn remove_profile(profile_id: &str, profiles_path: &std::path::Path) -> Laun
         return Ok(());
     }
 
-    let mc_dir = profiles_path.parent().ok_or(LauncherError::MojangNotFound)?;
+    let mc_dir = profiles_path
+        .parent()
+        .ok_or(LauncherError::MojangNotFound)?;
     std::fs::create_dir_all(mc_dir).map_err(|_| LauncherError::ProfileWriteFailed)?;
 
     let mut root: Value = read_or_recover(profiles_path)?;
@@ -106,7 +116,8 @@ fn minimal_profiles() -> Value {
 }
 
 fn atomic_write(profiles_path: &std::path::Path, root: &Value) -> LauncherResult<()> {
-    let serialized = serde_json::to_string_pretty(root).map_err(|_| LauncherError::ProfileWriteFailed)?;
+    let serialized =
+        serde_json::to_string_pretty(root).map_err(|_| LauncherError::ProfileWriteFailed)?;
     let tmp = profiles_path.with_extension("json.tmp");
     let bak = bak_path(profiles_path);
 
@@ -124,7 +135,8 @@ fn atomic_write(profiles_path: &std::path::Path, root: &Value) -> LauncherResult
 }
 
 fn restore_live(profiles_path: &std::path::Path, root: &Value) -> LauncherResult<()> {
-    let serialized = serde_json::to_string_pretty(root).map_err(|_| LauncherError::ProfileWriteFailed)?;
+    let serialized =
+        serde_json::to_string_pretty(root).map_err(|_| LauncherError::ProfileWriteFailed)?;
     let tmp = profiles_path.with_extension("json.tmp");
     std::fs::write(&tmp, serialized).map_err(|_| LauncherError::ProfileWriteFailed)?;
     std::fs::rename(&tmp, profiles_path).map_err(|_| LauncherError::ProfileWriteFailed)?;

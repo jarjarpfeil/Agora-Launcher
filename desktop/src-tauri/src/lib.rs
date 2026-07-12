@@ -9,6 +9,7 @@ pub use agora_core::{download, error, models, loader_manifests};
 
 pub mod governance;
 pub mod instances;
+pub mod install_pipeline;
 pub mod launcher_profiles;
 pub mod mod_install;
 pub mod modrinth_raw;
@@ -64,14 +65,16 @@ pub fn run() {
             commands::launch_instance,
             commands::launch_instance_direct,
             commands::query_launch_state,
-            // commands::resolve_install_plan,   // C2: feature-gated
-            // commands::apply_install_plan,     // C2: unsafe stub
-            // commands::cancel_install,         // C2: not yet wired
+            commands::resolve_install_plan,
+            commands::apply_install_plan,
+            commands::cancel_install,
             commands::check_instance_updates,
             commands::get_lkg_marker,
             commands::export_lockfile,
             commands::import_lockfile,
             commands::detect_drift,
+            commands::verify_lockfile,
+            commands::repair_lockfile,
             commands::list_snapshots,
             commands::create_snapshot,
             commands::restore_snapshot,
@@ -101,20 +104,16 @@ pub fn run() {
             commands::list_mod_versions,
             commands::list_mod_versions_load_more,
             commands::check_mod_compat,
-            commands::install_mod_version,
-            commands::add_manual_mod,
             commands::pick_open_file,
             commands::explain_crash,
             commands::export_instance_pack,
             commands::import_instance_pack,
-            commands::remove_mod_from_instance,
             commands::is_modrinth_enabled,
             commands::search_modrinth,
             commands::list_modrinth_categories,
             commands::list_modrinth_loaders,
             commands::list_modrinth_game_versions,
             commands::list_raw_modrinth_versions,
-            commands::install_raw_modrinth,
             commands::fetch_modrinth_project,
             commands::list_under_review_items,
             commands::list_recent_resolutions,

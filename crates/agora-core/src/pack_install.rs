@@ -65,7 +65,9 @@ fn validate_override_source(source: &OverrideSource) -> Result<&str, String> {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
     {
-        return Err("Override source identifier must be a GitHub owner/repository pair.".to_string());
+        return Err(
+            "Override source identifier must be a GitHub owner/repository pair.".to_string(),
+        );
     }
 
     if source.release_tag.trim().is_empty() || source.asset_name.trim().is_empty() {
@@ -283,12 +285,9 @@ pub async fn install_simple_pack(
 
         match entry.source.as_str() {
             "modrinth" => {
-                let (download_url, filename, sha1) = modrinth_version_download_url(
-                    client,
-                    &entry.id,
-                    entry.version.as_deref(),
-                )
-                .await?;
+                let (download_url, filename, sha1) =
+                    modrinth_version_download_url(client, &entry.id, entry.version.as_deref())
+                        .await?;
 
                 let resp = client
                     .get(&download_url)
@@ -523,12 +522,10 @@ mod tests {
         let zip_path = tmp.path().join("overrides.zip");
         let file = std::fs::File::create(&zip_path).unwrap();
         let mut zip_writer = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
-        zip_writer
-            .start_file("config/test.cfg", options)
-            .unwrap();
+        zip_writer.start_file("config/test.cfg", options).unwrap();
         zip_writer.write_all(b"test config").unwrap();
         zip_writer.finish().unwrap();
 

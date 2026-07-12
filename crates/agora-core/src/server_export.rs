@@ -21,23 +21,23 @@ pub fn export_server_environment(
 ) -> LauncherResult<ExportResult> {
     let mods_dir = instance_dir.join("mods");
     let dest_mods = dest_dir.join("mods");
-    std::fs::create_dir_all(&dest_mods)
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_EXPORT_MKDIR".into(), message: format!("Failed to create dest mods dir: {e}"),
-        })?;
+    std::fs::create_dir_all(&dest_mods).map_err(|e| LauncherError::Generic {
+        code: "ERR_EXPORT_MKDIR".into(),
+        message: format!("Failed to create dest mods dir: {e}"),
+    })?;
 
     let mut total_mods = 0;
     let mut server_mods = 0;
     let mut removed_client_only = Vec::new();
 
     if mods_dir.is_dir() {
-        for entry in std::fs::read_dir(&mods_dir)
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_EXPORT_READDIR".into(), message: format!("Failed to read mods dir: {e}"),
-            })?
-        {
+        for entry in std::fs::read_dir(&mods_dir).map_err(|e| LauncherError::Generic {
+            code: "ERR_EXPORT_READDIR".into(),
+            message: format!("Failed to read mods dir: {e}"),
+        })? {
             let entry = entry.map_err(|e| LauncherError::Generic {
-                code: "ERR_EXPORT_ENTRY".into(), message: format!("Failed to read entry: {e}"),
+                code: "ERR_EXPORT_ENTRY".into(),
+                message: format!("Failed to read entry: {e}"),
             })?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) != Some("jar") {
@@ -55,12 +55,13 @@ pub fn export_server_environment(
             }
 
             let fname = path.file_name().ok_or_else(|| LauncherError::Generic {
-                code: "ERR_EXPORT_FILENAME".into(), message: "Missing file name".into(),
+                code: "ERR_EXPORT_FILENAME".into(),
+                message: "Missing file name".into(),
             })?;
-            std::fs::copy(&path, dest_mods.join(&fname))
-                .map_err(|e| LauncherError::Generic {
-                    code: "ERR_EXPORT_COPY".into(), message: format!("Failed to copy mod: {e}"),
-                })?;
+            std::fs::copy(&path, dest_mods.join(&fname)).map_err(|e| LauncherError::Generic {
+                code: "ERR_EXPORT_COPY".into(),
+                message: format!("Failed to copy mod: {e}"),
+            })?;
             server_mods += 1;
         }
     }
@@ -78,7 +79,8 @@ pub fn export_server_environment(
         if saves.is_dir() {
             if let Some(first) = std::fs::read_dir(&saves)
                 .map_err(|e| LauncherError::Generic {
-                    code: "ERR_EXPORT_READDIR".into(), message: format!("Failed to read saves: {e}"),
+                    code: "ERR_EXPORT_READDIR".into(),
+                    message: format!("Failed to read saves: {e}"),
                 })?
                 .filter_map(|e| e.ok())
                 .find(|e| e.path().is_dir())
@@ -100,24 +102,30 @@ pub fn export_server_environment(
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> LauncherResult<()> {
     std::fs::create_dir_all(dst).map_err(|e| LauncherError::Generic {
-        code: "ERR_EXPORT_MKDIR".into(), message: format!("mkdir {dst:?}: {e}"),
+        code: "ERR_EXPORT_MKDIR".into(),
+        message: format!("mkdir {dst:?}: {e}"),
     })?;
     for entry in std::fs::read_dir(src).map_err(|e| LauncherError::Generic {
-        code: "ERR_EXPORT_READDIR".into(), message: format!("readdir {src:?}: {e}"),
+        code: "ERR_EXPORT_READDIR".into(),
+        message: format!("readdir {src:?}: {e}"),
     })? {
         let entry = entry.map_err(|e| LauncherError::Generic {
-            code: "ERR_EXPORT_ENTRY".into(), message: format!("entry: {e}"),
+            code: "ERR_EXPORT_ENTRY".into(),
+            message: format!("entry: {e}"),
         })?;
         let ty = entry.file_type().map_err(|e| LauncherError::Generic {
-            code: "ERR_EXPORT_FTYPE".into(), message: format!("ftype: {e}"),
+            code: "ERR_EXPORT_FTYPE".into(),
+            message: format!("ftype: {e}"),
         })?;
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst.join(entry.file_name()))?;
         } else {
-            std::fs::copy(&entry.path(), &dst.join(entry.file_name()))
-                .map_err(|e| LauncherError::Generic {
-                    code: "ERR_EXPORT_COPY".into(), message: format!("copy {}: {e}", entry.path().display()),
-                })?;
+            std::fs::copy(&entry.path(), &dst.join(entry.file_name())).map_err(|e| {
+                LauncherError::Generic {
+                    code: "ERR_EXPORT_COPY".into(),
+                    message: format!("copy {}: {e}", entry.path().display()),
+                }
+            })?;
         }
     }
     Ok(())
@@ -171,10 +179,7 @@ fn is_client_only(jar_path: &Path) -> bool {
     false
 }
 
-fn read_entry_utf8(
-    archive: &mut zip::ZipArchive<std::fs::File>,
-    index: usize,
-) -> Option<String> {
+fn read_entry_utf8(archive: &mut zip::ZipArchive<std::fs::File>, index: usize) -> Option<String> {
     let mut file = archive.by_index(index).ok()?;
     let mut buf = Vec::new();
     file.read_to_end(&mut buf).ok()?;
@@ -208,26 +213,22 @@ pub fn download_server_loader(
     mc_version: &str,
 ) -> LauncherResult<PathBuf> {
     let url: String = match loader.to_lowercase().as_str() {
-        "fabric" => format!(
-            "https://meta.fabricmc.net/v2/versions/loader/{mc_version}/server/jar"
-        ),
-        "quilt" => format!(
-            "https://meta.quiltmc.org/v3/versions/loader/{mc_version}/server/jar"
-        ),
+        "fabric" => format!("https://meta.fabricmc.net/v2/versions/loader/{mc_version}/server/jar"),
+        "quilt" => format!("https://meta.quiltmc.org/v3/versions/loader/{mc_version}/server/jar"),
         "forge" | "neoforge" => {
             let entries = crate::loader_manifests::list_versions(loader, mc_version);
-            let latest = entries.last().ok_or_else(|| {
-                LauncherError::Generic {
-                    code: "ERR_EXPORT_NO_PINNED".into(),
-                    message: format!("No pinned {loader} version for MC {mc_version}"),
-                }
+            let latest = entries.last().ok_or_else(|| LauncherError::Generic {
+                code: "ERR_EXPORT_NO_PINNED".into(),
+                message: format!("No pinned {loader} version for MC {mc_version}"),
             })?;
             latest.source_url.clone()
         }
-        _ => return Err(LauncherError::Generic {
-            code: "ERR_EXPORT_UNKNOWN_LOADER".into(),
-            message: format!("Unknown loader: {loader}"),
-        }),
+        _ => {
+            return Err(LauncherError::Generic {
+                code: "ERR_EXPORT_UNKNOWN_LOADER".into(),
+                message: format!("Unknown loader: {loader}"),
+            })
+        }
     };
 
     let jar_name = match loader.to_lowercase().as_str() {
@@ -240,10 +241,10 @@ pub fn download_server_loader(
 
     let dest_path = dest_dir.join(jar_name);
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_EXPORT_RUNTIME".into(), message: format!("Failed to create runtime: {e}"),
-        })?;
+    let rt = tokio::runtime::Runtime::new().map_err(|e| LauncherError::Generic {
+        code: "ERR_EXPORT_RUNTIME".into(),
+        message: format!("Failed to create runtime: {e}"),
+    })?;
 
     let bytes = rt.block_on(async {
         let resp = client
@@ -251,24 +252,25 @@ pub fn download_server_loader(
             .send()
             .await
             .map_err(|e| LauncherError::Generic {
-                code: "ERR_EXPORT_DOWNLOAD".into(), message: format!("Download failed: {e}"),
+                code: "ERR_EXPORT_DOWNLOAD".into(),
+                message: format!("Download failed: {e}"),
             })?;
         if !resp.status().is_success() {
             return Err(LauncherError::Generic {
-                code: "ERR_EXPORT_HTTP".into(), message: format!("Download returned {}", resp.status()),
+                code: "ERR_EXPORT_HTTP".into(),
+                message: format!("Download returned {}", resp.status()),
             });
         }
-        resp.bytes()
-            .await
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_EXPORT_READ_BODY".into(), message: format!("Read body: {e}"),
-            })
+        resp.bytes().await.map_err(|e| LauncherError::Generic {
+            code: "ERR_EXPORT_READ_BODY".into(),
+            message: format!("Read body: {e}"),
+        })
     })?;
 
-    std::fs::write(&dest_path, &bytes)
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_EXPORT_WRITE".into(), message: format!("Failed to write {dest_path:?}: {e}"),
-        })?;
+    std::fs::write(&dest_path, &bytes).map_err(|e| LauncherError::Generic {
+        code: "ERR_EXPORT_WRITE".into(),
+        message: format!("Failed to write {dest_path:?}: {e}"),
+    })?;
 
     Ok(dest_path)
 }
@@ -285,8 +287,7 @@ mod tests {
         let dest = tmp.path().join("server");
         std::fs::create_dir_all(instance.join("mods")).unwrap();
 
-        let result =
-            export_server_environment(&instance, &dest, "fabric", "1.21").unwrap();
+        let result = export_server_environment(&instance, &dest, "fabric", "1.21").unwrap();
         assert_eq!(result.total_mods, 0);
         assert_eq!(result.server_mods, 0);
         assert!(result.removed_client_only.is_empty());
@@ -299,13 +300,10 @@ mod tests {
         let dest = tmp.path().join("server");
         std::fs::create_dir_all(instance.join("mods")).unwrap();
 
-        std::fs::write(instance.join("mods").join("example.jar"), b"not a real zip")
-            .unwrap();
-        std::fs::write(instance.join("mods").join("other.jar"), b"also fake")
-            .unwrap();
+        std::fs::write(instance.join("mods").join("example.jar"), b"not a real zip").unwrap();
+        std::fs::write(instance.join("mods").join("other.jar"), b"also fake").unwrap();
 
-        let result =
-            export_server_environment(&instance, &dest, "fabric", "1.21").unwrap();
+        let result = export_server_environment(&instance, &dest, "fabric", "1.21").unwrap();
         assert_eq!(result.total_mods, 2);
         assert_eq!(result.server_mods, 2);
         assert!(result.removed_client_only.is_empty());

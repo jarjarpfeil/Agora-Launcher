@@ -49,7 +49,10 @@ impl SystemResources {
         sys.refresh_all();
         let total_ram_mb = sys.total_memory() / 1024; // sysinfo returns KB
         let cpu_threads = sys.cpus().len();
-        SystemResources { total_ram_mb, cpu_threads }
+        SystemResources {
+            total_ram_mb,
+            cpu_threads,
+        }
     }
 }
 
@@ -159,8 +162,8 @@ pub fn compute_gc(
         safe_heap_mb(4096, sys.total_ram_mb)
     };
 
-    let profile = override_profile
-        .unwrap_or_else(|| GcProfile::recommended_for_java_version(java_version));
+    let profile =
+        override_profile.unwrap_or_else(|| GcProfile::recommended_for_java_version(java_version));
 
     let jvm_args = generate_args(profile, heap, manual_args);
 
@@ -180,14 +183,26 @@ mod tests {
 
     #[test]
     fn zgc_recommended_for_java_21() {
-        assert_eq!(GcProfile::recommended_for_java_version(21), GcProfile::LowLatency);
-        assert_eq!(GcProfile::recommended_for_java_version(22), GcProfile::LowLatency);
+        assert_eq!(
+            GcProfile::recommended_for_java_version(21),
+            GcProfile::LowLatency
+        );
+        assert_eq!(
+            GcProfile::recommended_for_java_version(22),
+            GcProfile::LowLatency
+        );
     }
 
     #[test]
     fn g1gc_recommended_for_java_17() {
-        assert_eq!(GcProfile::recommended_for_java_version(17), GcProfile::HighEfficiency);
-        assert_eq!(GcProfile::recommended_for_java_version(8), GcProfile::HighEfficiency);
+        assert_eq!(
+            GcProfile::recommended_for_java_version(17),
+            GcProfile::HighEfficiency
+        );
+        assert_eq!(
+            GcProfile::recommended_for_java_version(8),
+            GcProfile::HighEfficiency
+        );
     }
 
     #[test]

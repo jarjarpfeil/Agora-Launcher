@@ -9,11 +9,8 @@ import {
   getCuratedAnnotation,
   getFlagRateLimit,
   getGithubProfile,
-  getInstallPlan,
   getRegistryItem,
   importModrinthPackByUrl,
-  installModVersion,
-  installRawModrinth,
   isModrinthEnabled,
   listInstances,
   listLoaderVersions,
@@ -30,7 +27,6 @@ import {
   type CreateInstanceRequest,
   type CuratedAnnotation,
   type FlagRateLimit,
-  type InstallPlan,
   type InstanceRow,
   type ModReview,
   type ModrinthProjectFull,
@@ -39,6 +35,8 @@ import {
   type RegistryItem,
   type RawModrinthVersionCandidate,
 } from '../lib/tauri';
+import { InstallFlow } from '../components/InstallFlow';
+import type { BatchInstallItem, InstallIntent, SourceType } from '../lib/installFlow';
 
 
 // Allowlist schema for rendering community/upstream markdown (Modrinth body).
@@ -97,17 +95,16 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   const [selectedModrinthCandidate, setSelectedModrinthCandidate] = useState<RawModrinthVersionCandidate | null>(null);
   const [phase, setPhase] = useState<'idle' | 'loadingVersions' | 'pickingVersion' | 'installing' | 'done' | 'error'>('idle');
   const [installMsg, setInstallMsg] = useState<string | null>(null);
+  const [canonicalInstall, setCanonicalInstall] = useState<{
+    intent: InstallIntent;
+    instanceName: string;
+  } | null>(null);
 
   // Version pagination state
   const [versionPage, setVersionPage] = useState(1);
   const [hasMoreVersions, setHasMoreVersions] = useState(false);
   const [loadingMoreVersions, setLoadingMoreVersions] = useState(false);
   const versionSentinelRef = useRef<HTMLDivElement>(null);
-
-  // v1 informational dependency preview (no auto-batch-install yet)
-  const [depPlan, setDepPlan] = useState<InstallPlan | null>(null);
-  const [showDepPrompt, setShowDepPrompt] = useState(false);
-  const [_depPlanLoading, setDepPlanLoading] = useState(false);
 
   // Reviews state
   const [reviews, setReviews] = useState<ModReview[]>([]);
@@ -131,8 +128,6 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
   // Versions tab install: instance picker
   const [versionsTabInstances, setVersionsTabInstances] = useState<InstanceRow[]>([]);
   const [versionsTabInstanceId, setVersionsTabInstanceId] = useState<string | null>(null);
-  const [versionInstallPhase, setVersionInstallPhase] = useState<'idle' | 'installing' | 'done' | 'error'>('idle');
-  const [versionInstallMsg, setVersionInstallMsg] = useState<string | null>(null);
 
   // Versions tab: GitHub release version list (for mods without modrinth_id)
   const [githubTabVersions, setGithubTabVersions] = useState<ModVersionCandidate[]>([]);
@@ -614,62 +609,49 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     }
   };
 
-  const handleConfirmInstall = async () => {
-    if (!selectedInstanceId || (!selectedCandidate && !selectedModrinthCandidate)) return;
-
-    if (isModrinthInstall && selectedModrinthCandidate) {
-      setPhase('installing');
-      setInstallMsg(null);
-      try {
-        await installRawModrinth(
-          selectedInstanceId,
-          item.modrinth_id!,
-          selectedModrinthCandidate,
-          item.content_type === 'mod' ? 'mod' : item.content_type === 'pack' ? 'modpack' : item.content_type,
-        );
-        setPhase('done');
-        setInstallMsg(`Installed ${selectedModrinthCandidate.filename} to ${instances.find((i) => i.instance_id === selectedInstanceId)?.name ?? selectedInstanceId}.`);
-      } catch (e) {
-        setPhase('error');
-        setInstallMsg(formatError(e));
-      }
-      return;
-    }
-
-    if (!selectedCandidate) return;
-    // v1: fetch dependency plan for informational preview before install.
-    // Actual auto-batch-install of deps is a future enhancement — for v1 we
-    // show the plan as INFORMATIONAL and proceed with the main mod install.
-    setDepPlanLoading(true);
-    try {
-      // We need a jarPath for getInstallPlan; use the candidate filename
-      // as a best-effort path hint. The backend resolves the actual jar.
-      const plan = await getInstallPlan(selectedInstanceId, itemId, selectedCandidate.filename);
-      setDepPlan(plan);
-      // Only show the prompt if there are actual dependencies/conflicts
-      if (plan.missing_required.length > 0 || plan.missing_optional.length > 0 || plan.conflicts.length > 0) {
-        setShowDepPrompt(true);
-        return; // wait for user to click "Continue anyway"
-      }
-    } catch {
-      // If the plan fetch fails, proceed with install anyway
-    } finally {
-      setDepPlanLoading(false);
-    }
-    proceedWithInstall(selectedInstanceId, selectedCandidate);
+  const openCanonicalInstall = (
+    instanceId: string,
+    sourceType: SourceType,
+    sourceItemId: string,
+    candidateVersion: string,
+  ) => {
+    const instance = instances.find((candidate) => candidate.instance_id === instanceId)
+      ?? versionsTabInstances.find((candidate) => candidate.instance_id === instanceId);
+    setCanonicalInstall({
+      instanceName: instance?.name ?? instanceId,
+      intent: {
+        action: {
+          type: 'install',
+          sourceType,
+          itemId: sourceItemId,
+          candidateVersion,
+        },
+        targetInstance: instanceId,
+        optionalDeps: { type: 'prompt' },
+        requestedBy: 'interactive',
+        overrides: {
+          allowReplace: false,
+          skipHealthScan: false,
+          forceConflictResolution: {},
+        },
+      },
+    });
+    setShowInstallFlow(false);
   };
 
-  // v1: proceed with main mod install only (deps are informational)
-  const proceedWithInstall = async (instanceId: string, candidate: ModVersionCandidate) => {
-    setPhase('installing');
-    setInstallMsg(null);
-    try {
-      await installModVersion(instanceId, itemId, candidate);
-      setPhase('done');
-      setInstallMsg(`Installed ${candidate.filename} to ${instances.find((i) => i.instance_id === instanceId)?.name ?? instanceId}.`);
-    } catch (e) {
-      setPhase('error');
-      setInstallMsg(formatError(e));
+  const handleConfirmInstall = () => {
+    if (!selectedInstanceId) return;
+    if (isModrinthInstall && selectedModrinthCandidate && item.modrinth_id) {
+      openCanonicalInstall(
+        selectedInstanceId,
+        'modrinth',
+        item.modrinth_id,
+        selectedModrinthCandidate.version_id,
+      );
+      return;
+    }
+    if (selectedCandidate) {
+      openCanonicalInstall(selectedInstanceId, 'curated', itemId, selectedCandidate.version);
     }
   };
 
@@ -682,8 +664,6 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     setModrinthCandidates([]);
     setSelectedCandidate(null);
     setSelectedModrinthCandidate(null);
-    setShowDepPrompt(false);
-    setDepPlan(null);
   };
 
   // Inline create: submit handler
@@ -755,41 +735,25 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
     }
   };
 
-  // Versions tab install handler (supports both Modrinth and GitHub versions)
-  const handleInstallVersionFromTab = async () => {
+  // Versions tab uses the same canonical plan and executor as the primary action.
+  const handleInstallVersionFromTab = () => {
     if (!versionsTabInstanceId) return;
-
-    // GitHub release version path
-    if (selectedGithubTabVersion && item) {
-      setVersionInstallPhase('installing');
-      setVersionInstallMsg(null);
-      try {
-        await installModVersion(versionsTabInstanceId, itemId, selectedGithubTabVersion);
-        setVersionInstallPhase('done');
-        setVersionInstallMsg(`Installed ${selectedGithubTabVersion.filename}.`);
-      } catch (e) {
-        setVersionInstallPhase('error');
-        setVersionInstallMsg(formatError(e));
-      }
+    if (selectedGithubTabVersion) {
+      openCanonicalInstall(
+        versionsTabInstanceId,
+        'curated',
+        itemId,
+        selectedGithubTabVersion.version,
+      );
       return;
     }
-
-    // Modrinth version path
-    if (!selectedVersion || !item?.modrinth_id) return;
-    setVersionInstallPhase('installing');
-    setVersionInstallMsg(null);
-    try {
-      await installRawModrinth(
+    if (selectedVersion && item.modrinth_id) {
+      openCanonicalInstall(
         versionsTabInstanceId,
+        'modrinth',
         item.modrinth_id,
-        selectedVersion,
-        item.content_type === 'mod' ? 'mod' : item.content_type === 'pack' ? 'modpack' : item.content_type,
+        selectedVersion.version_id,
       );
-      setVersionInstallPhase('done');
-      setVersionInstallMsg(`Installed ${selectedVersion.filename}.`);
-    } catch (e) {
-      setVersionInstallPhase('error');
-      setVersionInstallMsg(formatError(e));
     }
   };
 
@@ -1037,63 +1001,6 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
               )
             )}
 
-            {/* v1: Informational dependency preview modal */}
-            {showDepPrompt && depPlan && (
-              <div className="space-y-3">
-                <div className="rounded-lg border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-900/20 p-3">
-                  <p className="text-xs font-semibold text-amber-800 dark:text-amber-200 mb-1">
-                    Dependencies detected
-                  </p>
-                  <p className="text-xs text-amber-700 dark:text-amber-300 mb-2">
-                    This mod requires additional mods. v1 shows this as informational —
-                    automated batch install of dependencies is a future enhancement.
-                  </p>
-                  <div className="space-y-1">
-                    {depPlan.missing_required.map((d, i) => (
-                      <p key={i} className="text-xs text-amber-700 dark:text-amber-300">
-                        • Required: {d.mod_jar_id} ({d.source})
-                      </p>
-                    ))}
-                    {depPlan.missing_optional.map((d, i) => (
-                      <p key={i} className="text-xs text-amber-700 dark:text-amber-300">
-                        • Optional: {d.mod_jar_id} ({d.source})
-                      </p>
-                    ))}
-                    {depPlan.conflicts.map((c, i) => (
-                      <p key={i} className="text-xs text-amber-700 dark:text-amber-300">
-                        • Conflict: {c.mod_jar_id}
-                        {c.jar_requirement && ` (jar: ${c.jar_requirement})`}
-                        {c.manifest_requirement && ` (manifest: ${c.manifest_requirement})`}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => {
-                      setShowDepPrompt(false);
-                      setDepPlan(null);
-                    }}
-                    className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-accent"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowDepPrompt(false);
-                      setDepPlan(null);
-                      if (selectedInstanceId && selectedCandidate) {
-                        proceedWithInstall(selectedInstanceId, selectedCandidate);
-                      }
-                    }}
-                    className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-                  >
-                    Continue anyway
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* Step 2: Version picker */}
             {selectedInstanceId && phase !== 'idle' && phase !== 'installing' && phase !== 'done' && (
               <div>
@@ -1222,9 +1129,15 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
           </section>
         )}
 
-        {/* InstallFlow — disabled until C2 pipeline is production-ready */}
-        {/* TODO(C2): remove #if and the stub executor in InstallFlow */}
-
+        {canonicalInstall && (
+          <InstallFlow
+            open
+            intent={canonicalInstall.intent}
+            instanceName={canonicalInstall.instanceName}
+            onOpenInstance={onOpenInstanceEditor}
+            onClose={() => setCanonicalInstall(null)}
+          />
+        )}
 
         {/* Pack-create dialog */}
         {showPackCreate && (
@@ -1459,17 +1372,11 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                       </select>
                       <button
                         onClick={handleInstallVersionFromTab}
-                        disabled={!versionsTabInstanceId || versionInstallPhase === 'installing'}
+                        disabled={!versionsTabInstanceId}
                         className="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                       >
-                        {versionInstallPhase === 'installing' ? 'Installing…' : 'Install this version'}
+                        Review install plan
                       </button>
-                      {versionInstallPhase === 'done' && versionInstallMsg && (
-                        <p className="mt-2 text-xs text-green-600 dark:text-green-400">{versionInstallMsg}</p>
-                      )}
-                      {versionInstallPhase === 'error' && versionInstallMsg && (
-                        <p className="mt-2 text-xs text-destructive">{versionInstallMsg}</p>
-                      )}
                     </div>
                   </div>
                 )}
@@ -1562,17 +1469,11 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
                       </select>
                       <button
                         onClick={handleInstallVersionFromTab}
-                        disabled={!versionsTabInstanceId || versionInstallPhase === 'installing'}
+                        disabled={!versionsTabInstanceId}
                         className="w-full rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
                       >
-                        {versionInstallPhase === 'installing' ? 'Installing…' : 'Install this version'}
+                        Review install plan
                       </button>
-                      {versionInstallPhase === 'done' && versionInstallMsg && (
-                        <p className="mt-2 text-xs text-green-600 dark:text-green-400">{versionInstallMsg}</p>
-                      )}
-                      {versionInstallPhase === 'error' && versionInstallMsg && (
-                        <p className="mt-2 text-xs text-destructive">{versionInstallMsg}</p>
-                      )}
                     </div>
                   </div>
                 )}
@@ -1626,10 +1527,11 @@ export function ModDetail({ itemId, onBack, onOpenInstanceEditor }: { itemId: st
             </div>
           )}
 
-          {/* Known conflicts (placeholder — no conflicts data source yet) */}
           <div>
             <h3 className="font-semibold text-sm mb-2">Known Conflicts</h3>
-            <p className="text-sm text-muted-foreground">No known conflicts reported by curators.</p>
+            <p className="text-sm text-muted-foreground">
+              Agora checks curated conflicts and the target instance&apos;s dependency graph in the install plan before any download begins.
+            </p>
           </div>
 
           {/* Curated score */}
@@ -1780,6 +1682,7 @@ function PackCreateDialog({
   const [installPhase, setInstallPhase] = useState<'form' | 'installing' | 'done'>('form');
   const [modProgress, setModProgress] = useState<PackInstallModProgress[]>([]);
   const [createdInstanceId, setCreatedInstanceId] = useState<string | null>(null);
+  const [canonicalInstall, setCanonicalInstall] = useState<InstallIntent | null>(null);
 
   // Modrinth pack version selection
   const [modrinthVersions, setModrinthVersions] = useState<RawModrinthVersionCandidate[]>([]);
@@ -1869,51 +1772,58 @@ function PackCreateDialog({
     if (mods.length === 0) {
       throw new Error('No mods found for this pack in the registry.');
     }
-    setModProgress(
-      mods.map((m) => ({ modId: m.mod_id, status: 'pending' as const }))
-    );
+    setModProgress(mods.map((mod) => ({ modId: mod.mod_id, status: 'pending' as const })));
+    const items: BatchInstallItem[] = [];
 
-    for (let i = 0; i < mods.length; i++) {
-      const mod = mods[i];
-      setModProgress((prev) =>
-        prev?.map((p, idx) =>
-          idx === i ? { ...p, status: 'installing' as const } : p
-        ) ?? prev
+    for (let index = 0; index < mods.length; index += 1) {
+      const mod = mods[index];
+      setModProgress((previous) =>
+        previous.map((progress, current) =>
+          current === index ? { ...progress, status: 'installing' as const } : progress
+        )
       );
-
       try {
-        const candidates = await listModVersions(instanceId, mod.mod_id);
-        const items = candidates.items;
+        const page = await listModVersions(instanceId, mod.mod_id);
         const candidate =
-          items.find((c) => c.version_compat === 'compatible')
-          ?? items.find((c) => c.version_compat === 'major_match')
-          ?? items[0];
-        if (!candidate) {
-          setModProgress((prev) =>
-            prev?.map((p, idx) =>
-              idx === i
-                ? { ...p, status: 'failed' as const, error: 'No compatible versions found' }
-                : p
-            ) ?? prev
-          );
-          continue;
-        }
-        await installModVersion(instanceId, mod.mod_id, candidate);
-        setModProgress((prev) =>
-          prev?.map((p, idx) =>
-            idx === i ? { ...p, status: 'done' as const } : p
-          ) ?? prev
+          page.items.find((version) => version.version_compat === 'compatible')
+          ?? page.items.find((version) => version.version_compat === 'major_match')
+          ?? page.items[0];
+        if (!candidate) throw new Error('No compatible verified version is available.');
+        items.push({
+          sourceType: 'curated',
+          itemId: mod.mod_id,
+          candidateVersion: candidate.version,
+        });
+        setModProgress((previous) =>
+          previous.map((progress, current) =>
+            current === index ? { ...progress, status: 'done' as const } : progress
+          )
         );
-      } catch (e) {
-        setModProgress((prev) =>
-          prev?.map((p, idx) =>
-            idx === i
-              ? { ...p, status: 'failed' as const, error: formatError(e) }
-              : p
-          ) ?? prev
+      } catch (cause) {
+        setModProgress((previous) =>
+          previous.map((progress, current) =>
+            current === index
+              ? { ...progress, status: 'failed' as const, error: formatError(cause) }
+              : progress
+          )
+        );
+        throw new Error(
+          `Could not resolve every pack item. No pack files were installed: ${formatError(cause)}`,
         );
       }
     }
+
+    setCanonicalInstall({
+      action: { type: 'batch-install', items },
+      targetInstance: instanceId,
+      optionalDeps: { type: 'prompt' },
+      requestedBy: 'interactive',
+      overrides: {
+        allowReplace: false,
+        skipHealthScan: false,
+        forceConflictResolution: {},
+      },
+    });
   };
 
   const submitModrinth = async () => {
@@ -1936,6 +1846,7 @@ function PackCreateDialog({
 
       if (isModrinth) {
         await submitModrinth();
+        setInstallPhase('done');
       } else {
         const instanceId = name
           .toLowerCase()
@@ -1957,8 +1868,6 @@ function PackCreateDialog({
         setCreatedInstanceId(createdId);
         await submitCurated(createdId);
       }
-
-      setInstallPhase('done');
     } catch (e) {
       setError(formatError(e));
     } finally {
@@ -2176,6 +2085,18 @@ function PackCreateDialog({
           </>
         )}
       </div>
+      {canonicalInstall && createdInstanceId && (
+        <InstallFlow
+          open
+          intent={canonicalInstall}
+          instanceName={name || createdInstanceId}
+          onOpenInstance={onCreated}
+          onClose={() => {
+            setCanonicalInstall(null);
+            onCreated(createdInstanceId);
+          }}
+        />
+      )}
     </div>
   );
 }

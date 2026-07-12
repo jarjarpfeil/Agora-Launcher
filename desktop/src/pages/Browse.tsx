@@ -4,9 +4,12 @@ import {
   browseSearch,
   browseLoadMore,
   forYouItems,
+  checkInstanceUpdates,
   formatError,
+  getInstanceDetail,
   getSetting,
   listCategories,
+  listInstances,
   listManifestLoaders,
   listManifestMcVersions,
   type BrowseItemCached,
@@ -14,6 +17,8 @@ import {
   type RegistryItem,
   type SortOption,
   type ModrinthSearchResult,
+  type InstanceDetail,
+  type InstanceRow,
 } from '../lib/tauri';
 import { useRegistryState } from '../lib/useRegistryState';
 import { RegistryStatusView } from '../components/registry-status-view';
@@ -39,6 +44,16 @@ const SORTS: { label: string; value: SortOption }[] = [
 const CONTENT_TYPES = ['mod', 'pack', 'shader', 'resourcepack', 'server', 'datapack', 'world'];
 
 type BrowseItem = BrowseItemCached;
+
+interface ItemContext {
+  instanceName: string;
+  minecraftVersion: string;
+  loader: string;
+  compatible: boolean;
+  installed: boolean;
+  updateAvailable: boolean;
+  whyRecommended: string | null;
+}
 
 // NOTE: the modrinthResults branch is currently unused (For You sort passes []).
 // Kept for future Modrinth_raw integration.
@@ -244,6 +259,44 @@ function BrowseContent({
 
   const [loaders, setLoaders] = useState<string[]>([]);
   const [mcVersions, setMcVersions] = useState<string[]>([]);
+  const [instances, setInstances] = useState<InstanceRow[]>([]);
+  const [activeInstanceId, setActiveInstanceId] = useState('');
+  const [activeInstance, setActiveInstance] = useState<InstanceDetail | null>(null);
+  const [activeUpdateIds, setActiveUpdateIds] = useState<Set<string>>(new Set());
+  const [contextLoading, setContextLoading] = useState(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void listInstances()
+      .then((result) => { if (!cancelled) setInstances(result); })
+      .catch((cause) => { if (!cancelled) setContextError(formatError(cause)); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const selectInstanceContext = async (instanceId: string) => {
+    setActiveInstanceId(instanceId);
+    setContextError(null);
+    setActiveInstance(null);
+    setActiveUpdateIds(new Set());
+    if (!instanceId) return;
+    setContextLoading(true);
+    try {
+      const [detail, updates] = await Promise.all([
+        getInstanceDetail(instanceId),
+        checkInstanceUpdates(instanceId),
+      ]);
+      if (!detail) throw new Error('The selected instance no longer exists.');
+      setActiveInstance(detail);
+      setActiveUpdateIds(new Set(updates.map((update) => update.mod_jar_id)));
+      setMcVersion(detail.row.minecraft_version);
+      setLoader(detail.row.loader);
+    } catch (cause) {
+      setContextError(formatError(cause));
+    } finally {
+      setContextLoading(false);
+    }
+  };
 
   const handleSortChange = (next: SortOption) => {
     setSort(next);
@@ -255,14 +308,45 @@ function BrowseContent({
   const clearFilters = useCallback(() => {
     setCategory(null);
     setContentType(null);
-    setMcVersion(null);
-    setLoader(null);
+    setMcVersion(activeInstance?.row.minecraft_version ?? null);
+    setLoader(activeInstance?.row.loader ?? null);
     setQuery('');
     setSearchError(null);
     generationRef.current += 1;
-  }, []);
+  }, [activeInstance]);
 
   const hasActiveFilters = category !== null || contentType !== null || mcVersion !== null || loader !== null || query.trim() !== '';
+
+  const contextFor = (item: BrowseItem): ItemContext | null => {
+    if (!activeInstance) return null;
+    const installed = activeInstance.manifest
+      ? [
+          ...activeInstance.manifest.mods,
+          ...activeInstance.manifest.resourcepacks,
+          ...activeInstance.manifest.shaders,
+          ...activeInstance.manifest.datapacks,
+          ...activeInstance.manifest.worlds,
+        ].some((entry) =>
+          entry.registry_id === item.id
+          || entry.modrinth_id === item.id
+          || entry.mod_jar_id === item.id
+        )
+      : false;
+    return {
+      instanceName: activeInstance.row.name,
+      minecraftVersion: activeInstance.row.minecraft_version,
+      loader: activeInstance.row.loader,
+      compatible: mcVersion === activeInstance.row.minecraft_version
+        && loader === activeInstance.row.loader,
+      installed,
+      updateAvailable: activeUpdateIds.has(item.id),
+      whyRecommended: sort === 'for_you'
+        && mcVersion === activeInstance.row.minecraft_version
+        && loader === activeInstance.row.loader
+        ? `Recommended from Agora's curated ranking for ${activeInstance.row.loader} ${activeInstance.row.minecraft_version}.`
+        : null,
+    };
+  };
 
   // ---- Build a stable query key from active filter params ----
   const queryKey = useMemo(
@@ -471,6 +555,31 @@ function BrowseContent({
         error={regError}
         actions={regActions}
       />
+
+      <section className="rounded-xl border border-border bg-card p-4">
+        <label className="block text-sm font-semibold" htmlFor="browse-instance-context">
+          Discover for an instance
+        </label>
+        <p className="mt-1 text-xs text-muted-foreground">
+          Select an instance to apply its exact Minecraft version and loader and see installed/update labels.
+        </p>
+        <select
+          id="browse-instance-context"
+          value={activeInstanceId}
+          onChange={(event) => { void selectInstanceContext(event.target.value); }}
+          disabled={contextLoading}
+          className="mt-3 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm disabled:opacity-50"
+        >
+          <option value="">No instance context</option>
+          {instances.map((instance) => (
+            <option key={instance.instance_id} value={instance.instance_id}>
+              {instance.name} — {instance.loader} · MC {instance.minecraft_version}
+            </option>
+          ))}
+        </select>
+        {contextLoading && <p className="mt-2 text-xs text-muted-foreground">Checking compatibility and updates…</p>}
+        {contextError && <p className="mt-2 text-xs text-destructive">{contextError}</p>}
+      </section>
 
       <section className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-start gap-3">
@@ -734,13 +843,13 @@ function BrowseContent({
       ) : layout === 'grid' ? (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           {items.map((item) => (
-            <GridCard key={item.id} item={item} onSelectMod={onSelectMod} />
+            <GridCard key={item.id} item={item} context={contextFor(item)} onSelectMod={onSelectMod} />
           ))}
         </div>
       ) : (
         <ul className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {items.map((item) => (
-            <ListCard key={item.id} item={item} onSelectMod={onSelectMod} />
+            <ListCard key={item.id} item={item} context={contextFor(item)} onSelectMod={onSelectMod} />
           ))}
         </ul>
       )}
@@ -777,7 +886,28 @@ function CuratedBadge() {
   );
 }
 
-function GridCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: string) => void }) {
+function ContextLabels({ item, context }: { item: BrowseItem; context: ItemContext | null }) {
+  return (
+    <div className="flex flex-wrap gap-1 text-[10px]">
+      <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">
+        Source: {item.source === 'curated' ? 'Agora registry' : 'Modrinth'}
+      </span>
+      {context?.compatible && (
+        <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-green-700 dark:text-green-300">
+          Compatible with {context.instanceName} · {context.loader} · MC {context.minecraftVersion}
+        </span>
+      )}
+      {context?.installed && (
+        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-primary">Installed</span>
+      )}
+      {context?.updateAvailable && (
+        <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700 dark:text-amber-300">Update available</span>
+      )}
+    </div>
+  );
+}
+
+function GridCard({ item, context, onSelectMod }: { item: BrowseItem; context: ItemContext | null; onSelectMod?: (id: string) => void }) {
   return (
     <div className="rounded-xl border border-border bg-card overflow-hidden flex flex-col">
       {item.iconUrl && (
@@ -794,6 +924,10 @@ function GridCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: 
           <h3 className="font-semibold truncate">{item.name}</h3>
           {item.source === 'curated' && <CuratedBadge />}
         </div>
+        <ContextLabels item={item} context={context} />
+        {context?.whyRecommended && (
+          <p className="text-[10px] text-muted-foreground">Why: {context.whyRecommended}</p>
+        )}
         {item.registryItem ? (
           <>
             <p className="text-xs text-muted-foreground">
@@ -843,7 +977,7 @@ function GridCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: 
   );
 }
 
-function ListCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: string) => void }) {
+function ListCard({ item, context, onSelectMod }: { item: BrowseItem; context: ItemContext | null; onSelectMod?: (id: string) => void }) {
   return (
     <li className="rounded-xl border border-border bg-card p-4">
       <div className="flex items-start gap-3">
@@ -863,6 +997,10 @@ function ListCard({ item, onSelectMod }: { item: BrowseItem; onSelectMod?: (id: 
             <h3 className="font-semibold truncate">{item.name}</h3>
             {item.source === 'curated' && <CuratedBadge />}
           </div>
+          <ContextLabels item={item} context={context} />
+          {context?.whyRecommended && (
+            <p className="mt-1 text-[10px] text-muted-foreground">Why: {context.whyRecommended}</p>
+          )}
           {item.registryItem ? (
             <>
               <p className="text-xs text-muted-foreground">

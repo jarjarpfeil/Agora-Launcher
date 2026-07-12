@@ -13,6 +13,7 @@ import { InstanceEditor } from './pages/InstanceEditor';
 import { getSetting } from './lib/tauri';
 import { OfflineBanner } from './components/offline-banner';
 import { HealthDialog } from './components/HealthDialog';
+import { CrashInvestigator } from './components/CrashInvestigator';
 import { ToastContainer } from './components/Toast';
 import { useDestination, type Destination, type Tab } from './lib/useDestination';
 import { useProcessController } from './lib/useProcessController';
@@ -83,6 +84,12 @@ export default function App() {
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [aiChatEnabled, setAiChatEnabled] = useState<boolean>(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [crashInvestigation, setCrashInvestigation] = useState<{
+    instanceId: string;
+    crashFilename: string | null;
+    manualLogText: string | null;
+    directLaunch: boolean;
+  } | null>(null);
 
   // Legacy bridge: the CommandPalette still uses (tab, instanceId?) signature.
   const handleNavigate = (tab: Tab, instanceId?: string) => {
@@ -233,7 +240,14 @@ export default function App() {
             />
           ) : (
             <>
-              {effectiveTab === 'home' && <Home />}
+              {effectiveTab === 'home' && (
+                <Home
+                  onNavigateTab={navigateToTab}
+                  onOpenInstance={navigateToInstanceDetail}
+                  onOpenMod={navigateToModDetail}
+                  onLaunch={startLaunch}
+                />
+              )}
               {effectiveTab === 'browse' && (
                 <Browse
                   onSelectMod={(id) => navigateToModDetail(id)}
@@ -246,6 +260,7 @@ export default function App() {
                   processLogs={processLogs}
                   onStartLaunch={startLaunch}
                   onKillProcess={killProcess}
+                  onStartCrashInvestigation={setCrashInvestigation}
                 />
               )}
               {effectiveTab === 'governance' && <Governance />}
@@ -261,6 +276,18 @@ export default function App() {
           onNavigate={handleNavigate}
         />
         <ToastContainer />
+        {crashInvestigation && (
+          <CrashInvestigator
+            instanceId={crashInvestigation.instanceId}
+            crashFilename={crashInvestigation.crashFilename}
+            manualLogText={crashInvestigation.manualLogText}
+            onClose={() => setCrashInvestigation(null)}
+            onLaunch={() => startLaunch(
+              crashInvestigation.instanceId,
+              crashInvestigation.directLaunch,
+            )}
+          />
+        )}
     </div>
   );
 }

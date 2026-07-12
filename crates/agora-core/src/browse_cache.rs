@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::registry::RegistryItem;
 use crate::modrinth::ModrinthSearchResult;
+use crate::registry::RegistryItem;
 
 pub const PAGE_SIZE: usize = 20;
 
@@ -96,7 +96,10 @@ pub fn merge_items(
                 modrinth_result: Some(mr.clone()),
                 name: matched.name.clone(),
                 icon_url: matched.icon_url.clone().or(mr.icon_url.clone()),
-                description: matched.description.clone().or_else(|| Some(mr.description.clone())),
+                description: matched
+                    .description
+                    .clone()
+                    .or_else(|| Some(mr.description.clone())),
                 content_type: matched.content_type.clone(),
             });
         } else {
@@ -243,8 +246,14 @@ mod tests {
             state.has_more_modrinth = false;
         }
         let page_one = get_page(&cache, 1).await;
-        assert_eq!(page_one.items.first().map(|i| i.id.as_str()), Some("item-20"));
-        assert_eq!(page_one.items.last().map(|i| i.id.as_str()), Some("item-39"));
+        assert_eq!(
+            page_one.items.first().map(|i| i.id.as_str()),
+            Some("item-20")
+        );
+        assert_eq!(
+            page_one.items.last().map(|i| i.id.as_str()),
+            Some("item-39")
+        );
     }
 
     #[tokio::test]
@@ -261,13 +270,16 @@ mod tests {
         let cache = new_cache();
         cache.write().await.query_key = "query-a".into();
         let duplicate = item(1);
-        assert!(append_items(
-            &cache,
-            "query-a",
-            vec![duplicate.clone(), duplicate],
-            PAGE_SIZE,
-            false,
-        ).await);
+        assert!(
+            append_items(
+                &cache,
+                "query-a",
+                vec![duplicate.clone(), duplicate],
+                PAGE_SIZE,
+                false,
+            )
+            .await
+        );
         assert_eq!(cache.read().await.items.len(), 1);
     }
 }

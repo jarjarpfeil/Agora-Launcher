@@ -3,34 +3,63 @@ import { useRegistryState } from '../lib/useRegistryState';
 import {
   checkInstanceCrash,
   checkInstanceUpdates,
+  detectDrift,
+  getLkgMarker,
   getSetting,
   listInstances,
   listSnapshots,
+  restoreSnapshot,
+  forYouItems,
   setSetting,
   checkRegistryUpdate,
   type InstanceRow,
   type UpdateInfo,
+  type RegistryItem,
 } from '../lib/tauri';
-import { useDestination } from '../lib/useDestination';
+import type { Tab } from '../lib/useDestination';
 
 // ---------------------------------------------------------------------------
 // D1: Action-oriented Home
 // 4-zone layout: Alerts → Hero → Maintenance → Discovery
 // ---------------------------------------------------------------------------
 
-export function Home() {
+export function Home({
+  onNavigateTab,
+  onOpenInstance,
+  onOpenMod,
+  onLaunch,
+}: {
+  onNavigateTab: (tab: Tab) => void;
+  onOpenInstance: (instanceId: string) => void;
+  onOpenMod: (itemId: string) => void;
+  onLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
+}) {
   const { state: regState, hasCachedDb } = useRegistryState();
-  const { navigateToTab, navigateToInstanceDetail } = useDestination();
 
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [instancesLoading, setInstancesLoading] = useState(true);
   const [lastCrash, setLastCrash] = useState<{ instanceId: string; name: string; filename?: string } | null>(null);
   const [updatesByInstance, setUpdatesByInstance] = useState<Record<string, UpdateInfo[]>>({});
-  const [snapshots, setSnapshots] = useState<{ instanceName: string; id: string; label: string }[]>([]);
+  const [knownGood, setKnownGood] = useState<{
+    instanceId: string;
+    instanceName: string;
+    id: string;
+    label: string;
+    promotedAt: string | null;
+    added: number;
+    removed: number;
+    disabled: number;
+    updated: number;
+  }[]>([]);
+  const [knownGoodChecked, setKnownGoodChecked] = useState(false);
+  const [recommendations, setRecommendations] = useState<RegistryItem[]>([]);
+  const [restoringSnapshotId, setRestoringSnapshotId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Load instances on mount.
   const loadData = useCallback(async () => {
     setInstancesLoading(true);
+    setKnownGoodChecked(false);
     try {
       const all = await listInstances();
       setInstances(all);
@@ -64,20 +93,63 @@ export function Home() {
       }
       setUpdatesByInstance(updates);
 
-      // Check for snapshots (LKG candidates) on instances with launches.
-      const snapResults: { instanceName: string; id: string; label: string }[] = [];
-      for (const inst of launched.slice(0, 3)) {
+      // Resolve exact promoted LKG pointers and current drift, never arbitrary snapshots.
+      const lkgResults: typeof knownGood = [];
+      for (const inst of all.slice(0, 5)) {
         try {
+          const marker = await getLkgMarker(inst.instance_id);
+          const snapshotId = typeof marker?.currentLkgSnapshotId === 'string'
+            ? marker.currentLkgSnapshotId
+            : null;
+          if (!snapshotId) continue;
           const snapList = await listSnapshots(inst.instance_id);
-          for (const s of snapList) {
-            snapResults.push({ instanceName: inst.name, id: s.id, label: s.label ?? '' });
-          }
+          const snapshot = snapList.find((candidate) => candidate.id === snapshotId);
+          const diff = await detectDrift(inst.instance_id, snapshotId);
+          const entries = (key: string) => Array.isArray(diff[key])
+            ? diff[key] as Array<Record<string, unknown>>
+            : [];
+          const addedEntries = entries('added');
+          const removedEntries = entries('removed');
+          const removedPaths = new Set(removedEntries.map((entry) => String(entry.path ?? '')));
+          const disabled = addedEntries.filter((entry) => {
+            const path = String(entry.path ?? '');
+            return path.endsWith('.disabled') && removedPaths.has(path.slice(0, -'.disabled'.length));
+          }).length;
+          lkgResults.push({
+            instanceId: inst.instance_id,
+            instanceName: inst.name,
+            id: snapshotId,
+            label: snapshot?.label ?? 'Last known good',
+            promotedAt: typeof marker?.lastPromotedAt === 'string' ? marker.lastPromotedAt : null,
+            added: addedEntries.length - disabled,
+            removed: removedEntries.length - disabled,
+            disabled,
+            updated: entries('modified').length,
+          });
         } catch { /* skip */ }
       }
-      setSnapshots(snapResults);
+      setKnownGood(lkgResults);
+
+      if (hasCachedDb && launched[0]) {
+        const active = launched[0];
+        try {
+          const modrinthEnabled = (await getSetting('modrinth_enabled')) === true;
+          setRecommendations(await forYouItems(
+            modrinthEnabled,
+            active.minecraft_version,
+            active.loader,
+            3,
+          ));
+        } catch {
+          setRecommendations([]);
+        }
+      } else {
+        setRecommendations([]);
+      }
     } catch { /* ignore */ }
+    setKnownGoodChecked(true);
     setInstancesLoading(false);
-  }, []);
+  }, [hasCachedDb]);
 
   useEffect(() => {
     loadData();
@@ -99,6 +171,42 @@ export function Home() {
   const lastLaunched = sortedByLaunched[0] ?? null;
   const totalUpdates = Object.values(updatesByInstance).reduce((s, u) => s + u.length, 0);
   const heroInstance = lastLaunched ?? sortedByLaunched[0] ?? null;
+  const crashKnownGood = lastCrash
+    ? knownGood.find((entry) => entry.instanceId === lastCrash.instanceId) ?? null
+    : null;
+
+  const handleContinuePlaying = useCallback(async () => {
+    if (!heroInstance) return;
+    setActionError(null);
+    try {
+      const launchMode = await getSetting('launch_mode');
+      await onLaunch(heroInstance.instance_id, launchMode === 'direct');
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    }
+  }, [heroInstance, onLaunch]);
+
+  const handleRestoreSnapshot = useCallback(async (snapshot: {
+    instanceId: string;
+    instanceName: string;
+    id: string;
+    label: string;
+  }) => {
+    const confirmed = window.confirm(
+      `Restore "${snapshot.instanceName}" to snapshot "${snapshot.label || snapshot.id}"? Agora will create an undo snapshot first.`,
+    );
+    if (!confirmed) return;
+    setActionError(null);
+    setRestoringSnapshotId(snapshot.id);
+    try {
+      await restoreSnapshot(snapshot.instanceId, snapshot.id);
+      await loadData();
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRestoringSnapshotId(null);
+    }
+  }, [loadData]);
 
   return (
     <div className="space-y-6">
@@ -113,7 +221,13 @@ export function Home() {
         <CrashAlert
           instanceName={lastCrash.name}
           crashFilename={lastCrash.filename}
-          onRestore={() => navigateToInstanceDetail(lastCrash.instanceId)}
+          onRestore={() => {
+            if (crashKnownGood) {
+              void handleRestoreSnapshot(crashKnownGood);
+            } else {
+              onOpenInstance(lastCrash.instanceId);
+            }
+          }}
         />
       )}
 
@@ -129,25 +243,40 @@ export function Home() {
         loading={instancesLoading}
         onLaunch={() => {
           if (heroInstance) {
-            navigateToInstanceDetail(heroInstance.instance_id);
+            void handleContinuePlaying();
           }
         }}
-        onBrowsePacks={() => navigateToTab('browse')}
+        onBrowsePacks={() => onNavigateTab('browse')}
       />
 
       {/* Zone C: Maintenance — only when triggered */}
       {totalUpdates > 0 && (
         <UpdatesCard
           totalUpdates={totalUpdates}
-          onReview={() => navigateToTab('instances')}
+          onReview={() => onNavigateTab('instances')}
         />
       )}
 
-      {snapshots.length > 0 && (
-        <SnapshotsCard
-          snapshots={snapshots}
-          onRestore={(id) => navigateToInstanceDetail(id)}
+      {knownGood.length > 0 && (
+        <KnownGoodCard
+          snapshots={knownGood}
+          restoringSnapshotId={restoringSnapshotId}
+          onRestore={(snapshot) => void handleRestoreSnapshot(snapshot)}
         />
+      )}
+      {knownGoodChecked && instances.length > 0 && knownGood.length === 0 && (
+        <div className="rounded-xl border border-dashed border-border p-4">
+          <h4 className="text-sm font-semibold">No last-known-good state yet</h4>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Play an instance successfully for at least 60 seconds. Agora will then promote its exact pre-launch snapshot for one-click recovery.
+          </p>
+        </div>
+      )}
+
+      {actionError && (
+        <div role="alert" className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+          {actionError}
+        </div>
       )}
 
       {/* Zone D: Discovery — always present */}
@@ -156,7 +285,9 @@ export function Home() {
         hasCachedDb={hasCachedDb}
         loading={instancesLoading}
         activeInstance={lastLaunched}
-        onBrowseMore={() => navigateToTab('browse')}
+        recommendations={recommendations}
+        onOpenMod={onOpenMod}
+        onBrowseMore={() => onNavigateTab('browse')}
       />
     </div>
   );
@@ -280,21 +411,45 @@ function UpdatesCard({ totalUpdates, onReview }: {
   );
 }
 
-function SnapshotsCard({
+function KnownGoodCard({
   snapshots,
+  restoringSnapshotId,
   onRestore,
 }: {
-  snapshots: { instanceName: string; id: string; label: string }[];
-  onRestore: (id: string) => void;
+  snapshots: {
+    instanceId: string;
+    instanceName: string;
+    id: string;
+    label: string;
+    promotedAt: string | null;
+    added: number;
+    removed: number;
+    disabled: number;
+    updated: number;
+  }[];
+  restoringSnapshotId: string | null;
+  onRestore: (snapshot: { instanceId: string; instanceName: string; id: string; label: string }) => void;
 }) {
   return (
     <div className="rounded-xl border border-border bg-card p-4 space-y-2">
-      <h4 className="font-semibold text-sm">Snapshots</h4>
+      <h4 className="font-semibold text-sm">Last Known Good</h4>
       <div className="space-y-1">
         {snapshots.slice(0, 3).map((s) => (
           <div key={s.id} className="flex items-center justify-between text-xs">
-            <span>{s.instanceName}: {s.label}</span>
-            <button onClick={() => onRestore(s.id)} className="text-primary hover:underline text-xs">Restore</button>
+            <div>
+              <p className="font-medium">{s.instanceName}: {s.label}</p>
+              <p className="text-muted-foreground">
+                {s.promotedAt ? new Date(s.promotedAt).toLocaleString() : 'Promotion time unavailable'}
+                {' · '}{s.added} new · {s.removed} removed · {s.disabled} disabled · {s.updated} updated
+              </p>
+            </div>
+            <button
+              onClick={() => onRestore(s)}
+              disabled={restoringSnapshotId !== null}
+              className="text-primary hover:underline text-xs disabled:opacity-50"
+            >
+              {restoringSnapshotId === s.id ? 'Restoring…' : 'Restore'}
+            </button>
           </div>
         ))}
       </div>
@@ -302,11 +457,21 @@ function SnapshotsCard({
   );
 }
 
-function RecommendationsCard({ hasInstances, hasCachedDb, loading, activeInstance, onBrowseMore }: {
+function RecommendationsCard({
+  hasInstances,
+  hasCachedDb,
+  loading,
+  activeInstance,
+  recommendations,
+  onOpenMod,
+  onBrowseMore,
+}: {
   hasInstances: boolean;
   hasCachedDb: boolean;
   loading: boolean;
   activeInstance: InstanceRow | null;
+  recommendations: RegistryItem[];
+  onOpenMod: (itemId: string) => void;
   onBrowseMore: () => void;
 }) {
   if (loading) return null;
@@ -334,14 +499,45 @@ function RecommendationsCard({ hasInstances, hasCachedDb, loading, activeInstanc
     );
   }
 
-  const label = activeInstance
-    ? `Compatible recommendations for ${activeInstance.name}`
-    : 'Curated mods and packs';
+  if (recommendations.length === 0) {
+    return (
+      <div className="rounded-xl border border-dashed border-border p-6 text-center">
+        <p className="text-muted-foreground">
+          No new curated matches were found for {activeInstance?.name ?? 'this instance'}.
+        </p>
+        <button onClick={onBrowseMore} className="mt-3 rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent">
+          Browse catalog
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div className="rounded-xl border border-dashed border-border p-6 text-center">
-      <p className="text-muted-foreground">{label}</p>
-      <button onClick={onBrowseMore} className="mt-3 rounded-lg bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+    <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+      <div>
+        <h4 className="font-semibold text-sm">Compatible recommendations</h4>
+        <p className="text-xs text-muted-foreground">
+          Ranked by category overlap with mods in {activeInstance?.name}, then filtered for MC {activeInstance?.minecraft_version} and {activeInstance?.loader}.
+        </p>
+      </div>
+      <div className="grid gap-2 md:grid-cols-3">
+        {recommendations.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => onOpenMod(item.id)}
+            className="rounded-lg border border-border p-3 text-left hover:bg-accent"
+          >
+            <span className="block text-sm font-medium">{item.name}</span>
+            <span className="mt-1 block text-xs text-muted-foreground line-clamp-2">
+              {item.description || `Curated ${item.content_type} from ${item.download_strategy}.`}
+            </span>
+            <span className="mt-2 block text-[11px] text-primary">
+              {item.status === 'active' ? 'Curated and active' : item.status} · {item.download_strategy}
+            </span>
+          </button>
+        ))}
+      </div>
+      <button onClick={onBrowseMore} className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-accent">
         Browse more
       </button>
     </div>

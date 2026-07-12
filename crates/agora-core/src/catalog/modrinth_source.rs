@@ -38,7 +38,8 @@ impl Default for ModrinthSource {
 // ---------------------------------------------------------------------------
 
 fn open_conn(ctx: &Ctx) -> Result<rusqlite::Connection, LauncherError> {
-    let path = paths::local_state_db_path(&ctx.app_data_dir).map_err(|_| LauncherError::LocalStateFailed)?;
+    let path = paths::local_state_db_path(&ctx.app_data_dir)
+        .map_err(|_| LauncherError::LocalStateFailed)?;
     db::local_state_connection(&path).map_err(|_| LauncherError::LocalStateFailed)
 }
 
@@ -101,7 +102,11 @@ fn build_project_url(project_id: &str) -> String {
 }
 
 /// Build the versions list URL, optionally filtered by MC version + loader.
-fn build_versions_url(project_id: &str, game_version: Option<&str>, loader: Option<&str>) -> String {
+fn build_versions_url(
+    project_id: &str,
+    game_version: Option<&str>,
+    loader: Option<&str>,
+) -> String {
     let mut url = format!(
         "https://api.modrinth.com/v2/project/{}/version",
         urlencoding::encode(project_id)
@@ -175,21 +180,15 @@ impl CatalogSource for ModrinthSource {
 
     fn is_enabled(&self, ctx: &Ctx) -> bool {
         match open_conn(ctx) {
-            Ok(conn) => {
-                match db::get_setting(&conn, "modrinth_enabled") {
-                    Ok(Some(v)) => v.as_bool().unwrap_or(true),
-                    _ => true,
-                }
-            }
+            Ok(conn) => match db::get_setting(&conn, "modrinth_enabled") {
+                Ok(Some(v)) => v.as_bool().unwrap_or(true),
+                _ => true,
+            },
             Err(_) => true,
         }
     }
 
-    async fn search(
-        &self,
-        ctx: &Ctx,
-        q: &SearchQuery,
-    ) -> Result<Vec<CatalogItem>, LauncherError> {
+    async fn search(&self, ctx: &Ctx, q: &SearchQuery) -> Result<Vec<CatalogItem>, LauncherError> {
         // Synchronous DB check — connection dropped before any .await.
         let conn = open_conn(ctx)?;
         check_modrinth_enabled(&conn)?;
@@ -199,29 +198,30 @@ impl CatalogSource for ModrinthSource {
         let resp: modrinth::ModrinthSearchResponse =
             modrinth::modrinth_get_json_with_client(&ctx.client, &url).await?;
 
-        Ok(resp.hits.into_iter().map(|h| modrinth::ModrinthSearchResult {
-            project_id: h.project_id,
-            slug: h.slug.unwrap_or_default(),
-            title: h.title,
-            description: h.description.unwrap_or_default(),
-            icon_url: h.icon_url,
-            author: h.author.unwrap_or_default(),
-            categories: h.categories.unwrap_or_default(),
-            downloads: h.downloads.unwrap_or(0),
-            follows: h.follows.unwrap_or(0),
-            project_type: h.project_type.unwrap_or_else(|| "mod".to_string()),
-            date_created: h.date_created,
-            date_modified: h.date_modified,
-            versions: h.versions.unwrap_or_default(),
-            license: h.license,
-        }).map(search_result_to_item).collect())
+        Ok(resp
+            .hits
+            .into_iter()
+            .map(|h| modrinth::ModrinthSearchResult {
+                project_id: h.project_id,
+                slug: h.slug.unwrap_or_default(),
+                title: h.title,
+                description: h.description.unwrap_or_default(),
+                icon_url: h.icon_url,
+                author: h.author.unwrap_or_default(),
+                categories: h.categories.unwrap_or_default(),
+                downloads: h.downloads.unwrap_or(0),
+                follows: h.follows.unwrap_or(0),
+                project_type: h.project_type.unwrap_or_else(|| "mod".to_string()),
+                date_created: h.date_created,
+                date_modified: h.date_modified,
+                versions: h.versions.unwrap_or_default(),
+                license: h.license,
+            })
+            .map(search_result_to_item)
+            .collect())
     }
 
-    async fn project(
-        &self,
-        ctx: &Ctx,
-        id: &ProjectRef,
-    ) -> Result<CatalogItem, LauncherError> {
+    async fn project(&self, ctx: &Ctx, id: &ProjectRef) -> Result<CatalogItem, LauncherError> {
         // Synchronous DB check.
         let conn = open_conn(ctx)?;
         check_modrinth_enabled(&conn)?;
@@ -233,9 +233,10 @@ impl CatalogSource for ModrinthSource {
                 let full: modrinth::ModrinthProjectFullRaw =
                     modrinth::modrinth_get_json_with_client(&ctx.client, &url).await?;
 
-                let page_url = full.slug.as_ref().map(|slug| {
-                    format!("https://modrinth.com/{}/{}", full.project_type, slug)
-                });
+                let page_url = full
+                    .slug
+                    .as_ref()
+                    .map(|slug| format!("https://modrinth.com/{}/{}", full.project_type, slug));
 
                 let mapped = modrinth::ModrinthProjectFull {
                     id: full.id,
@@ -292,11 +293,7 @@ impl CatalogSource for ModrinthSource {
         }
     }
 
-    async fn versions(
-        &self,
-        ctx: &Ctx,
-        id: &ProjectRef,
-    ) -> Result<Vec<Version>, LauncherError> {
+    async fn versions(&self, ctx: &Ctx, id: &ProjectRef) -> Result<Vec<Version>, LauncherError> {
         // Synchronous DB check.
         let conn = open_conn(ctx)?;
         check_modrinth_enabled(&conn)?;
@@ -323,9 +320,14 @@ impl CatalogSource for ModrinthSource {
                     if sha1.is_empty() {
                         return None;
                     }
-                    let release_type = if v.version_number.contains("-alpha") || v.version_number.contains("-a.") {
+                    let release_type = if v.version_number.contains("-alpha")
+                        || v.version_number.contains("-a.")
+                    {
                         ReleaseType::Alpha
-                    } else if v.version_number.contains("-beta") || v.version_number.contains("-b.") || v.version_number.contains("-rc") {
+                    } else if v.version_number.contains("-beta")
+                        || v.version_number.contains("-b.")
+                        || v.version_number.contains("-rc")
+                    {
                         ReleaseType::Beta
                     } else {
                         ReleaseType::Release
@@ -339,10 +341,20 @@ impl CatalogSource for ModrinthSource {
                         download_url: f.url,
                         hashes: Hashes {
                             sha1: if sha1.is_empty() { None } else { Some(sha1) },
-                            sha512: if sha512.is_empty() { None } else { Some(sha512) },
+                            sha512: if sha512.is_empty() {
+                                None
+                            } else {
+                                Some(sha512)
+                            },
                             sha256: None,
                         },
-                        loaders: v.loaders.clone().unwrap_or_default().into_iter().map(|l| l.to_lowercase()).collect(),
+                        loaders: v
+                            .loaders
+                            .clone()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|l| l.to_lowercase())
+                            .collect(),
                         game_versions: v.game_versions.clone().unwrap_or_default(),
                         release_type,
                         dependencies: vec![],
@@ -362,12 +374,7 @@ impl CatalogSource for ModrinthSource {
         Ok(DepGraph::default())
     }
 
-    async fn download(
-        &self,
-        ctx: &Ctx,
-        v: &Version,
-        dest: &Path,
-    ) -> Result<Hashes, LauncherError> {
+    async fn download(&self, ctx: &Ctx, v: &Version, dest: &Path) -> Result<Hashes, LauncherError> {
         let url = &v.download_url;
         let resp = ctx
             .client

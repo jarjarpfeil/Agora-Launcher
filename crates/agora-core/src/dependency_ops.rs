@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 /// Whether a dependency is required or optional.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Requirement {
     Required,
     Optional,
@@ -24,6 +25,7 @@ pub enum Requirement {
 
 /// Where a dependency declaration came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum DepSource {
     Jar,
     Manifest,
@@ -85,6 +87,49 @@ pub struct DisablePlan {
 /// the command-layer API.
 pub type InstallPlan = ResolvedInstallDeps;
 
+/// Where a JAR-declared incompatibility came from.
+///
+/// Fabric distinguishes `breaks` (hard: matching version is a launch failure)
+/// from `conflicts` (soft: matching version is a warning). Forge/NeoForge use
+/// `type = "incompatible"` (hard) and `type = "discouraged"` (soft).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompatibilitySource {
+    /// Fabric `breaks` — hard failure when the version range matches.
+    FabricBreaks,
+    /// Fabric `conflicts` — soft warning when the version range matches.
+    FabricConflicts,
+    /// Forge/NeoForge `type = "incompatible"` — hard failure.
+    ForgeIncompatible,
+    /// NeoForge `type = "discouraged"` — soft warning.
+    ForgeDiscouraged,
+}
+
+impl IncompatibilitySource {
+    /// True for hard (launch-breaking) declarations, false for soft warnings.
+    pub fn is_hard(&self) -> bool {
+        matches!(self, Self::FabricBreaks | Self::ForgeIncompatible)
+    }
+}
+
+/// A single JAR-declared incompatibility, preserving the target mod id, the
+/// version-range predicates, and the severity.
+///
+/// `version_ranges` is a list of Fabric predicate strings (e.g. `"<2.0"`,
+/// `">=1.0 <2.0"`, `"*"`) OR of Forge Maven ranges (e.g. `"[1.0,2.0)"`).
+/// Multiple entries are OR-joined (Fabric array semantics). An empty list or
+/// any `"*"` entry means *unconditional* (any installed version matches).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncompatibilityDecl {
+    /// The TARGET mod id (the dependency being declared incompatible), NOT the
+    /// owner mod that owns the metadata file.
+    pub mod_id: String,
+    /// Version-range predicates; empty = unconditional (any version).
+    pub version_ranges: Vec<String>,
+    /// Severity / origin of the declaration.
+    pub source: IncompatibilitySource,
+}
+
 /// Jar dependency metadata extracted from a mod JAR file.
 ///
 /// Renamed from `JarMetadata` to avoid collision with
@@ -95,7 +140,15 @@ pub struct JarDeps {
     pub mod_jar_id: Option<String>,
     pub depends_on: Vec<String>,
     pub optional_deps: Vec<String>,
+    /// Flat summary of incompatible target ids (kept for backward-compat with
+    /// `InstalledMod.incompatible_deps` and the install flow). Populated from
+    /// [`IncompatibilityDecl`]s by the parser.
     pub incompatible_deps: Vec<String>,
+    /// Structured incompatible-mod declarations carrying severity + version
+    /// ranges. Consumed by the health check. The install/remove flow ignores
+    /// these (incompatibles are curatorial notes for v1).
+    #[serde(default)]
+    pub incompatibility_decls: Vec<IncompatibilityDecl>,
 }
 
 // ---------------------------------------------------------------------------
@@ -193,13 +246,13 @@ pub fn find_dependents_with_aliases(
     let mut seen: HashMap<String, DependentInfo> = HashMap::new();
 
     for m in installed {
-        let mod_id = m
-            .registry_id
-            .clone()
-            .unwrap_or_else(|| m.filename.clone());
+        let mod_id = m.registry_id.clone().unwrap_or_else(|| m.filename.clone());
 
         // Check required deps
-        if m.depends_on.iter().any(|d| aliases.resolve_or_self(d).to_lowercase() == target_lower) {
+        if m.depends_on
+            .iter()
+            .any(|d| aliases.resolve_or_self(d).to_lowercase() == target_lower)
+        {
             let entry = DependentInfo {
                 mod_id: mod_id.clone(),
                 filename: m.filename.clone(),
@@ -211,7 +264,10 @@ pub fn find_dependents_with_aliases(
         }
 
         // Check optional deps
-        if m.optional_deps.iter().any(|d| aliases.resolve_or_self(d).to_lowercase() == target_lower) {
+        if m.optional_deps
+            .iter()
+            .any(|d| aliases.resolve_or_self(d).to_lowercase() == target_lower)
+        {
             seen.entry(mod_id.clone()).or_insert(DependentInfo {
                 mod_id,
                 filename: m.filename.clone(),
@@ -237,7 +293,11 @@ pub fn resolve_install_deps_with_aliases(
     // Build installed set with alias resolution.
     let installed_ids: HashSet<String> = installed
         .iter()
-        .filter_map(|m| m.mod_jar_id.as_ref().map(|id| aliases.resolve_or_self(id).to_lowercase()))
+        .filter_map(|m| {
+            m.mod_jar_id
+                .as_ref()
+                .map(|id| aliases.resolve_or_self(id).to_lowercase())
+        })
         .collect();
 
     // Build jar-dep candidates with alias-resolved ids.
@@ -342,13 +402,15 @@ pub fn resolve_install_deps_with_aliases(
         let man_effective = man_r.or(man_o);
 
         match (jar_effective, man_effective) {
-            (Some(jr), Some(mr)) if jr.requirement == Requirement::Required
-                && mr.requirement == Requirement::Required =>
+            (Some(jr), Some(mr))
+                if jr.requirement == Requirement::Required
+                    && mr.requirement == Requirement::Required =>
             {
                 missing_required.push(jr.clone());
             }
-            (Some(jo), Some(mo)) if jo.requirement == Requirement::Optional
-                && mo.requirement == Requirement::Optional =>
+            (Some(jo), Some(mo))
+                if jo.requirement == Requirement::Optional
+                    && mo.requirement == Requirement::Optional =>
             {
                 missing_optional.push(jo.clone());
             }
@@ -390,10 +452,8 @@ pub fn resolve_install_deps_with_aliases(
 
     let mut conflicts: Vec<DepConflict> = Vec::new();
     if !conflict_ids.is_empty() {
-        let all_conflicts = detect_source_disagreement(
-            target_jar_deps,
-            target_manifest_deps.as_ref(),
-        );
+        let all_conflicts =
+            detect_source_disagreement(target_jar_deps, target_manifest_deps.as_ref());
         for c in all_conflicts {
             if conflict_ids.contains(&c.mod_jar_id) {
                 conflicts.push(c);
@@ -456,10 +516,7 @@ pub fn build_install_plan_with_aliases(
 ///
 /// Delegates to `find_dependents_with_aliases` with an empty `AliasMap`,
 /// preserving exact existing behavior (no alias resolution → identity).
-pub fn find_dependents(
-    installed: &[InstalledMod],
-    target_mod_jar_id: &str,
-) -> Vec<DependentInfo> {
+pub fn find_dependents(installed: &[InstalledMod], target_mod_jar_id: &str) -> Vec<DependentInfo> {
     find_dependents_with_aliases(installed, target_mod_jar_id, &AliasMap::from_pairs(&[]))
 }
 
@@ -542,7 +599,12 @@ pub fn resolve_install_deps(
     target_jar_deps: &JarDeps,
     installed: &[InstalledMod],
 ) -> ResolvedInstallDeps {
-    resolve_install_deps_with_aliases(target_manifest_deps, target_jar_deps, installed, &AliasMap::from_pairs(&[]))
+    resolve_install_deps_with_aliases(
+        target_manifest_deps,
+        target_jar_deps,
+        installed,
+        &AliasMap::from_pairs(&[]),
+    )
 }
 
 /// Build a removal plan for a target mod.
@@ -567,7 +629,12 @@ pub fn build_install_plan(
     target_jar_deps: &JarDeps,
     installed: &[InstalledMod],
 ) -> InstallPlan {
-    build_install_plan_with_aliases(target_manifest_deps, target_jar_deps, installed, &AliasMap::from_pairs(&[]))
+    build_install_plan_with_aliases(
+        target_manifest_deps,
+        target_jar_deps,
+        installed,
+        &AliasMap::from_pairs(&[]),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -600,6 +667,7 @@ mod tests {
             registry_id: Some(filename.to_string()),
             modrinth_id: None,
             source: String::new(),
+            source_url: None,
             version: None,
             sha256: String::new(),
             installed_at: String::new(),
@@ -620,12 +688,22 @@ mod tests {
         opt_deps: &[&str],
         incompatible: &[&str],
     ) -> JarDeps {
+        let incompatible_deps: Vec<String> = incompatible.iter().map(|s| s.to_string()).collect();
+        let incompatibility_decls = incompatible_deps
+            .iter()
+            .map(|id| IncompatibilityDecl {
+                mod_id: id.clone(),
+                version_ranges: Vec::new(),
+                source: IncompatibilitySource::FabricBreaks,
+            })
+            .collect();
         JarDeps {
             java_packages: Vec::new(),
             mod_jar_id: mod_jar_id.map(String::from),
             depends_on: deps.iter().map(|s| s.to_string()).collect(),
             optional_deps: opt_deps.iter().map(|s| s.to_string()).collect(),
-            incompatible_deps: incompatible.iter().map(|s| s.to_string()).collect(),
+            incompatible_deps,
+            incompatibility_decls,
         }
     }
 
@@ -744,8 +822,14 @@ mod tests {
         // Two conflicts: "x" (jar=Required vs manifest=Optional) and
         // "y" (manifest=Required vs jar=absent). Both are disagreements.
         assert_eq!(conflicts.len(), 2);
-        let x_conflict = conflicts.iter().find(|c| c.mod_jar_id == "x").expect("missing conflict for x");
-        let y_conflict = conflicts.iter().find(|c| c.mod_jar_id == "y").expect("missing conflict for y");
+        let x_conflict = conflicts
+            .iter()
+            .find(|c| c.mod_jar_id == "x")
+            .expect("missing conflict for x");
+        let y_conflict = conflicts
+            .iter()
+            .find(|c| c.mod_jar_id == "y")
+            .expect("missing conflict for y");
         assert_eq!(x_conflict.jar_requirement, Some(Requirement::Required));
         assert_eq!(x_conflict.manifest_requirement, Some(Requirement::Optional));
         assert_eq!(y_conflict.jar_requirement, None);
@@ -858,22 +942,13 @@ mod tests {
         let plan = resolve_install_deps(Some(manifest), &jar_meta, &installed);
 
         // "x" should NOT appear in missing_required or missing_optional
-        let in_missing_req = plan
-            .missing_required
-            .iter()
-            .any(|c| c.mod_jar_id == "x");
-        let in_missing_opt = plan
-            .missing_optional
-            .iter()
-            .any(|c| c.mod_jar_id == "x");
+        let in_missing_req = plan.missing_required.iter().any(|c| c.mod_jar_id == "x");
+        let in_missing_opt = plan.missing_optional.iter().any(|c| c.mod_jar_id == "x");
         assert!(!in_missing_req, "x should not be in missing_required");
         assert!(!in_missing_opt, "x should not be in missing_optional");
 
         // It should appear in conflicts
-        let in_conflicts = plan
-            .conflicts
-            .iter()
-            .any(|c| c.mod_jar_id == "x");
+        let in_conflicts = plan.conflicts.iter().any(|c| c.mod_jar_id == "x");
         assert!(in_conflicts, "x should be in conflicts");
     }
 
@@ -932,8 +1007,14 @@ mod tests {
         ]);
 
         assert_eq!(aliases.resolve("fabric"), Some("fabric-api".to_string()));
-        assert_eq!(aliases.resolve("FABRIC_API"), Some("fabric-api".to_string()));
-        assert_eq!(aliases.resolve("fabric-api"), Some("fabric-api".to_string()));
+        assert_eq!(
+            aliases.resolve("FABRIC_API"),
+            Some("fabric-api".to_string())
+        );
+        assert_eq!(
+            aliases.resolve("fabric-api"),
+            Some("fabric-api".to_string())
+        );
     }
 
     #[test]
@@ -973,19 +1054,9 @@ mod tests {
     #[test]
     fn test_find_dependents_with_aliases_cross_source() {
         // Catalog Fabric API with mod_jar_id="fabric-api"
-        let catalog_api = installed(
-            "Fabric API.jar",
-            Some("fabric-api"),
-            &[],
-            &[],
-        );
+        let catalog_api = installed("Fabric API.jar", Some("fabric-api"), &[], &[]);
         // Modrinth-raw SomeMod with mod_jar_id="some_mod", depends_on=["fabric_api"]
-        let modrinth_mod = installed(
-            "SomeMod.jar",
-            Some("some_mod"),
-            &["fabric_api"],
-            &[],
-        );
+        let modrinth_mod = installed("SomeMod.jar", Some("some_mod"), &["fabric_api"], &[]);
         let installed = vec![catalog_api, modrinth_mod];
 
         // Alias map: "fabric" → "fabric-api", "fabric_api" → "fabric-api"
@@ -1008,18 +1079,8 @@ mod tests {
     fn test_find_dependents_without_aliases_preserves_behavior() {
         // Same setup but call the no-alias version: no match because
         // "fabric_api" != "fabric" without alias resolution.
-        let catalog_api = installed(
-            "Fabric API.jar",
-            Some("fabric-api"),
-            &[],
-            &[],
-        );
-        let modrinth_mod = installed(
-            "SomeMod.jar",
-            Some("some_mod"),
-            &["fabric_api"],
-            &[],
-        );
+        let catalog_api = installed("Fabric API.jar", Some("fabric-api"), &[], &[]);
+        let modrinth_mod = installed("SomeMod.jar", Some("some_mod"), &["fabric_api"], &[]);
         let installed = vec![catalog_api, modrinth_mod];
 
         let result = find_dependents(&installed, "fabric");

@@ -59,6 +59,8 @@ pub struct InstalledMod {
     pub registry_id: Option<String>,
     pub modrinth_id: Option<String>,
     pub source: String,
+    #[serde(default)]
+    pub source_url: Option<String>,
     pub version: Option<String>,
     pub sha256: String,
     pub installed_at: String,
@@ -91,6 +93,12 @@ pub struct ModVersionCandidate {
     pub is_compatible: bool,
     #[serde(default)]
     pub sha1: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
+    #[serde(default)]
+    pub sha512: Option<String>,
+    #[serde(default)]
+    pub size: Option<u64>,
     /// Compatibility tier: `"compatible"` (exact MC version + loader match),
     /// `"major_match"` (same major version, different minor), or `""` (incompatible).
     #[serde(default)]
@@ -320,6 +328,7 @@ mod tests {
                     registry_id: Some("sodium".to_string()),
                     modrinth_id: Some("AANobbMI".to_string()),
                     source: "modrinth".to_string(),
+                    source_url: None,
                     version: Some("0.6.0".to_string()),
                     sha256: "1111111111111111111111111111111111111111111111111111111111111111".to_string(),
                     installed_at: "2025-04-01T12:00:00Z".to_string(),
@@ -334,6 +343,7 @@ mod tests {
                     registry_id: Some("fabric-api".to_string()),
                     modrinth_id: Some("UWpQ9kB0".to_string()),
                     source: "modrinth".to_string(),
+                    source_url: None,
                     version: Some("0.100.0".to_string()),
                     sha256: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
                     installed_at: "2025-04-01T12:00:01Z".to_string(),

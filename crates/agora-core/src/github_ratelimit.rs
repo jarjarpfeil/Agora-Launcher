@@ -77,8 +77,7 @@ pub async fn acquire_github_permit() -> OwnedSemaphorePermit {
 // Cooldown state
 // ---------------------------------------------------------------------------
 
-static COOLDOWN_UNTIL: LazyLock<Mutex<Option<Instant>>> =
-    LazyLock::new(|| Mutex::new(None));
+static COOLDOWN_UNTIL: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex::new(None));
 
 /// Record a rate-limit response.  Sets a global cooldown so that **every**
 /// GitHub call in the process blocks until the ban lifts.

@@ -3,7 +3,6 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json;
 
-
 /// Canonical column list for `registry_items` selects that feed `row_to_item`.
 ///
 /// Single source of truth: `browse_items` and `for_you_items` both select this
@@ -276,10 +275,7 @@ pub struct PackModRow {
 }
 
 /// List all mods in a pack, ordered by mod_id.
-pub fn pack_mods_for_pack(
-    conn: &Connection,
-    pack_id: &str,
-) -> LauncherResult<Vec<PackModRow>> {
+pub fn pack_mods_for_pack(conn: &Connection, pack_id: &str) -> LauncherResult<Vec<PackModRow>> {
     let mut stmt = conn
         .prepare(
             "SELECT pack_id, mod_id, source, version, status, description \
@@ -522,9 +518,7 @@ pub fn list_mod_reviews(conn: &Connection, item_id: String) -> LauncherResult<Ve
             message: e.to_string(),
         })?;
 
-    let raw: Option<String> = stmt
-        .query_row([item_id], |row| row.get(0))
-        .ok();
+    let raw: Option<String> = stmt.query_row([item_id], |row| row.get(0)).ok();
 
     let json_str = match raw {
         Some(s) if !s.is_empty() => s,
@@ -583,7 +577,10 @@ pub struct ManifestDeps {
 /// not exist (older registry.db builds predate this table) so the UI degrades
 /// gracefully. Parses each JSON column string into `Vec<String>`; NULL/empty/
 /// parse errors yield an empty vec.
-pub fn get_manifest_dependencies(conn: &Connection, item_id: String) -> LauncherResult<Option<ManifestDeps>> {
+pub fn get_manifest_dependencies(
+    conn: &Connection,
+    item_id: String,
+) -> LauncherResult<Option<ManifestDeps>> {
     let has_table: bool = conn
         .query_row(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='mod_manual_dependencies'",
@@ -714,7 +711,14 @@ pub fn get_all_manifest_dependencies(
                 _ => Vec::new(),
             };
 
-            Ok((item_id, ManifestDeps { required, optional, incompatible }))
+            Ok((
+                item_id,
+                ManifestDeps {
+                    required,
+                    optional,
+                    incompatible,
+                },
+            ))
         })
         .map_err(|e| LauncherError::Generic {
             code: "ERR_INVALID_QUERY".to_string(),
@@ -793,20 +797,18 @@ pub fn resolve_alias(conn: &Connection, alias: &str) -> LauncherResult<Option<St
     }
 
     let mut stmt = conn
-        .prepare(
-            "SELECT registry_id FROM mod_jar_aliases WHERE alias = ?",
-        )
+        .prepare("SELECT registry_id FROM mod_jar_aliases WHERE alias = ?")
         .map_err(|e| LauncherError::Generic {
             code: "ERR_INVALID_QUERY".to_string(),
             message: e.to_string(),
         })?;
 
-    let mut rows = stmt
-        .query_map([alias], |row| row.get(0))
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_INVALID_QUERY".to_string(),
-            message: e.to_string(),
-        })?;
+    let mut rows =
+        stmt.query_map([alias], |row| row.get(0))
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?;
 
     if let Some(r) = rows.next() {
         Ok(Some(r.map_err(|e| LauncherError::Generic {
@@ -1173,7 +1175,9 @@ mod tests {
     fn test_get_manifest_dependencies() {
         let dir = temp_registry_db();
         let conn = registry_connection(&dir.path().join("registry.db")).unwrap();
-        let deps = get_manifest_dependencies(&conn, "test-mod-1".to_string()).unwrap().unwrap();
+        let deps = get_manifest_dependencies(&conn, "test-mod-1".to_string())
+            .unwrap()
+            .unwrap();
         assert_eq!(deps.required, vec!["dep-1"]);
         assert_eq!(deps.optional, vec!["opt-1"]);
         assert_eq!(deps.incompatible, vec!["incomp-1"]);
@@ -1240,7 +1244,8 @@ mod tests {
         let dir = temp_registry_db();
         let conn = registry_connection(&dir.path().join("registry.db")).unwrap();
         let sort = SortOption::NetScore;
-        let items = browse_items(&conn, Some("mod"), None, &sort, true, None, None, None, 100).unwrap();
+        let items =
+            browse_items(&conn, Some("mod"), None, &sort, true, None, None, None, 100).unwrap();
         assert_eq!(items.len(), 1);
     }
 
@@ -1249,7 +1254,18 @@ mod tests {
         let dir = temp_registry_db();
         let conn = registry_connection(&dir.path().join("registry.db")).unwrap();
         let sort = SortOption::NetScore;
-        let items = browse_items(&conn, None, Some("fabric"), &sort, true, None, None, None, 100).unwrap();
+        let items = browse_items(
+            &conn,
+            None,
+            Some("fabric"),
+            &sort,
+            true,
+            None,
+            None,
+            None,
+            100,
+        )
+        .unwrap();
         assert_eq!(items.len(), 1);
     }
 
@@ -1268,7 +1284,8 @@ mod tests {
             None,
             Some("test mod"),
             100,
-        ).unwrap();
+        )
+        .unwrap();
         let missing = browse_items(
             &conn,
             None,
@@ -1279,7 +1296,8 @@ mod tests {
             None,
             Some("does not exist"),
             100,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(matching.len(), 1);
         assert!(missing.is_empty());
     }
@@ -1330,10 +1348,15 @@ mod tests {
         assert_eq!(annotation.name, "Curated Mod");
         assert!(annotation.is_immune);
         assert_eq!(annotation.net_score, Some(85.0));
-        assert_eq!(annotation.curator_note, Some("A curated mod description".to_string()));
+        assert_eq!(
+            annotation.curator_note,
+            Some("A curated mod description".to_string())
+        );
         assert_eq!(annotation.base_categories.len(), 2);
         assert!(annotation.base_categories.contains(&"fabric".to_string()));
-        assert!(annotation.base_categories.contains(&"adventure".to_string()));
+        assert!(annotation
+            .base_categories
+            .contains(&"adventure".to_string()));
     }
 
     #[test]

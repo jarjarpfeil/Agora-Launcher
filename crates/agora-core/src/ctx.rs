@@ -17,6 +17,9 @@ pub struct Ctx {
 
 impl Ctx {
     pub fn new(app_data_dir: PathBuf, client: reqwest::Client) -> Self {
-        Self { app_data_dir, client }
+        Self {
+            app_data_dir,
+            client,
+        }
     }
 }

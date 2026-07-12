@@ -83,9 +83,11 @@ export interface InstalledMod {
   registry_id: string | null;
   modrinth_id: string | null;
   source: string;
+  source_url?: string | null;
   version: string | null;
   sha256: string;
   installed_at: string;
+  mod_jar_id?: string | null;
   enabled: boolean;
   content_type: string;
 }
@@ -221,6 +223,7 @@ export interface UpdateInfo {
   mod_jar_id: string;
   current_version: string;
   latest_version: string;
+  target_version: string;
   source: string;
 }
 
@@ -244,6 +247,24 @@ export const exportLockfile = (instanceId: string) =>
 
 export const detectDrift = (instanceId: string, snapshotId: string) =>
   invoke<Record<string, unknown>>('detect_drift', { instanceId, snapshotId });
+
+export interface LockfileDriftDifference {
+  path: string;
+  kind: 'added' | 'removed' | 'modified' | 'config-modified';
+  expectedSha256: string | null;
+  actualSha256: string | null;
+}
+
+export interface LockfileDriftReport {
+  status: 'in-sync' | 'drifted';
+  differences: LockfileDriftDifference[];
+}
+
+export const verifyLockfile = (instanceId: string, lockfileJson: string) =>
+  invoke<LockfileDriftReport>('verify_lockfile', { instanceId, lockfileJson });
+
+export const repairLockfile = (instanceId: string, lockfileJson: string) =>
+  invoke<import('./installFlow').InstallOutcome>('repair_lockfile', { instanceId, lockfileJson });
 
 export const importLockfile = (lockfileJson: string) =>
   invoke<string>('import_lockfile', { lockfileJson });
@@ -425,21 +446,10 @@ export const listModVersionsLoadMore = (instanceId: string | null, itemId: strin
 export const checkModCompat = (instanceId: string, itemId: string) =>
   invoke<string>('check_mod_compat', { instanceId, itemId });
 
-export const installModVersion = (
-  instanceId: string,
-  itemId: string,
-  candidate: ModVersionCandidate,
-) => invoke<InstalledMod>('install_mod_version', { instanceId, itemId, candidate });
-
-export const removeModFromInstance = (instanceId: string, filename: string) =>
-  invoke<void>('remove_mod_from_instance', { instanceId, filename });
 export const disableInstanceMod = (instanceId: string, filename: string) =>
   invoke<void>('disable_instance_mod', { instanceId, filename });
 export const enableInstanceMod = (instanceId: string, filename: string) =>
   invoke<void>('enable_instance_mod', { instanceId, filename });
-
-export const addManualMod = (instanceId: string, sourcePath: string) =>
-  invoke<InstalledMod>('add_manual_mod', { instanceId, sourcePath });
 
 export const exportInstancePack = (instanceId: string, format: 'json' | 'mrpack') =>
   invoke<string>('export_instance_pack', { instanceId, format });
@@ -538,13 +548,6 @@ export const listRawModrinthVersions = (instanceId: string | null, projectId: st
     projectId,
     projectType: projectType ?? null,
   });
-export const installRawModrinth = (
-  instanceId: string,
-  projectId: string,
-  candidate: RawModrinthVersionCandidate,
-  projectType?: string,
-) => invoke<InstalledMod>('install_raw_modrinth', { instanceId, projectId, candidate, projectType: projectType ?? null });
-
 export interface ModrinthProjectFull {
     id: string;
     title: string;

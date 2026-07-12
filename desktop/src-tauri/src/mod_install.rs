@@ -371,6 +371,10 @@ struct GitHubRelease {
 struct GitHubReleaseAsset {
     name: String,
     browser_download_url: String,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 /// --- Modrinth API types ---
@@ -384,6 +388,8 @@ struct ModrinthVersion {
 #[derive(Debug, Deserialize)]
 struct ModrinthFileHashes {
     sha1: Option<String>,
+    sha256: Option<String>,
+    sha512: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,6 +398,8 @@ struct ModrinthVersionFile {
     filename: String,
     primary: bool,
     hashes: Option<ModrinthFileHashes>,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 /// List available mod versions for a registry item, resolving live data from
@@ -811,6 +819,13 @@ async fn fetch_github_releases_page(
                 is_compatible: compat == "compatible",
                 version_compat: compat.to_string(),
                 sha1: None,
+                sha256: asset
+                    .digest
+                    .as_deref()
+                    .and_then(|digest| digest.strip_prefix("sha256:"))
+                    .map(str::to_string),
+                sha512: None,
+                size: asset.size,
             });
         }
     }
@@ -944,6 +959,9 @@ async fn resolve_modrinth_versions_by_id(
             is_compatible: compat == "compatible",
             version_compat: compat.to_string(),
             sha1: file.hashes.as_ref().and_then(|h| h.sha1.clone()),
+            sha256: file.hashes.as_ref().and_then(|h| h.sha256.clone()),
+            sha512: file.hashes.as_ref().and_then(|h| h.sha512.clone()),
+            size: file.size,
         });
     }
 
@@ -1092,6 +1110,7 @@ pub async fn install_mod_version(
         registry_id: Some(item_id.to_string()),
         modrinth_id: item.modrinth_id.clone(),
         source: "registry".to_string(),
+        source_url: Some(candidate.download_url.clone()),
         version: Some(candidate.version.clone()),
         sha256: installed_sha256,
         installed_at: chrono::Utc::now().to_rfc3339(),
@@ -1434,6 +1453,7 @@ pub async fn add_manual_mod(
             registry_id: None,
             modrinth_id: None,
             source: "manual_drag_drop".to_string(),
+            source_url: None,
             version: None,
             sha256,
             installed_at: chrono::Utc::now().to_rfc3339(),
@@ -2167,6 +2187,7 @@ async fn import_mrpack(app: &tauri::AppHandle, source_path: &str) -> LauncherRes
                     registry_id: None,
                     modrinth_id: None,
                     source: "modrinth_pack".to_string(),
+                    source_url: downloads.first().and_then(|value| value.as_str()).map(str::to_string),
                     version: None,
                     sha256,
                     installed_at: now.clone(),
@@ -2194,6 +2215,7 @@ async fn import_mrpack(app: &tauri::AppHandle, source_path: &str) -> LauncherRes
                     registry_id: None,
                     modrinth_id: None,
                     source: "modrinth_pack_bundle".to_string(),
+                    source_url: None,
                     version: None,
                     sha256,
                     installed_at: now.clone(),

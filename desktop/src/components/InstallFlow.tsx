@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer } from 'react';
+import { useCallback, useEffect, useReducer, useState } from 'react';
 import {
   type InstallIntent,
   type ResolvedInstallPlan,
@@ -6,10 +6,12 @@ import {
   type ProgressEvent,
   type DepConflict,
   type ResolvedDep,
-  CancellationToken,
   resolveInstallPlan,
+  applyInstallPlan,
+  cancelInstall,
   subscribeProgress,
 } from '../lib/installFlow';
+import { formatError, restoreSnapshot } from '../lib/tauri';
 import {
   Dialog,
   DialogContent,
@@ -33,7 +35,7 @@ interface PlanChoices {
 type FlowState =
   | { phase: 'resolving'; plan?: ResolvedInstallPlan; error?: string }
   | { phase: 'review'; plan: ResolvedInstallPlan; choices: PlanChoices; dirty: boolean }
-  | { phase: 'executing'; plan: ResolvedInstallPlan; token: CancellationToken; progress: ProgressEvent }
+  | { phase: 'executing'; plan: ResolvedInstallPlan; progress: ProgressEvent }
   | { phase: 'result'; outcome: InstallOutcome }
   | { phase: 'error'; message: string; retryable: boolean }
   | { phase: 'closed' };
@@ -97,7 +99,6 @@ function flowReducer(state: FlowState, action: FlowAction): FlowState {
       return {
         phase: 'executing',
         plan: state.plan,
-        token: new CancellationToken(),
         progress: {
           planId: state.plan.fingerprint,
           phase: 'staging' as const,
@@ -166,12 +167,14 @@ export function InstallFlow({
   open,
 }: InstallFlowProps) {
   const [state, dispatch] = useReducer(flowReducer, { phase: 'closed' } as FlowState);
+  const [resolutionIntent, setResolutionIntent] = useState(intent);
 
   // Start resolving on first open.
   useEffect(() => {
     if (!open) return;
+    setResolutionIntent(intent);
     dispatch({ type: 'retry' });
-  }, [open]);
+  }, [open, intent]);
 
   // Resolve when entering resolving phase.
   useEffect(() => {
@@ -179,52 +182,75 @@ export function InstallFlow({
     let cancelled = false;
     (async () => {
       try {
-        const plan = await resolveInstallPlan(intent);
+        const plan = await resolveInstallPlan(resolutionIntent);
         if (!cancelled) dispatch({ type: 'resolved', plan });
       } catch (e) {
-        if (!cancelled) dispatch({ type: 'resolve-error', error: String(e) });
+        if (!cancelled) dispatch({ type: 'resolve-error', error: formatError(e) });
       }
     })();
     return () => { cancelled = true; };
-  }, [state.phase, intent]);
-
-  // Subscribe to progress when executing.
-  useEffect(() => {
-    if (state.phase !== 'executing') return;
-    let unsub: (() => void) | undefined;
-    (async () => {
-      unsub = await subscribeProgress(state.plan.fingerprint, (event) => {
-        dispatch({ type: 'progress', event });
-      });
-    })();
-    return () => { unsub?.(); };
-  }, [state.phase, state.phase === 'executing' ? state.plan.fingerprint : null]);
+  }, [state.phase, resolutionIntent]);
 
   // Execute plan.
   useEffect(() => {
     if (state.phase !== 'executing') return;
     let cancelled = false;
+    let unsubscribe: (() => void) | undefined;
     (async () => {
       try {
-        const outcome = await invokeApplyPlan(state.plan);
+        unsubscribe = await subscribeProgress(state.plan.fingerprint, (event) => {
+          dispatch({ type: 'progress', event });
+        });
+        const outcome = await applyInstallPlan(state.plan);
         if (!cancelled) dispatch({ type: 'outcome', outcome });
       } catch (e) {
-        if (!cancelled) dispatch({ type: 'fail', message: String(e), retryable: false });
+        if (!cancelled) dispatch({ type: 'fail', message: formatError(e), retryable: false });
       }
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, [state.phase]);
 
   const handleCancel = useCallback(() => {
     if (state.phase === 'executing') {
-      state.token.cancel();
+      void cancelInstall(state.plan.fingerprint).catch(() => {
+        // The executor may already be past its cancellable staging phase.
+      });
       return; // Dialog stays open — user must wait for outcome.
     }
-    if (state.phase === 'review' || state.phase === 'error') {
+    if (state.phase === 'review') {
+      void cancelInstall(state.plan.fingerprint).catch(() => {});
+      dispatch({ type: 'close' });
+      onClose?.();
+      return;
+    }
+    if (state.phase === 'resolving' || state.phase === 'error') {
       dispatch({ type: 'close' });
       onClose?.();
     }
   }, [state, onClose]);
+
+  const handleConfirm = useCallback(() => {
+    if (state.phase !== 'review') return;
+    if (state.dirty || state.plan.pendingChoices.length > 0) {
+      setResolutionIntent({
+        ...resolutionIntent,
+        optionalDeps: {
+          type: 'include',
+          deps: [...state.choices.optionalIncluded].sort(),
+        },
+        overrides: {
+          ...resolutionIntent.overrides,
+          forceConflictResolution: Object.fromEntries(state.choices.conflictResolutions),
+        },
+      });
+      dispatch({ type: 'retry' });
+      return;
+    }
+    dispatch({ type: 'confirm' });
+  }, [state, resolutionIntent]);
 
   const handleClose = useCallback(() => {
     dispatch({ type: 'close' });
@@ -241,7 +267,7 @@ export function InstallFlow({
           choices={state.choices}
           onToggleOptional={(id, inc) => dispatch({ type: 'patch-choice', modJarId: id, included: inc })}
           onResolveConflict={(id, res) => dispatch({ type: 'resolve-conflict', conflictId: id, resolution: res })}
-          onConfirm={() => dispatch({ type: 'confirm' })}
+          onConfirm={handleConfirm}
           onCancel={handleCancel}
         />;
       case 'executing':
@@ -249,6 +275,7 @@ export function InstallFlow({
       case 'result':
         return <ResultView
           outcome={state.outcome}
+          instanceId={intent.targetInstance}
           onOpenInstance={() => onOpenInstance?.(intent.targetInstance)}
           onClose={handleClose}
         />;
@@ -265,9 +292,9 @@ export function InstallFlow({
   };
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose?.(); }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) handleCancel(); }}>
       <DialogContent className="max-w-2xl">
-        <DialogTitle>Install Mod</DialogTitle>
+        <DialogTitle>Review Instance Changes</DialogTitle>
         <DialogDescription>
           {instanceName}
         </DialogDescription>
@@ -305,8 +332,20 @@ function ReviewView({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
-  const canInstall = plan.blockingErrors.length === 0 && plan.pendingChoices.length === 0;
-  const hasUnresolvedBlockingConflict = plan.conflicts.some((c) => c.blocking && !c.chosen);
+  const canInstall = plan.blockingErrors.length === 0;
+  const hasUnresolvedBlockingConflict = plan.conflicts.some(
+    (conflict) => conflict.blocking
+      && !conflict.chosen
+      && !choices.conflictResolutions.has(conflict.conflictId),
+  );
+  const needsReplan = plan.pendingChoices.length > 0;
+  const actionLabel = plan.intent.action.type === 'remove'
+    ? 'Remove Safely'
+    : plan.intent.action.type === 'batch-update'
+      ? 'Apply Updates'
+      : plan.intent.action.type === 'batch-install'
+        ? 'Install Batch'
+        : 'Install';
 
   return (
     <div className="space-y-4">
@@ -373,7 +412,13 @@ function ReviewView({
           disabled={!canInstall || hasUnresolvedBlockingConflict}
           className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
-          {hasUnresolvedBlockingConflict ? 'Resolve Conflicts First' : canInstall ? 'Install' : 'Cannot Install'}
+          {hasUnresolvedBlockingConflict
+            ? 'Resolve Conflicts First'
+            : !canInstall
+              ? 'Cannot Apply'
+              : needsReplan
+                ? 'Review Selected Changes'
+                : actionLabel}
         </button>
       </div>
     </div>
@@ -451,43 +496,98 @@ function ProgressView({ progress, onCancel }: { progress: ProgressEvent; onCance
   );
 }
 
-function ResultView({ outcome, onOpenInstance, onClose }: {
+function ResultView({ outcome, instanceId, onOpenInstance, onClose }: {
   outcome: InstallOutcome;
+  instanceId: string;
   onOpenInstance: () => void;
   onClose: () => void;
 }) {
+  const [rollbackState, setRollbackState] = useState<'idle' | 'restoring' | 'restored'>('idle');
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const snapshotId =
+    outcome.type === 'success' || outcome.type === 'health-rollback' || outcome.type === 'failed'
+      ? outcome.snapshotId
+      : undefined;
+  const canRestore =
+    rollbackState !== 'restored'
+    && (outcome.type === 'success'
+      || (outcome.type === 'failed' && Boolean(outcome.snapshotId) && !outcome.rollbackPerformed));
+
+  const rollback = async () => {
+    if (!snapshotId) return;
+    setRollbackState('restoring');
+    setRollbackError(null);
+    try {
+      await restoreSnapshot(instanceId, snapshotId);
+      setRollbackState('restored');
+    } catch (cause) {
+      setRollbackState('idle');
+      setRollbackError(formatError(cause));
+    }
+  };
+
   return (
     <div className="space-y-4 py-4">
       {outcome.type === 'success' && (
         <>
           <div className="rounded-lg bg-green-500/10 p-3 text-sm text-green-700 dark:text-green-300">
-            Install complete. {outcome.installedItems.length} mods installed.
+            All verified changes were applied successfully.
           </div>
-          <div className="flex justify-end gap-2">
-            <button onClick={onClose} className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent">Close</button>
-            <button onClick={onOpenInstance} className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">Open Instance</button>
-          </div>
+          <p className="text-xs text-muted-foreground">
+            Recovery snapshot: {outcome.snapshotId}
+          </p>
         </>
+      )}
+      {outcome.type === 'health-rollback' && (
+        <div className="rounded-lg bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          The health scan found blockers, so Agora restored the recovery snapshot. No planned changes remain active.
+        </div>
       )}
       {outcome.type === 'failed' && (
         <>
           <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{outcome.error}</div>
-          {outcome.snapshotId && (
-            <p className="text-xs text-muted-foreground">Snapshot {outcome.snapshotId} available for rollback.</p>
+          {outcome.rollbackPerformed && (
+            <p className="text-xs text-muted-foreground">The recovery snapshot was restored automatically.</p>
           )}
-          <div className="flex justify-end">
-            <button onClick={onClose} className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent">Close</button>
-          </div>
+          {outcome.snapshotId && !outcome.rollbackPerformed && (
+            <p className="text-xs text-muted-foreground">Snapshot {outcome.snapshotId} is available for recovery.</p>
+          )}
         </>
       )}
       {outcome.type === 'cancelled' && (
-        <>
-          <div className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">Install cancelled.</div>
-          <div className="flex justify-end">
-            <button onClick={onClose} className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent">Close</button>
-          </div>
-        </>
+        <div className="rounded-lg bg-muted p-3 text-sm text-muted-foreground">
+          The operation was cancelled before live instance changes were committed.
+        </div>
       )}
+      {rollbackState === 'restored' && (
+        <div className="rounded-lg bg-green-500/10 p-3 text-sm text-green-700 dark:text-green-300">
+          The recovery snapshot was restored.
+        </div>
+      )}
+      {rollbackError && (
+        <div className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">
+          Restore failed: {rollbackError}
+        </div>
+      )}
+      <div className="flex justify-end gap-2">
+        <button onClick={onClose} className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent">
+          Close
+        </button>
+        {canRestore && (
+          <button
+            onClick={() => { void rollback(); }}
+            disabled={rollbackState === 'restoring'}
+            className="rounded-lg border border-destructive/40 px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
+          >
+            {rollbackState === 'restoring' ? 'Restoring…' : 'Roll Back'}
+          </button>
+        )}
+        {(outcome.type === 'success' || outcome.type === 'health-rollback' || rollbackState === 'restored') && (
+          <button onClick={onOpenInstance} className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90">
+            Open Instance
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -518,15 +618,4 @@ function formatBytes(bytes: number): string {
   if (bytes >= 1_000_000) return `${(bytes / 1_000_000).toFixed(1)} MB`;
   if (bytes >= 1_000) return `${(bytes / 1_000).toFixed(1)} KB`;
   return `${bytes} B`;
-}
-
-// Stub invoke — disabled until C2 pipeline is production-ready.
-// Returns a hard error so no caller can accidentally proceed.
-async function invokeApplyPlan(_plan: ResolvedInstallPlan): Promise<InstallOutcome> {
-  await new Promise((r) => setTimeout(r, 100));
-  return {
-    type: 'failed',
-    error: 'Install pipeline is under active development (C2). Please use the legacy install flow.',
-    rollbackPerformed: false,
-  };
 }
