@@ -299,9 +299,32 @@ async function navigateToInstanceEditor(page: Page) {
 }
 
 async function openReproducibleTab(page: Page) {
-  await page.getByRole('button', { name: 'Reproducible' }).click();
-  await expect(page.getByRole('heading', { name: 'Reproducible Instance' })).toBeVisible();
+  await page.getByRole('button', { name: 'Export', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Export Instance' })).toBeVisible();
 }
+
+test('consolidates mrpack, Agora JSON, and lockfile exports with guidance', async ({ page }) => {
+  await installReproducibleMock(page);
+  await navigateToInstanceEditor(page);
+  await openReproducibleTab(page);
+
+  await expect(page.getByRole('heading', { name: 'Export as Modrinth Pack (.mrpack)' })).toBeVisible();
+  await expect(page.getByText('sharing your modpack with other launchers or publishing to Modrinth')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Export as Agora Pack (.json)' })).toBeVisible();
+  await expect(page.getByText('backing up your mod selection or sharing with other Agora users')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Export Reproduction Lockfile' })).toBeVisible();
+  await expect(page.getByText('forensic reproduction, drift detection, and bit-identical cloning')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Export .mrpack' }).click();
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __commandArgs: Record<string, Record<string, unknown>> }
+  ).__commandArgs.export_instance_pack?.format)).toBe('mrpack');
+
+  await page.getByRole('button', { name: 'Export agora-pack.json' }).click();
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __commandArgs: Record<string, Record<string, unknown>> }
+  ).__commandArgs.export_instance_pack?.format)).toBe('json');
+});
 
 // ---------------------------------------------------------------------------
 // Tests — Textarea and actions
@@ -905,9 +928,8 @@ test.describe('InstanceEditor — Reproducible tab: tampered and future-schema e
     await textarea.fill('{"fixed": true}');
     await expect(textarea).toHaveValue('{"fixed": true}');
 
-    // Error remains until a new action clears it — verify report and notice are null
-    // The error should still be visible
-    await expect(page.getByText('Lockfile verification failed: corrupt schema version')).toBeVisible();
+    // Editing starts a new recovery attempt, so the stale backend error clears.
+    await expect(page.getByText('Lockfile verification failed: corrupt schema version')).toHaveCount(0);
   });
 
   test('repair error from backend leaves UI interactive and textarea intact', async ({ page }) => {

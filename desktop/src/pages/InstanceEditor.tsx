@@ -66,7 +66,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const { advancedMode } = useAdvancedMode();
 
   // Sub-sidebar active tab
-  const [activeTab, setActiveTab] = useState<'mods' | 'resourcepacks' | 'shaders' | 'datapacks' | 'snapshots' | 'loadout-profiles' | 'import' | 'reproducible' | 'console' | 'java-args' | 'advanced'>('mods');
+  const [activeTab, setActiveTab] = useState<'mods' | 'resourcepacks' | 'shaders' | 'datapacks' | 'snapshots' | 'loadout-profiles' | 'import' | 'export' | 'console' | 'java-args' | 'advanced'>('mods');
 
   // Snapshots state (Phase 6)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
@@ -705,18 +705,10 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
               📥 Import Pack
             </button>
             <button
-              onClick={() => handleExportPack('json')}
-              disabled={exportBusy}
-              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+              onClick={() => setActiveTab('export')}
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium"
             >
-              {exportBusy ? 'Exporting…' : 'Export as JSON'}
-            </button>
-            <button
-              onClick={() => handleExportPack('mrpack')}
-              disabled={exportBusy}
-              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
-            >
-              {exportBusy ? 'Exporting…' : 'Export as .mrpack'}
+              ↓ Export…
             </button>
           </div>
         </div>
@@ -757,7 +749,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
       {/* Sub-sidebar tabs */}
       <div className="flex border-b border-border gap-0">
-        {(['mods', 'resourcepacks', 'shaders', 'datapacks', 'snapshots', 'loadout-profiles', 'import', 'reproducible', 'console'] as const).map((tab) => (
+        {(['mods', 'resourcepacks', 'shaders', 'datapacks', 'snapshots', 'loadout-profiles', 'import', 'export', 'console'] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -768,7 +760,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 : 'border-transparent text-muted-foreground hover:text-foreground',
             ].join(' ')}
           >
-            {tab === 'mods' ? `Mods (${mods.length})` : tab === 'resourcepacks' ? `Resource Packs (${manifest?.resourcepacks?.length ?? 0})` : tab === 'shaders' ? `Shaders (${manifest?.shaders?.length ?? 0})` : tab === 'datapacks' ? `Data Packs (${manifest?.datapacks?.length ?? 0})` : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : tab === 'import' ? 'Import' : tab === 'reproducible' ? 'Reproducible' : 'Console'}
+            {tab === 'mods' ? `Mods (${mods.length})` : tab === 'resourcepacks' ? `Resource Packs (${manifest?.resourcepacks?.length ?? 0})` : tab === 'shaders' ? `Shaders (${manifest?.shaders?.length ?? 0})` : tab === 'datapacks' ? `Data Packs (${manifest?.datapacks?.length ?? 0})` : tab === 'snapshots' ? 'Snapshots' : tab === 'loadout-profiles' ? 'Loadout Profiles' : tab === 'import' ? 'Import' : tab === 'export' ? 'Export' : 'Console'}
           </button>
         ))}
         {advancedMode && (
@@ -1663,62 +1655,133 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         </section>
       )}
 
-      {activeTab === 'reproducible' && (
-        <section className="rounded-xl border border-border bg-card p-4 space-y-3">
-          <h3 className="font-semibold text-sm">Reproducible Instance</h3>
-          <p className="text-xs text-muted-foreground">
-            Export a privacy-preserving lockfile that records exact hashes, sources, and versions.
-            Any installation with the same lockfile reproduces identical artifacts. Private config
-            contents are never included.
-          </p>
-
-          <div className="flex flex-wrap gap-2">
-            <button
-              onClick={() => void handleExportLockfile()}
-              disabled={lockfileBusy !== null}
-              className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-            >
-              {lockfileBusy === 'export' ? 'Exporting…' : 'Export Lockfile'}
-            </button>
-            {lockfileText && (
-              <button
-                onClick={() => void handleCopyLockfile()}
-                disabled={lockfileBusy !== null}
-                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
-              >
-                {lockfileBusy === 'copy' ? 'Copying…' : 'Copy'}
-              </button>
-            )}
-            {lockfileText && (
-              <button
-                onClick={() => {
-                  setLockfileText('');
-                  setLockfileReport(null);
-                  setLockfileNotice(null);
-                }}
-                disabled={lockfileBusy !== null}
-                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
-              >
-                Clear
-              </button>
-            )}
+      {activeTab === 'export' && (
+        <section className="space-y-4">
+          <div>
+            <h3 className="font-semibold text-sm">Export Instance</h3>
+            <p className="text-xs text-muted-foreground mt-1">
+              Choose how to share or back up this instance. Each format serves a different
+              purpose — pick the one that matches your goal.
+            </p>
           </div>
 
-          <textarea
-            value={lockfileText}
-            onChange={(event) => {
-              setLockfileText(event.target.value);
-              setLockfileReport(null);
-              setLockfileNotice(null);
-            }}
-            rows={12}
-            aria-label="Instance lockfile JSON"
-            placeholder="Export this instance or paste an Agora lockfile JSON here…"
-            className="w-full rounded-lg border border-input bg-background p-3 text-xs font-mono resize-y"
-          />
+          {/* Card 1: mrpack (Recommended) */}
+          <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <h4 className="font-semibold text-sm">Export as Modrinth Pack (.mrpack)</h4>
+              <span className="rounded-full bg-primary/10 text-primary text-[10px] font-semibold px-2 py-0.5 shrink-0">
+                Recommended
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The industry-standard format for sharing Minecraft modpacks. Compatible with
+              Modrinth, Prism Launcher, and other launchers. Contains mod references, config
+              files, and overrides — not the mod files themselves.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">Best for:</span> sharing your
+              modpack with other launchers or publishing to Modrinth.
+            </p>
+            <button
+              onClick={() => handleExportPack('mrpack')}
+              disabled={exportBusy}
+              className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+            >
+              {exportBusy ? 'Exporting…' : 'Export .mrpack'}
+            </button>
+          </div>
 
-          {lockfileText.trim() && (
-            <>
+          {/* Card 2: Agora JSON pack */}
+          <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <h4 className="font-semibold text-sm">Export as Agora Pack (.json)</h4>
+              <span className="rounded-full bg-muted text-muted-foreground text-[10px] font-semibold px-2 py-0.5 shrink-0">
+                Agora native
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Agora's native pack format. Contains the full mod list with exact versions and
+              source references. Reimport into any Agora instance to recreate this loadout.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">Best for:</span> backing up your
+              mod selection or sharing with other Agora users.
+            </p>
+            <button
+              onClick={() => handleExportPack('json')}
+              disabled={exportBusy}
+              className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+            >
+              {exportBusy ? 'Exporting…' : 'Export agora-pack.json'}
+            </button>
+          </div>
+
+          {/* Card 3: Lockfile (Advanced) */}
+          <div className="rounded-xl border border-border bg-card p-4 space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <h4 className="font-semibold text-sm">Export Reproduction Lockfile</h4>
+              <span className="rounded-full bg-muted text-muted-foreground text-[10px] font-semibold px-2 py-0.5 shrink-0">
+                Advanced
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              A privacy-preserving lockfile recording SHA-256 hashes, exact download sources,
+              mod versions, and all settings. Any installation with the same lockfile reproduces
+              identical artifacts. Private config contents are never included.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">Best for:</span> forensic
+              reproduction, drift detection, and bit-identical cloning.
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => void handleExportLockfile()}
+                disabled={lockfileBusy !== null}
+                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+              >
+                {lockfileBusy === 'export' ? 'Exporting…' : 'Export Lockfile'}
+              </button>
+              {lockfileText.trim() && (
+                <>
+                  <button
+                    onClick={() => void handleCopyLockfile()}
+                    disabled={lockfileBusy !== null}
+                    className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                  >
+                    {lockfileBusy === 'copy' ? 'Copying…' : 'Copy'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      setLockfileText('');
+                      setLockfileReport(null);
+                      setLockfileNotice(null);
+                      setError(null);
+                    }}
+                    disabled={lockfileBusy !== null}
+                    className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+                  >
+                    Clear
+                  </button>
+                </>
+              )}
+            </div>
+
+            <textarea
+              value={lockfileText}
+              onChange={(event) => {
+                setLockfileText(event.target.value);
+                setLockfileReport(null);
+                setLockfileNotice(null);
+                setError(null);
+              }}
+              rows={12}
+              aria-label="Instance lockfile JSON"
+              placeholder="Export this instance or paste an Agora lockfile JSON here…"
+              className="w-full rounded-lg border border-input bg-background p-3 text-xs font-mono resize-y"
+            />
+
+            {lockfileText.trim() ? (
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => void handleVerifyLockfile()}
@@ -1743,31 +1806,29 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   {lockfileBusy === 'clone' ? 'Cloning…' : 'Clone'}
                 </button>
               </div>
-            </>
-          )}
+            ) : (
+              <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
+                Export this instance or paste a received lockfile to verify, repair, or clone it.
+              </div>
+            )}
 
-          {lockfileNotice && (
-            <div className="rounded-lg bg-accent/20 p-3 text-xs text-muted-foreground">{lockfileNotice}</div>
-          )}
+            {lockfileNotice && (
+              <div className="rounded-lg bg-accent/20 p-3 text-xs text-muted-foreground">{lockfileNotice}</div>
+            )}
 
-          {lockfileReport && (
-            <div className="rounded-lg border border-border bg-card p-3 space-y-1 text-xs">
-              <p className="font-medium">
-                {lockfileReport.status === 'in-sync' ? 'In sync' : 'Drift detected'}
-              </p>
-              {lockfileReport.differences?.map((diff, idx) => (
-                <p key={idx} className="text-muted-foreground">
-                  {diff.path}: {diff.kind} {diff.expectedSha256 && `(expected ${diff.expectedSha256})`} {diff.actualSha256 && `(got ${diff.actualSha256})`}
+            {lockfileReport && (
+              <div className="rounded-lg border border-border bg-background p-3 space-y-1 text-xs">
+                <p className="font-medium">
+                  {lockfileReport.status === 'in-sync' ? 'In sync' : 'Drift detected'}
                 </p>
-              ))}
-            </div>
-          )}
-
-          {!lockfileText.trim() && (
-            <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-              Export this instance or paste a received lockfile to verify, repair, or clone it.
-            </div>
-          )}
+                {lockfileReport.differences?.map((diff, idx) => (
+                  <p key={idx} className="text-muted-foreground">
+                    {diff.path}: {diff.kind} {diff.expectedSha256 && `(expected ${diff.expectedSha256})`} {diff.actualSha256 && `(got ${diff.actualSha256})`}
+                  </p>
+                ))}
+              </div>
+            )}
+          </div>
         </section>
       )}
 

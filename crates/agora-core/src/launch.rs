@@ -173,6 +173,7 @@ pub struct LoaderInfo {
 
 /// Check a network enable setting from the local state DB.
 /// Opens a temporary connection to `local_state.db` under the standard data dir.
+/// If the DB file doesn't exist yet, the feature is allowed (default-enabled).
 fn check_network_enabled(setting_key: &str, disabled_msg: &str) -> LauncherResult<()> {
     let app_data_dir = dirs::data_local_dir()
         .ok_or_else(|| LauncherError::Generic {
@@ -181,6 +182,10 @@ fn check_network_enabled(setting_key: &str, disabled_msg: &str) -> LauncherResul
         })?
         .join("agora");
     let db_path = app_data_dir.join("local_state.db");
+    if !db_path.exists() {
+        // DB hasn't been initialised yet — feature is enabled by default.
+        return Ok(());
+    }
     let conn = db::local_state_connection(&db_path).map_err(|e| LauncherError::Generic {
         code: "ERR_DB".into(),
         message: e.to_string(),

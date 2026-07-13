@@ -892,7 +892,8 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
         }
         Commands::Auth { action } => match action {
             AuthCmd::Login => {
-                let flow = agora_core::msa::begin_login(client).await?;
+                let db_path = data_dir.join("local_state.db");
+                let flow = agora_core::msa::begin_login(client, &db_path).await?;
                 println!("Open this URL in your browser:");
                 println!("{}", flow.auth_uri);
                 println!();
@@ -906,7 +907,7 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 }
                 let (code, state) = extract_auth_redirect(input)?;
                 let credentials =
-                    agora_core::msa::finish_login(client, &code, &flow, Some(&state)).await?;
+                    agora_core::msa::finish_login(client, &code, &flow, Some(&state), &db_path).await?;
                 if json {
                     println!(
                         "{}",

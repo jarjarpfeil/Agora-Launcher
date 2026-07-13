@@ -2759,11 +2759,15 @@ pub struct MsaBeginLoginResponse {
 /// `msa_finish_login` with the `?code=` from the redirect URL.
 #[tauri::command]
 pub async fn msa_begin_login(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<MsaBeginLoginResponse> {
+    let db_path = crate::paths::local_state_db_path(&app).map_err(|e| LauncherError::Generic {
+        code: "ERR_DB".into(),
+        message: e.to_string(),
+    })?;
     let mut s = state.lock().await;
-    let flow = agora_core::msa::begin_login(&s.client).await?;
+    let flow = agora_core::msa::begin_login(&s.client, &db_path).await?;
     let auth_uri = flow.auth_uri.clone();
     s.login_flow = Some(flow);
     Ok(MsaBeginLoginResponse { auth_uri })
@@ -2772,18 +2776,22 @@ pub async fn msa_begin_login(
 /// Complete the MSA login flow with the auth code from the browser redirect.
 #[tauri::command]
 pub async fn msa_finish_login(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
     code: String,
     oauth_state: Option<String>,
 ) -> LauncherResult<MsaAccountStatus> {
+    let db_path = crate::paths::local_state_db_path(&app).map_err(|e| LauncherError::Generic {
+        code: "ERR_DB".into(),
+        message: e.to_string(),
+    })?;
     let mut s = state.lock().await;
     let flow = s.login_flow.take().ok_or_else(|| LauncherError::Generic {
         code: "ERR_MSA_NO_FLOW".into(),
         message: "No login flow in progress. Call msa_begin_login first.".into(),
     })?;
     let creds =
-        agora_core::msa::finish_login(&s.client, &code, &flow, oauth_state.as_deref()).await?;
+        agora_core::msa::finish_login(&s.client, &code, &flow, oauth_state.as_deref(), &db_path).await?;
     Ok(MsaAccountStatus::from(&creds))
 }
 
@@ -2800,15 +2808,19 @@ pub async fn msa_get_status(
 /// Refresh expired MSA credentials.
 #[tauri::command]
 pub async fn msa_refresh(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<MsaAccountStatus> {
+    let db_path = crate::paths::local_state_db_path(&app).map_err(|e| LauncherError::Generic {
+        code: "ERR_DB".into(),
+        message: e.to_string(),
+    })?;
     let s = state.lock().await;
     let creds = agora_core::msa::load_credentials()?.ok_or_else(|| LauncherError::Generic {
         code: "ERR_MSA_NOT_AUTHENTICATED".into(),
         message: "Not signed in. Use msa_begin_login first.".into(),
     })?;
-    let refreshed = agora_core::msa::refresh_credentials(&s.client, &creds).await?;
+    let refreshed = agora_core::msa::refresh_credentials(&s.client, &creds, &db_path).await?;
     Ok(MsaAccountStatus::from(&refreshed))
 }
 
