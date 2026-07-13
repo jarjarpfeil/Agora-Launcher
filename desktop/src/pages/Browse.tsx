@@ -3,6 +3,7 @@ import { List, LayoutGrid } from 'lucide-react';
 import {
   browseSearch,
   browseLoadMore,
+  batchCheckCompat,
   forYouItems,
   checkInstanceUpdates,
   formatError,
@@ -49,7 +50,7 @@ interface ItemContext {
   instanceName: string;
   minecraftVersion: string;
   loader: string;
-  compatible: boolean;
+  compatibility: 'compatible' | 'major_match' | '';
   installed: boolean;
   updateAvailable: boolean;
   whyRecommended: string | null;
@@ -263,6 +264,7 @@ function BrowseContent({
   const [activeInstanceId, setActiveInstanceId] = useState('');
   const [activeInstance, setActiveInstance] = useState<InstanceDetail | null>(null);
   const [activeUpdateIds, setActiveUpdateIds] = useState<Set<string>>(new Set());
+  const [compatibilityById, setCompatibilityById] = useState<Record<string, string>>({});
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState<string | null>(null);
 
@@ -279,6 +281,7 @@ function BrowseContent({
     setContextError(null);
     setActiveInstance(null);
     setActiveUpdateIds(new Set());
+    setCompatibilityById({});
     if (!instanceId) return;
     setContextLoading(true);
     try {
@@ -297,6 +300,23 @@ function BrowseContent({
       setContextLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!activeInstance || items.length === 0) {
+      setCompatibilityById({});
+      return;
+    }
+    let cancelled = false;
+    const itemIds = [...new Set(items.map((item) => item.id))];
+    void batchCheckCompat(activeInstance.row.instance_id, itemIds)
+      .then((result) => {
+        if (!cancelled) setCompatibilityById(result);
+      })
+      .catch((cause) => {
+        if (!cancelled) setContextError(formatError(cause));
+      });
+    return () => { cancelled = true; };
+  }, [activeInstance, items]);
 
   const handleSortChange = (next: SortOption) => {
     setSort(next);
@@ -336,14 +356,12 @@ function BrowseContent({
       instanceName: activeInstance.row.name,
       minecraftVersion: activeInstance.row.minecraft_version,
       loader: activeInstance.row.loader,
-      compatible: mcVersion === activeInstance.row.minecraft_version
-        && loader === activeInstance.row.loader,
+      compatibility: (compatibilityById[item.id] ?? '') as ItemContext['compatibility'],
       installed,
       updateAvailable: activeUpdateIds.has(item.id),
       whyRecommended: sort === 'for_you'
-        && mcVersion === activeInstance.row.minecraft_version
-        && loader === activeInstance.row.loader
-        ? `Recommended from Agora's curated ranking for ${activeInstance.row.loader} ${activeInstance.row.minecraft_version}.`
+        ? item.registryItem?.recommendation_reason
+          ?? `Recommended by Agora's curated score for ${activeInstance.row.loader} ${activeInstance.row.minecraft_version}.`
         : null,
     };
   };
@@ -892,9 +910,14 @@ function ContextLabels({ item, context }: { item: BrowseItem; context: ItemConte
       <span className="rounded-full border border-border px-2 py-0.5 text-muted-foreground">
         Source: {item.source === 'curated' ? 'Agora registry' : 'Modrinth'}
       </span>
-      {context?.compatible && (
+      {context?.compatibility === 'compatible' && (
         <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-green-700 dark:text-green-300">
           Compatible with {context.instanceName} · {context.loader} · MC {context.minecraftVersion}
+        </span>
+      )}
+      {context?.compatibility === 'major_match' && (
+        <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-700 dark:text-amber-300">
+          May work with {context.instanceName} · same major Minecraft version
         </span>
       )}
       {context?.installed && (

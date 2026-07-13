@@ -17,13 +17,11 @@ use std::collections::HashSet;
 // ---------------------------------------------------------------------------
 
 pub use agora_core::registry::{
-    browse_items, get_item_by_id, list_categories, pack_mods_for_pack, list_audit_log,
-    list_under_review_items, list_recent_resolutions, list_mod_reviews,
-    get_manifest_dependencies, get_all_mod_aliases, resolve_alias, get_known_conflicts,
-    get_curated_annotation,
-    row_to_item, REGISTRY_ITEM_COLUMNS,
-    RegistryItem, SortOption, CategoryInfo, PackModRow, AuditLogEntry, UnderReviewItem,
-    ModReview, KnownConflict, ManifestDeps, CuratedAnnotation,
+    browse_items, get_all_mod_aliases, get_curated_annotation, get_item_by_id, get_known_conflicts,
+    get_manifest_dependencies, list_audit_log, list_categories, list_mod_reviews,
+    list_recent_resolutions, list_under_review_items, pack_mods_for_pack, resolve_alias,
+    row_to_item, AuditLogEntry, CategoryInfo, CuratedAnnotation, KnownConflict, ManifestDeps,
+    ModReview, PackModRow, RegistryItem, SortOption, UnderReviewItem, REGISTRY_ITEM_COLUMNS,
 };
 
 // ---------------------------------------------------------------------------
@@ -104,12 +102,16 @@ pub fn for_you_items<R: tauri::Runtime>(
         let interest_sql = format!(
             "SELECT DISTINCT category_id FROM item_categories WHERE item_id IN ({installed_ph})"
         );
-        let mut stmt = conn.prepare(&interest_sql).map_err(|e| LauncherError::Generic {
-            code: "ERR_INVALID_QUERY".to_string(),
-            message: e.to_string(),
-        })?;
-        let interest_params: Vec<Box<dyn rusqlite::ToSql>> =
-            installed.iter().map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>).collect();
+        let mut stmt = conn
+            .prepare(&interest_sql)
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?;
+        let interest_params: Vec<Box<dyn rusqlite::ToSql>> = installed
+            .iter()
+            .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
         let interest_rows = stmt
             .query_map(rusqlite::params_from_iter(interest_params.iter()), |row| {
                 let cat: String = row.get(0)?;
@@ -139,7 +141,31 @@ pub fn for_you_items<R: tauri::Runtime>(
     // No interest signal at all → degrade to net_score browse.
     if interest.is_empty() {
         let sort = SortOption::NetScore;
-        return browse_items(&conn, None, None, &sort, modrinth_enabled, mc_version, loader, query, limit);
+        let mut items = browse_items(
+            &conn,
+            None,
+            None,
+            &sort,
+            modrinth_enabled,
+            mc_version,
+            loader,
+            query,
+            limit,
+        )?;
+        // Same suppression promise as the ranked path: drop already-installed
+        // items. Reachable when the user has installed mods that expose no
+        // resolvable categories (so `interest` is empty but `installed` is not).
+        if !installed.is_empty() {
+            items.retain(|item| !installed.contains(&item.id));
+        }
+        for item in &mut items {
+            item.recommendation_reason = Some(format!(
+                "Recommended by Agora's curated score (net score {}).",
+                item.net_score
+            ));
+            item.recommendation_overlap = Some(0);
+        }
+        return Ok(items);
     }
 
     // Candidate items: uninstalled items sharing >=1 interest category, ranked
@@ -172,6 +198,14 @@ pub fn for_you_items<R: tauri::Runtime>(
             );
         }
     }
+    // Suppress already-installed items (§6.2). The `installed` set was collected
+    // above; this is where it actually filters the candidate pool. Without this
+    // clause the docstring's "already-installed items are excluded" promise is
+    // silently broken and the Home "For You" card surfaces mods the user owns.
+    if !installed.is_empty() {
+        let installed_ph = installed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        where_parts.push(format!("ri.id NOT IN ({installed_ph})"));
+    }
     let where_clause = if where_parts.is_empty() {
         String::new()
     } else {
@@ -179,7 +213,7 @@ pub fn for_you_items<R: tauri::Runtime>(
     };
 
     let sql = format!(
-        "SELECT {REGISTRY_ITEM_COLUMNS}
+        "SELECT {REGISTRY_ITEM_COLUMNS}, COUNT(ic.category_id) AS recommendation_overlap
          FROM registry_items ri
          LEFT JOIN item_categories ic ON ri.id = ic.item_id AND ic.category_id IN ({interest_ph})
          {where_clause}
@@ -203,6 +237,11 @@ pub fn for_you_items<R: tauri::Runtime>(
             params.push(Box::new(ld.to_string()));
         }
     }
+    // Bindings for the `ri.id NOT IN (...)` clause above. Must be pushed in the
+    // same order that where_parts were appended (installed-suppression is last).
+    for id in &installed {
+        params.push(Box::new(id.clone()));
+    }
     params.push(Box::new(limit));
 
     let mut stmt = conn.prepare(&sql).map_err(|e| LauncherError::Generic {
@@ -210,7 +249,17 @@ pub fn for_you_items<R: tauri::Runtime>(
         message: e.to_string(),
     })?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(params.iter()), row_to_item)
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let mut item = row_to_item(row)?;
+            let overlap: i64 = row.get(24)?;
+            item.recommendation_overlap = Some(overlap);
+            item.recommendation_reason = Some(if overlap == 1 {
+                "Shares 1 category with mods installed in your instances.".to_string()
+            } else {
+                format!("Shares {overlap} categories with mods installed in your instances.")
+            });
+            Ok(item)
+        })
         .map_err(|e| LauncherError::Generic {
             code: "ERR_INVALID_QUERY".to_string(),
             message: e.to_string(),

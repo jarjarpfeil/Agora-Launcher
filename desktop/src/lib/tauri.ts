@@ -145,6 +145,8 @@ export interface RegistryItem {
   license_id: string | null;
   source_updated_at: string | null;
   modrinth_id: string | null;
+  recommendation_reason?: string | null;
+  recommendation_overlap?: number | null;
 }
 
 export interface CategoryInfo {
@@ -245,12 +247,31 @@ export const getLkgMarker = (instanceId: string) =>
 export const exportLockfile = (instanceId: string) =>
   invoke<Record<string, unknown>>('export_lockfile', { instanceId });
 
+export interface SnapshotDiffEntry {
+  path: string;
+  oldSha256: string | null;
+  newSha256: string | null;
+  oldSize: number | null;
+  newSize: number | null;
+}
+
+export interface SnapshotDiff {
+  fromId: string | null;
+  toId: string | null;
+  added: SnapshotDiffEntry[];
+  removed: SnapshotDiffEntry[];
+  modified: SnapshotDiffEntry[];
+  unchangedCount: number;
+  totalFilesA: number;
+  totalFilesB: number;
+}
+
 export const detectDrift = (instanceId: string, snapshotId: string) =>
-  invoke<Record<string, unknown>>('detect_drift', { instanceId, snapshotId });
+  invoke<SnapshotDiff>('detect_drift', { instanceId, snapshotId });
 
 export interface LockfileDriftDifference {
   path: string;
-  kind: 'added' | 'removed' | 'modified' | 'config-modified';
+  kind: 'added' | 'removed' | 'modified' | 'enabled' | 'disabled' | 'config-modified';
   expectedSha256: string | null;
   actualSha256: string | null;
 }
@@ -445,6 +466,9 @@ export const listModVersionsLoadMore = (instanceId: string | null, itemId: strin
 /// `"compatible"`, `"major_match"`, or `""` (incompatible).
 export const checkModCompat = (instanceId: string, itemId: string) =>
   invoke<string>('check_mod_compat', { instanceId, itemId });
+
+export const batchCheckCompat = (instanceId: string, itemIds: string[]) =>
+  invoke<Record<string, string>>('batch_check_compat', { instanceId, itemIds });
 
 export const disableInstanceMod = (instanceId: string, filename: string) =>
   invoke<void>('disable_instance_mod', { instanceId, filename });
@@ -809,6 +833,16 @@ export const aiGetDefaultModel = () =>
 export const getWindowsAccentColor = () =>
   invoke<string | null>('get_windows_accent_color');
 
+// --- Launcher path helpers (B3) ---
+
+/** Auto-detect the Mojang launcher executable path. */
+export const detectMojangLauncher = () =>
+  invoke<string>('detect_mojang_launcher');
+
+/** Validate that a given launcher path exists and is a valid executable. */
+export const testLauncherPath = (path: string) =>
+  invoke<boolean>('test_launcher_path', { path });
+
 // --- AI Copilot auth ---
 
 export interface CopilotDeviceFlowResponse {
@@ -906,6 +940,9 @@ export interface Snapshot {
   created_at: string;
   file_count: number;
   size_estimate: number;
+  is_lkg: boolean;
+  is_current_lkg: boolean;
+  is_pre_restore: boolean;
 }
 
 export interface LoadoutProfile {

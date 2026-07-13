@@ -585,6 +585,37 @@ mod tests {
     }
 
     #[test]
+    fn test_cancelled_launch_preserves_current_lkg() {
+        let tmp = TempDir::new().unwrap();
+        let known_good = create_test_snapshot(tmp.path(), "known-good");
+        record_launch_outcome(
+            tmp.path(),
+            Some(&known_good),
+            "launch-1",
+            LaunchOutcome::Success,
+        )
+        .unwrap();
+        let state = record_launch_outcome(
+            tmp.path(),
+            Some(&known_good),
+            "launch-2",
+            LaunchOutcome::Cancelled,
+        )
+        .unwrap();
+        assert_eq!(
+            state.current_lkg_snapshot_id.as_deref(),
+            Some(known_good.as_str())
+        );
+        assert_eq!(state.last_launch_outcome, Some(LaunchOutcome::Cancelled));
+    }
+
+    #[test]
+    fn test_read_missing_lkg_state_returns_default() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(read_lkg_state(tmp.path()).unwrap(), LkgState::default());
+    }
+
+    #[test]
     fn test_success_without_snapshot_fails_closed() {
         let tmp = TempDir::new().unwrap();
         let error = record_launch_outcome(tmp.path(), None, "launch-1", LaunchOutcome::Success)
@@ -649,6 +680,20 @@ mod tests {
         assert_eq!(diff.modified.len(), 1);
         assert_eq!(diff.modified[0].path, "mod-b.jar");
         assert_eq!(diff.unchanged_count, 0);
+    }
+
+    #[test]
+    fn test_compute_diff_identical_inputs_count_unchanged_files() {
+        let files = vec![FileEntry {
+            path: "mods/example.jar".into(),
+            sha256: "abc".into(),
+            size: 42,
+        }];
+        let diff = compute_diff(&files, &files, Some("a".into()), Some("b".into()));
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.modified.is_empty());
+        assert_eq!(diff.unchanged_count, 1);
     }
 
     #[test]
@@ -731,6 +776,23 @@ mod tests {
         };
         let evicted = retention_plan_with_sizes(&entries, &policy);
         assert_eq!(evicted, vec!["regular".to_string()]);
+    }
+
+    #[test]
+    fn test_retention_evicts_pre_restore_before_known_good() {
+        let entries = vec![
+            retention("current", 50, true, true, false),
+            retention("old-lkg", 30, true, false, false),
+            retention("pre-restore", 30, false, false, true),
+        ];
+        let policy = RetentionPolicy {
+            keep_lkg_count: 2,
+            keep_non_lkg_count: 0,
+            keep_pre_restore_count: 1,
+            size_cap_bytes: 80,
+        };
+        let evicted = retention_plan_with_sizes(&entries, &policy);
+        assert_eq!(evicted, vec!["pre-restore".to_string()]);
     }
 
     fn retention(

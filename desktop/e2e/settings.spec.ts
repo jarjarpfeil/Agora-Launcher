@@ -26,7 +26,7 @@ test('one failed setting does not cascade and settings page renders', async ({ p
           // All other settings succeed.
           if (key === 'modrinth_enabled') return Promise.resolve(true);
           if (key === 'always_pre_touch') return Promise.resolve(true);
-          if (key === 'launcher_path') return Promise.resolve('');
+            if (key === 'mojang_launcher_path') return Promise.resolve('');
           if (key === 'launch_mode') return Promise.resolve('delegation');
           if (key === 'onboarding_complete') return Promise.resolve(true);
           if (key === 'ai_chat_enabled') return Promise.resolve(true);

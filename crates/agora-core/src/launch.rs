@@ -593,7 +593,7 @@ pub fn build_launch_command(
 
 /// Full launch flow: fetch manifest → resolve version → download libs →
 /// build classpath → construct args → spawn Java.
-pub async fn spawn_java(options: &LaunchOptions) -> LauncherResult<SpawnResult> {
+async fn spawn_java_child(options: &LaunchOptions) -> LauncherResult<tokio::process::Child> {
     check_network_enabled(
         "network_adoptium_enabled",
         "Java runtime downloads are disabled in Privacy settings.",
@@ -674,22 +674,78 @@ pub async fn spawn_java(options: &LaunchOptions) -> LauncherResult<SpawnResult> 
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| LauncherError::Generic {
+    let child = cmd.spawn().map_err(|e| LauncherError::Generic {
         code: "ERR_SPAWN".into(),
         message: format!("Failed to spawn Java: {e}"),
     })?;
 
+    child.id().ok_or_else(|| LauncherError::Generic {
+        code: "ERR_NO_PID".into(),
+        message: "Spawned process has no PID.".into(),
+    })?;
+
+    Ok(child)
+}
+
+/// Spawn and detach, preserving the original launcher API.
+pub async fn spawn_java(options: &LaunchOptions) -> LauncherResult<SpawnResult> {
+    let mut child = spawn_java_child(options).await?;
     let pid = child.id().ok_or_else(|| LauncherError::Generic {
         code: "ERR_NO_PID".into(),
         message: "Spawned process has no PID.".into(),
     })?;
 
-    // Detach — we return immediately, caller manages the handle via PID
     tokio::spawn(async move {
         let _ = child.wait().await;
     });
 
     Ok(SpawnResult { pid })
+}
+
+/// Spawn Java and wait for its complete outcome. CLI launch uses this form so
+/// the process result can be classified and tied to an exact LKG snapshot.
+pub async fn spawn_java_and_wait(
+    options: &LaunchOptions,
+) -> LauncherResult<(SpawnResult, crate::lkg::LaunchOutcome)> {
+    let child = spawn_java_child(options).await?;
+    let pid = child.id().ok_or_else(|| LauncherError::Generic {
+        code: "ERR_NO_PID".into(),
+        message: "Spawned process has no PID.".into(),
+    })?;
+    let started = std::time::Instant::now();
+    let launched_at = std::time::SystemTime::now();
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| LauncherError::Generic {
+            code: "ERR_WAIT".into(),
+            message: format!("Failed while waiting for Java: {error}"),
+        })?;
+    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
+    captured.push_str(&String::from_utf8_lossy(&output.stderr));
+    let crash_report_found = options
+        .game_dir
+        .join("crash-reports")
+        .read_dir()
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .is_some_and(|modified| modified >= launched_at)
+        });
+    let outcome = crate::lkg::classify_launch(&crate::lkg::LaunchEvents {
+        exit_code: output.status.code(),
+        runtime_ms: started.elapsed().as_millis() as u64,
+        was_user_cancelled: false,
+        crash_report_found,
+        log_crash_signature_matched: crate::crash_diagnostics::triage(&captured).matched,
+    });
+    Ok((SpawnResult { pid }, outcome))
 }
 
 // ---------------------------------------------------------------------------

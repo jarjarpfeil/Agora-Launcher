@@ -31,7 +31,8 @@ interface CrashInvestigatorProps {
   manualLogText?: string | null;
   onClose: () => void;
   /** Called to re-launch the instance after disabling a suspected mod. */
-  onLaunch: () => Promise<void>;
+  /** Returns true only when the canonical launch controller actually started. */
+  onLaunch: () => Promise<boolean>;
 }
 
 const SIGNAL_LABELS: Record<string, string> = {
@@ -296,6 +297,7 @@ export function CrashInvestigator({
   // Disable dependency prompt state
   const [disablePlanTarget, setDisablePlanTarget] = useState<{
     originalFilename: string;
+    modId: string;
     plan: DisablePlan;
   } | null>(null);
   // AI assistant panel
@@ -305,6 +307,7 @@ export function CrashInvestigator({
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const cancelledRef = useRef(false);
+  const closeInProgressRef = useRef(false);
 
   // Run investigation on mount
   useEffect(() => {
@@ -313,7 +316,7 @@ export function CrashInvestigator({
       try {
         const snapshot = await createSnapshot(
           instanceId,
-          `crash-doctor-${Date.now()}`,
+          `crash-doctor-${globalThis.crypto?.randomUUID?.() ?? Date.now()}`,
         );
         if (cancelled) return;
         setRecoverySnapshotId(snapshot.id);
@@ -355,12 +358,16 @@ export function CrashInvestigator({
   }, [instanceId, recoverySnapshotId]);
 
   const handleClose = useCallback(async () => {
+    if (closeInProgressRef.current) return;
+    closeInProgressRef.current = true;
     if (success) {
       onClose();
+      closeInProgressRef.current = false;
       return;
     }
     if (!recoverySnapshotId && disabledByTest.length === 0) {
       onClose();
+      closeInProgressRef.current = false;
       return;
     }
     setLoading(true);
@@ -372,6 +379,7 @@ export function CrashInvestigator({
       setError(`Could not restore the pre-investigation snapshot: ${formatError(cause)}`);
     } finally {
       if (!cancelledRef.current) setLoading(false);
+      closeInProgressRef.current = false;
     }
   }, [disabledByTest.length, onClose, recoverySnapshotId, restoreInvestigationSnapshot, success]);
 
@@ -402,16 +410,18 @@ export function CrashInvestigator({
     try {
       const plan = await getDisablePlan(instanceId, filename);
       if (plan.dependents.length > 0) {
-        setDisablePlanTarget({ originalFilename: filename, plan });
+        setDisablePlanTarget({ originalFilename: filename, modId, plan });
         setLoading(false);
         return;
       }
       await disableModForTest(instanceId, filename);
       modified = true;
       setDisabledByTest([filename]);
-      await onLaunch();
-      if (!cancelledRef.current) {
+      const launched = await onLaunch();
+      if (!cancelledRef.current && launched) {
         setPostLaunch({ filename, modId });
+      } else if (!cancelledRef.current) {
+        setError('The test launch did not start. Resolve the health prompt or launch error, then retry this suspect.');
       }
     } catch (e) {
       if (modified) {
@@ -434,7 +444,7 @@ export function CrashInvestigator({
 
   const handleDisableConfirm = useCallback(async (selectedKeys: string[]) => {
     if (!disablePlanTarget) return;
-    const { originalFilename, plan } = disablePlanTarget;
+    const { originalFilename, modId, plan } = disablePlanTarget;
     setLoading(true);
     setError(null);
 
@@ -450,9 +460,11 @@ export function CrashInvestigator({
         await disableModForTest(instanceId, filename);
       }
       setDisabledByTest(filenames);
-      await onLaunch();
-      if (!cancelledRef.current) {
-        setPostLaunch({ filename: originalFilename, modId: result?.suggested_action.kind === 'GuidedDisable' ? result.suggested_action.next_suspect.mod_id : result?.suggested_action.kind === 'ConfidenceAutoDisable' ? result.suggested_action.mod_id : '' });
+      const launched = await onLaunch();
+      if (!cancelledRef.current && launched) {
+        setPostLaunch({ filename: originalFilename, modId });
+      } else if (!cancelledRef.current) {
+        setError('The test launch did not start. Resolve the health prompt or launch error, then retry this suspect.');
       }
     } catch (e) {
       try {
@@ -472,10 +484,13 @@ export function CrashInvestigator({
         setLoading(false);
       }
     }
-  }, [disablePlanTarget, instanceId, onLaunch, restoreInvestigationSnapshot, result]);
+  }, [disablePlanTarget, instanceId, onLaunch, restoreInvestigationSnapshot]);
 
-  // Track whether the component is still mounted
+  // Track whether the component is still mounted.
+  // Reset on setup so StrictMode double-invocation (dev) or real remounts
+  // don't leave cancelledRef stuck at true from a previous cleanup.
   useEffect(() => {
+    cancelledRef.current = false;
     return () => {
       cancelledRef.current = true;
     };
@@ -554,6 +569,7 @@ export function CrashInvestigator({
   }, [onClose]);
 
   const handleAiExplain = useCallback(async () => {
+    if (aiLoading || cancelledRef.current) return;
     setAiLoading(true);
     setAiError(null);
     setAiExplanation(null);
@@ -568,18 +584,18 @@ export function CrashInvestigator({
         instanceId: instanceId,
         crashLog: logText,
       });
-      setAiExplanation(explanation);
+      if (!cancelledRef.current) setAiExplanation(explanation);
     } catch (e) {
       const msg = formatError(e);
       if (msg.includes('ERR_AI_NOT_AUTHENTICATED') || msg.toLowerCase().includes('not authenticated') || msg.toLowerCase().includes('not connected')) {
-        setAiError('connect-github');
+        if (!cancelledRef.current) setAiError('connect-github');
       } else {
-        setAiError(msg);
+        if (!cancelledRef.current) setAiError(msg);
       }
     } finally {
-      setAiLoading(false);
+      if (!cancelledRef.current) setAiLoading(false);
     }
-  }, [instanceId, crashLogText, manualLogText]);
+  }, [instanceId, crashLogText, manualLogText, aiLoading]);
 
   if (loading && !result) {
     return (
@@ -590,7 +606,7 @@ export function CrashInvestigator({
             Creating a recovery snapshot and analyzing deterministic crash signals.
           </DialogDescription>
           <div className="flex flex-col items-center gap-3 py-8">
-            <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+            <div role="status" aria-label="Investigating crash" className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
             <p className="text-sm text-muted-foreground">Investigating crash…</p>
           </div>
         </DialogContent>
@@ -686,7 +702,13 @@ export function CrashInvestigator({
           )}
           {/* AI Assistant panel or suspect list */}
           {showAiAssistant ? (
-            <div className="h-[480px]">
+            <div className="h-[480px] space-y-2">
+              <button
+                onClick={() => setShowAiAssistant(false)}
+                className="text-xs text-primary hover:underline"
+              >
+                Back to suspects
+              </button>
               <AiAssistant
                 instanceId={instanceId}
                 crashLog={crashLogText || manualLogText || null}
@@ -732,7 +754,7 @@ export function CrashInvestigator({
 
               {aiLoading && (
                 <div className="flex items-center gap-2 rounded-xl border border-border p-4 text-sm text-muted-foreground">
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                  <div role="status" aria-label="Analyzing crash with AI" className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
                   Analyzing crash with AI…
                 </div>
               )}

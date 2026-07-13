@@ -37,7 +37,7 @@ export function Instances({
   onEditInstance: (id: string) => void;
   processState: ProcessState;
   processLogs: import('../lib/useProcessController').LogLine[];
-  onStartLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
+  onStartLaunch: (instanceId: string, directLaunch: boolean) => Promise<boolean>;
   onKillProcess: () => Promise<void>;
   onStartCrashInvestigation: (investigation: {
     instanceId: string;
@@ -507,13 +507,15 @@ function UpdatesSection({
                 <button
                   onClick={() => {
                     // Select/deselect all for this instance
-                    if (allSelected(updates, instId)) {
-                      updates.forEach((u) => selected.delete(`${instId}:${u.mod_jar_id}`));
-                      setSelected(new Set(selected));
-                    } else {
-                      updates.forEach((u) => selected.add(`${instId}:${u.mod_jar_id}`));
-                      setSelected(new Set(selected));
-                    }
+                    setSelected((previous) => {
+                      const next = new Set(previous);
+                      if (updates.every((update) => next.has(`${instId}:${update.mod_jar_id}`))) {
+                        updates.forEach((update) => next.delete(`${instId}:${update.mod_jar_id}`));
+                      } else {
+                        updates.forEach((update) => next.add(`${instId}:${update.mod_jar_id}`));
+                      }
+                      return next;
+                    });
                   }}
                   className="text-xs text-primary hover:underline"
                 >
@@ -530,8 +532,11 @@ function UpdatesSection({
                 {selectedCount === 0 && (
                   <button
                     onClick={() => {
-                      updates.forEach((u) => selected.add(`${instId}:${u.mod_jar_id}`));
-                      setSelected(new Set(selected));
+                      setSelected((previous) => {
+                        const next = new Set(previous);
+                        updates.forEach((update) => next.add(`${instId}:${update.mod_jar_id}`));
+                        return next;
+                      });
                       setShowConfirm({ instanceId: instId, instanceName: inst?.name ?? instId, updates });
                     }}
                     className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"

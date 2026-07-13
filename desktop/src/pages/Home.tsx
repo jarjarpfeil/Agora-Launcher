@@ -32,7 +32,7 @@ export function Home({
   onNavigateTab: (tab: Tab) => void;
   onOpenInstance: (instanceId: string) => void;
   onOpenMod: (itemId: string) => void;
-  onLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
+  onLaunch: (instanceId: string, directLaunch: boolean) => Promise<boolean>;
 }) {
   const { state: regState, hasCachedDb } = useRegistryState();
 
@@ -105,9 +105,7 @@ export function Home({
           const snapList = await listSnapshots(inst.instance_id);
           const snapshot = snapList.find((candidate) => candidate.id === snapshotId);
           const diff = await detectDrift(inst.instance_id, snapshotId);
-          const entries = (key: string) => Array.isArray(diff[key])
-            ? diff[key] as Array<Record<string, unknown>>
-            : [];
+          const entries = (key: 'added' | 'removed' | 'modified') => diff[key];
           const addedEntries = entries('added');
           const removedEntries = entries('removed');
           const removedPaths = new Set(removedEntries.map((entry) => String(entry.path ?? '')));
@@ -221,6 +219,7 @@ export function Home({
         <CrashAlert
           instanceName={lastCrash.name}
           crashFilename={lastCrash.filename}
+          canRestore={Boolean(crashKnownGood)}
           onRestore={() => {
             if (crashKnownGood) {
               void handleRestoreSnapshot(crashKnownGood);
@@ -297,9 +296,10 @@ export function Home({
 // Card components
 // ---------------------------------------------------------------------------
 
-function CrashAlert({ instanceName, crashFilename, onRestore }: {
+function CrashAlert({ instanceName, crashFilename, canRestore, onRestore }: {
   instanceName: string;
   crashFilename?: string;
+  canRestore: boolean;
   onRestore: () => void;
 }) {
   return (
@@ -309,7 +309,7 @@ function CrashAlert({ instanceName, crashFilename, onRestore }: {
         {crashFilename && <span className="text-muted-foreground ml-1">({crashFilename})</span>}
       </div>
       <button onClick={onRestore} className="rounded-lg bg-destructive px-3 py-1.5 text-xs font-medium text-destructive-foreground hover:bg-destructive/90">
-        View & restore
+        {canRestore ? 'View & restore' : 'View instance'}
       </button>
     </div>
   );

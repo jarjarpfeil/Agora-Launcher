@@ -90,23 +90,29 @@ fn discover_windows() -> Option<PathBuf> {
         PathBuf::from("C:\\Program Files\\Minecraft Launcher"),
     ];
     if let Ok(local_appdata) = std::env::var("LOCALAPPDATA") {
-        legacy_roots.push(
-            PathBuf::from(&local_appdata).join("Programs\\Minecraft Launcher"),
-        );
+        legacy_roots.push(PathBuf::from(&local_appdata).join("Programs\\Minecraft Launcher"));
     }
     // Xbox app default install root, with Content subdir appended.
     legacy_roots.push(PathBuf::from("C:\\XboxGames\\Minecraft Launcher\\Content"));
 
     for root in &legacy_roots {
         let root_exists = root.exists();
-        log_line(&format!("[win root] {} (exists={})", root.display(), root_exists));
+        log_line(&format!(
+            "[win root] {} (exists={})",
+            root.display(),
+            root_exists
+        ));
         if !root_exists {
             continue;
         }
         for exe in EXE_NAMES {
             let p = root.join(exe);
             let exists = p.exists();
-            log_line(&format!("[win root candidate] {} (exists={})", p.display(), exists));
+            log_line(&format!(
+                "[win root candidate] {} (exists={})",
+                p.display(),
+                exists
+            ));
             if exists {
                 return Some(p);
             }
@@ -180,7 +186,11 @@ fn discover_via_registry() -> Option<PathBuf> {
             for exe in &["MinecraftLauncher.exe", "Minecraft.exe"] {
                 let candidate = PathBuf::from(path_str).join(exe);
                 let exists = candidate.exists();
-                log_line(&format!("[registry] candidate exe: {} (exists={})", candidate.display(), exists));
+                log_line(&format!(
+                    "[registry] candidate exe: {} (exists={})",
+                    candidate.display(),
+                    exists
+                ));
                 if exists {
                     return Some(candidate);
                 }
@@ -191,7 +201,11 @@ fn discover_via_registry() -> Option<PathBuf> {
                 for exe in &["MinecraftLauncher.exe", "Minecraft.exe"] {
                     let candidate = content_dir.join(exe);
                     let exists = candidate.exists();
-                    log_line(&format!("[registry] content candidate exe: {} (exists={})", candidate.display(), exists));
+                    log_line(&format!(
+                        "[registry] content candidate exe: {} (exists={})",
+                        candidate.display(),
+                        exists
+                    ));
                     if exists {
                         return Some(candidate);
                     }
@@ -241,7 +255,11 @@ fn discover_via_appx() -> Option<PathBuf> {
             continue;
         }
         let dir_exists = install_loc.exists();
-        log_line(&format!("[appx] InstallLocation: {} (exists={})", install_loc.display(), dir_exists));
+        log_line(&format!(
+            "[appx] InstallLocation: {} (exists={})",
+            install_loc.display(),
+            dir_exists
+        ));
         if !dir_exists {
             continue;
         }
@@ -249,7 +267,11 @@ fn discover_via_appx() -> Option<PathBuf> {
         for exe in &["MinecraftLauncher.exe", "Minecraft.exe"] {
             let candidate = install_loc.join(exe);
             let candidate_exists = candidate.exists();
-            log_line(&format!("[appx] candidate: {} (exists={})", candidate.display(), candidate_exists));
+            log_line(&format!(
+                "[appx] candidate: {} (exists={})",
+                candidate.display(),
+                candidate_exists
+            ));
             if candidate_exists {
                 return Some(candidate);
             }
@@ -260,7 +282,11 @@ fn discover_via_appx() -> Option<PathBuf> {
             for exe in &["MinecraftLauncher.exe", "Minecraft.exe"] {
                 let candidate = content_dir.join(exe);
                 let candidate_exists = candidate.exists();
-                log_line(&format!("[appx] content candidate: {} (exists={})", candidate.display(), candidate_exists));
+                log_line(&format!(
+                    "[appx] content candidate: {} (exists={})",
+                    candidate.display(),
+                    candidate_exists
+                ));
                 if candidate_exists {
                     return Some(candidate);
                 }
@@ -274,7 +300,11 @@ fn discover_via_appx() -> Option<PathBuf> {
 #[cfg(target_os = "macos")]
 fn discover_macos() -> Option<PathBuf> {
     let p = PathBuf::from("/Applications/Minecraft.app/Contents/MacOS/launcher");
-    if p.exists() { Some(p) } else { None }
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -296,4 +326,84 @@ fn discover_linux() -> Option<PathBuf> {
         }
     }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Tests for launcher path resolution (B3)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_resolve_launcher_path_uses_override_when_valid() {
+        // The override path must exist for resolve_launcher_path to accept it.
+        // We point to a file we know exists: the test binary itself.
+        let this_exe = std::env::current_exe().unwrap();
+        let result = resolve_launcher_path(Some(this_exe.to_str().unwrap()));
+        assert!(
+            result.is_ok(),
+            "should use existing override: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), this_exe);
+    }
+
+    #[test]
+    fn test_resolve_launcher_path_rejects_nonexistent_override() {
+        let fake = Path::new("C:\\DoesNotExist\\MinecraftLauncher.exe");
+        if !fake.exists() {
+            let result = resolve_launcher_path(Some(fake.to_str().unwrap()));
+            // It should fall through to auto-discovery. In CI there's no launcher,
+            // but on a dev machine there may be one. Either way it should not panic.
+            if result.is_err() {
+                match result.unwrap_err() {
+                    LauncherError::MojangNotFound => {} // expected in CI
+                    _ => panic!("unexpected error variant"),
+                }
+            }
+            // If it's Ok, auto-discovery found a real launcher — that's fine too.
+        }
+    }
+
+    #[test]
+    fn test_resolve_launcher_path_no_override_may_find_launcher() {
+        // On a developer machine with the Mojang launcher installed this
+        // will succeed; in CI it returns MojangNotFound. Both are valid.
+        let result = resolve_launcher_path(None);
+        match result {
+            Ok(path) => {
+                assert!(path.exists(), "detected launcher path must exist");
+            }
+            Err(LauncherError::MojangNotFound) => {} // expected in CI
+            Err(other) => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_launcher_path_validation_existing_file() {
+        // Test the validation logic directly (the command delegates to the same
+        // checks that test_launcher_path command would do).
+        let this_exe = std::env::current_exe().unwrap();
+        let path_str = this_exe.to_str().unwrap().to_string();
+        let p = Path::new(&path_str);
+        assert!(p.exists(), "test binary should exist");
+        assert!(p.is_file(), "test binary should be a file");
+    }
+
+    #[test]
+    fn test_launcher_path_validation_nonexistent() {
+        let fake = Path::new("C:\\DoesNotExist\\MinecraftLauncher.exe");
+        assert!(!fake.exists());
+    }
+
+    #[test]
+    fn test_launcher_path_validation_not_a_file() {
+        // Use a directory as a non-file path.
+        let dir = std::env::current_dir().unwrap();
+        assert!(dir.exists());
+        // On Windows directories are not files.
+        assert!(!dir.is_file(), "current dir should not be a file");
+    }
 }

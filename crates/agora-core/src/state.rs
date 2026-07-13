@@ -50,6 +50,10 @@ pub struct AppState {
     pub install_cancellations: HashMap<String, CancellationToken>,
     /// Instance IDs with an active install transaction.
     pub active_install_instances: HashSet<String>,
+    /// Per-instance serialization for LKG read/modify/write promotion. Delegated
+    /// monitors can overlap a newer direct launch, so the global launch lock is
+    /// not sufficient for protecting `lkg.json`.
+    pub lkg_locks: HashMap<String, Arc<Mutex<()>>>,
 }
 
 impl AppState {
@@ -69,6 +73,7 @@ impl AppState {
             resolved_install_plans: HashMap::new(),
             install_cancellations: HashMap::new(),
             active_install_instances: HashSet::new(),
+            lkg_locks: HashMap::new(),
         }
     }
 }

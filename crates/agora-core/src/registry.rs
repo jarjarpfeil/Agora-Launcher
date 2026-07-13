@@ -54,6 +54,13 @@ pub struct RegistryItem {
     /// one when the project also exists on Modrinth). Used as the
     /// version-resolution fallback when the primary source fails.
     pub modrinth_id: Option<String>,
+    /// Present only for recommendation queries. Explains the concrete ranking
+    /// signal instead of asking the frontend to invent generic copy.
+    #[serde(default)]
+    pub recommendation_reason: Option<String>,
+    /// Number of interest categories shared with locally installed items.
+    #[serde(default)]
+    pub recommendation_overlap: Option<i64>,
 }
 
 /// Valid sort options for browsing (§6.2).
@@ -392,6 +399,8 @@ pub fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<RegistryItem> {
         license_id: row.get(21)?,
         source_updated_at: row.get(22)?,
         modrinth_id: row.get(23)?,
+        recommendation_reason: None,
+        recommendation_overlap: None,
     })
 }
 

@@ -11,9 +11,11 @@ Covers: validate_sha256, _get_registry_repo, _load_poll_blacklist,
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -589,20 +591,20 @@ class TestComputeVelocity(unittest.TestCase):
     def test_compute_velocity_anomaly_fires_on_large_recent_downvote_burst(self):
         """25 downvotes in the last 6h with minimal historical context fires anomaly."""
         now_dt = datetime(2026, 6, 22, tzinfo=timezone.utc)
-        six_h_ago = now_dt - __import__("datetime").timedelta(hours=6)
+        six_h_ago = now_dt - timedelta(hours=6)
         down_ts = [
-            now_dt - __import__("datetime").timedelta(hours=1, minutes=i)
+            now_dt - timedelta(hours=1, minutes=i)
             for i in range(25)
         ]
         historical_ts = [
-            now_dt - __import__("datetime").timedelta(days=3),
-            now_dt - __import__("datetime").timedelta(days=5),
+            now_dt - timedelta(days=3),
+            now_dt - timedelta(days=5),
         ]
         down_ts.extend(historical_ts)
         velocity, is_anomaly, anomaly_start = _compile._compute_velocity([], down_ts, now_dt)
         self.assertTrue(is_anomaly)
         self.assertIsNotNone(anomaly_start)
-        self.assertAlmostEqual(anomaly_start, six_h_ago, delta=__import__("datetime").timedelta(minutes=1))
+        self.assertAlmostEqual(anomaly_start, six_h_ago, delta=timedelta(minutes=1))
         self.assertGreater(velocity, 0.0)
         self.assertLessEqual(velocity, 10.0)
 
@@ -610,11 +612,11 @@ class TestComputeVelocity(unittest.TestCase):
         """10 downvotes in 6h vs. historical 5/7d: ratio > 5 but recent_count <= 20 -> no anomaly."""
         now_dt = datetime(2026, 6, 22, tzinfo=timezone.utc)
         down_6h = [
-            now_dt - __import__("datetime").timedelta(hours=1, minutes=i)
+            now_dt - timedelta(hours=1, minutes=i)
             for i in range(10)
         ]
         down_7d = [
-            now_dt - __import__("datetime").timedelta(days=d)
+            now_dt - timedelta(days=d)
             for d in [1, 2, 3, 4, 5]
         ]
         down_ts = down_6h + down_7d

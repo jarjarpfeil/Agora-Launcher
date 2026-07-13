@@ -48,7 +48,9 @@ export interface ProcessController {
   /** Bounded log buffer for the tracked instance. */
   logs: LogLine[];
   /** Start a health-gated launch. Shows the health dialog when warnings/blockers exist. */
-  startLaunch: (instanceId: string, directLaunch: boolean) => Promise<void>;
+  /** Returns true only when a launch command actually started. Health-deferred,
+   * concurrent, and failed attempts return false. */
+  startLaunch: (instanceId: string, directLaunch: boolean) => Promise<boolean>;
   /** Continue a launch after the user approved health warnings. Uses the mode captured in startLaunch. Returns null on success or an error string. */
   approveLaunch: () => Promise<string | null>;
   /** Cancel the launch flow (health dialog dismissal). */
@@ -185,7 +187,7 @@ export function useProcessController(): ProcessController {
           ...prev,
           error: 'A launch is already in progress. Wait for it to complete before launching another instance.',
         }));
-        return;
+        return false;
       }
 
       setState({
@@ -212,18 +214,20 @@ export function useProcessController(): ProcessController {
             phase: 'awaiting-decision',
             healthReport: report,
           }));
-          return;
+          return false;
         }
 
         // All clear — launch immediately with the captured mode.
         const newState = await executeLaunch(instanceId, directLaunch);
         setState(newState);
+        return true;
       } catch (e) {
         setState((prev) => ({
           ...prev,
           phase: 'failed',
           error: formatError(e),
         }));
+        return false;
       }
     },
     [],

@@ -118,14 +118,14 @@ class TestModJarAliasesPopulated(_CompileFixtures):
     """Test 6: mod_jar_aliases has exactly 2 rows."""
 
     def test_mod_jar_aliases_populated(self):
-        """mod_jar_aliases should have 2 entries for fabric-api (fabric, fabric_api)."""
+        """mod_jar_aliases should have >= 2 entries (fabric, fabric_api + sub-module aliases)."""
         conn = self._open_db()
         try:
             count = conn.execute(
                 "SELECT COUNT(*) FROM mod_jar_aliases"
             ).fetchone()[0]
-            self.assertEqual(count, 2,
-                             f"Expected 2 mod_jar_aliases, got {count}")
+            self.assertGreaterEqual(count, 2,
+                                    f"Expected >= 2 mod_jar_aliases, got {count}")
         finally:
             conn.close()
 
@@ -201,7 +201,7 @@ class TestFabricApiAliases(_CompileFixtures):
     """Test 11: fabric-api has both 'fabric' and 'fabric_api' aliases."""
 
     def test_fabric_api_has_aliases(self):
-        """mod_jar_aliases for fabric-api should return 'fabric' and 'fabric_api'."""
+        """mod_jar_aliases for fabric-api should include both 'fabric' and 'fabric_api'."""
         conn = self._open_db()
         try:
             aliases = sorted(
@@ -210,8 +210,13 @@ class TestFabricApiAliases(_CompileFixtures):
                     ("fabric-api",)
                 ).fetchall()
             )
-            self.assertEqual(aliases, ["fabric", "fabric_api"],
-                             f"Expected ['fabric', 'fabric_api'], got {aliases}")
+            self.assertIn("fabric", aliases)
+            self.assertIn("fabric_api", aliases)
+            # The manifest has been expanded (per §19.5) to list all sub-module
+            # aliases for cross-source jar-metadata matching, so there are more
+            # than just these two canonical aliases.
+            self.assertGreaterEqual(len(aliases), 2,
+                                    f"Expected >= 2 aliases for fabric-api, got {len(aliases)}")
         finally:
             conn.close()
 

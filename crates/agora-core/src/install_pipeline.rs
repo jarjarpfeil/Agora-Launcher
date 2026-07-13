@@ -274,6 +274,13 @@ pub struct FileAdd {
 #[serde(rename_all = "camelCase")]
 pub struct FileRemove {
     pub filename: String,
+    /// When set, removal is scoped to this content type (mod, resourcepack,
+    /// shader, datapack, world). When None, the legacy behaviour applies:
+    /// all content collections are searched, and the first filename match
+    /// wins.  This avoids collisions when e.g. a resource pack and a mod
+    /// share the same filename.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +419,10 @@ pub enum ResolvedOperation {
     Remove {
         target_filename: String,
         reverse_dependents: Vec<ReverseDepInfo>,
+        /// Optional hint narrowing removal to one content type.  When set,
+        /// the resolver produces a scoped `FileRemove` instead of searching
+        /// every content collection for the filename.
+        content_type: Option<String>,
     },
     BatchUpdate {
         operations: Vec<ResolvedOperation>,
@@ -831,6 +842,7 @@ impl InstallPipeline {
             ResolvedOperation::Remove {
                 target_filename,
                 reverse_dependents,
+                content_type: hint_content_type,
             } => {
                 if validate_filename(target_filename).is_err() {
                     blocking_errors.push(PlanError {
@@ -842,8 +854,15 @@ impl InstallPipeline {
                     .any(|item| item.filename == *target_filename)
                     || instance_dir.join("mods").join(target_filename).is_file()
                 {
+                    let ct = hint_content_type.clone().or_else(|| {
+                        installed
+                            .iter()
+                            .find(|item| item.filename == *target_filename)
+                            .map(|item| item.content_type.clone())
+                    });
                     files_to_remove.push(FileRemove {
                         filename: target_filename.clone(),
+                        content_type: ct,
                     });
                 } else {
                     blocking_errors.push(PlanError {
@@ -956,6 +975,7 @@ impl InstallPipeline {
                         ResolvedOperation::Remove {
                             target_filename,
                             reverse_dependents,
+                            content_type: hint_content_type,
                         } => {
                             if validate_filename(target_filename).is_err() {
                                 blocking_errors.push(PlanError {
@@ -963,8 +983,15 @@ impl InstallPipeline {
                                     message: format!("Unsafe removal filename: {target_filename}"),
                                 });
                             } else {
+                                let ct = hint_content_type.clone().or_else(|| {
+                                    installed
+                                        .iter()
+                                        .find(|item| item.filename == *target_filename)
+                                        .map(|item| item.content_type.clone())
+                                });
                                 files_to_remove.push(FileRemove {
                                     filename: target_filename.clone(),
+                                    content_type: ct,
                                 });
                             }
                             for dependent in reverse_dependents {
@@ -1033,7 +1060,8 @@ impl InstallPipeline {
         }
         files_to_add.dedup_by(|a, b| a.target_filename == b.target_filename);
         files_to_remove.sort_by(|a, b| a.filename.cmp(&b.filename));
-        files_to_remove.dedup_by(|a, b| a.filename == b.filename);
+        files_to_remove
+            .dedup_by(|a, b| a.filename == b.filename && a.content_type == b.content_type);
         files_to_disable.sort_by(|a, b| a.filename.cmp(&b.filename));
         files_to_disable.dedup_by(|a, b| a.filename == b.filename);
         conflicts.sort_by(|a, b| a.conflict_id.cmp(&b.conflict_id));
@@ -1241,6 +1269,8 @@ impl InstallPipeline {
             message: "Atomically applying files and manifest…".into(),
         });
         if let Err(apply_error) = apply_transaction(plan, instance_dir, &staging_dir) {
+            let fast_rollback_performed =
+                apply_error.contains("pre-commit file moves were reversed");
             let restore = crate::snapshot::restore_snapshot(instance_dir, &snapshot.id);
             let _ = std::fs::remove_dir_all(&staging_dir);
             return match restore {
@@ -1254,7 +1284,7 @@ impl InstallPipeline {
                         "Apply failed and automatic restore could not complete. Original state remains protected in recovery storage. Apply error: {apply_error}; restore error: {restore_error}"
                     ),
                     Some(snapshot.id),
-                    false,
+                    fast_rollback_performed,
                 ),
             };
         }
@@ -1287,22 +1317,21 @@ impl InstallPipeline {
                     );
                 }
             };
-            let manifest: crate::models::InstanceManifest = match serde_json::from_str(
-                &manifest_text,
-            ) {
-                Ok(manifest) => manifest,
-                Err(error) => {
-                    let restore = crate::snapshot::restore_snapshot(instance_dir, &snapshot.id);
-                    let _ = std::fs::remove_dir_all(&staging_dir);
-                    return fail(
-                        format!(
+            let manifest: crate::models::InstanceManifest =
+                match serde_json::from_str(&manifest_text) {
+                    Ok(manifest) => manifest,
+                    Err(error) => {
+                        let restore = crate::snapshot::restore_snapshot(instance_dir, &snapshot.id);
+                        let _ = std::fs::remove_dir_all(&staging_dir);
+                        return fail(
+                            format!(
                             "Committed manifest is invalid ({error}); restore result: {restore:?}"
                         ),
-                        Some(snapshot.id),
-                        restore.is_ok(),
-                    );
-                }
-            };
+                            Some(snapshot.id),
+                            restore.is_ok(),
+                        );
+                    }
+                };
             let report = crate::health::health(instance_dir, &manifest, None);
             if !report.blockers.is_empty() {
                 let restore = crate::snapshot::restore_snapshot(instance_dir, &snapshot.id);
@@ -1401,6 +1430,24 @@ fn apply_optional_policy(
             options: prompt_options,
         });
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INSTALL_TEST_FAILPOINT: std::cell::RefCell<Option<&'static str>> = const { std::cell::RefCell::new(None) };
+}
+
+fn check_test_failpoint(name: &'static str) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let should_fail = INSTALL_TEST_FAILPOINT.with(|slot| *slot.borrow() == Some(name));
+        if should_fail {
+            return Err(format!("injected install failpoint: {name}"));
+        }
+    }
+    #[cfg(not(test))]
+    let _ = name;
+    Ok(())
 }
 
 fn apply_conflict_choices(
@@ -1525,6 +1572,7 @@ fn plan_artifact_change(
         }
         files_to_remove.push(FileRemove {
             filename: effective_installed_filename(existing),
+            content_type: Some(existing.content_type.clone()),
         });
     }
 
@@ -1561,6 +1609,7 @@ fn plan_artifact_change(
         if conflict.chosen == Some(ConflictResolution::Replace) {
             files_to_remove.push(FileRemove {
                 filename: effective_installed_filename(collision),
+                content_type: Some(collision.content_type.clone()),
             });
         } else if conflict.chosen == Some(ConflictResolution::Abort) {
             blocking_errors.push(PlanError {
@@ -1832,6 +1881,7 @@ async fn stage_plan_artifacts(
 
         let target = artifacts_dir.join(&file.staging_filename);
         let partial = artifacts_dir.join(format!("{}.part", file.staging_filename));
+        check_test_failpoint("stage-write")?;
         let mut output = std::fs::File::create(&partial)
             .map_err(|e| format!("failed to create staged {}: {e}", file.target_filename))?;
         use std::io::Write;
@@ -1903,7 +1953,11 @@ fn prepare_manifest(
         .map_err(|e| format!("failed to parse manifest before apply: {e}"))?;
 
     for remove in &plan.files_to_remove {
-        remove_manifest_entry(&mut manifest, &remove.filename);
+        remove_manifest_entry(
+            &mut manifest,
+            &remove.filename,
+            remove.content_type.as_deref(),
+        );
     }
     for disable in &plan.files_to_disable {
         set_manifest_enabled(&mut manifest, &disable.filename, false);
@@ -1961,11 +2015,17 @@ fn prepare_manifest(
             depends_on: jar.depends_on,
             optional_deps: jar.optional_deps,
             incompatible_deps: jar.incompatible_deps,
+            provided_mod_ids: jar
+                .provided_mods
+                .iter()
+                .map(|pm| pm.mod_id.clone())
+                .collect(),
         };
         remove_manifest_identity(&mut manifest, &installed);
         content_entries_mut(&mut manifest, &installed.content_type).push(installed);
     }
 
+    check_test_failpoint("manifest-serialize")?;
     let bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|e| format!("failed to serialize future manifest: {e}"))?;
     let path = staging_dir.join("instance_manifest.next.json");
@@ -2003,7 +2063,12 @@ fn apply_transaction(
     let result = (|| -> Result<(), String> {
         let trash_dir = staging_dir.join("trash");
         for remove in &plan.files_to_remove {
-            let live = locate_live_file(instance_dir, &manifest, &remove.filename);
+            let live = locate_live_file(
+                instance_dir,
+                &manifest,
+                &remove.filename,
+                remove.content_type.as_deref(),
+            );
             if !live.exists() {
                 continue;
             }
@@ -2021,7 +2086,7 @@ fn apply_transaction(
         }
 
         for disable in &plan.files_to_disable {
-            let live = locate_live_file(instance_dir, &manifest, &disable.filename);
+            let live = locate_live_file(instance_dir, &manifest, &disable.filename, None);
             if !live.exists() {
                 return Err(format!(
                     "file selected for disable is missing: {}",
@@ -2062,6 +2127,7 @@ fn apply_transaction(
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("failed to create content directory: {e}"))?;
             }
+            check_test_failpoint("artifact-rename")?;
             std::fs::rename(&staged, &live)
                 .map_err(|e| format!("failed to promote {}: {e}", add.target_filename))?;
             journal.added.push((live, staged));
@@ -2075,6 +2141,7 @@ fn apply_transaction(
             "instance_manifest.json.tmp.{}",
             &plan.fingerprint[..16]
         ));
+        check_test_failpoint("manifest-rename")?;
         std::fs::rename(&prepared, &temporary)
             .map_err(|e| format!("failed to move prepared manifest to commit location: {e}"))?;
         std::fs::rename(&temporary, &manifest_path)
@@ -2141,9 +2208,14 @@ fn locate_live_file(
     instance_dir: &Path,
     manifest: &crate::models::InstanceManifest,
     filename: &str,
+    content_type: Option<&str>,
 ) -> std::path::PathBuf {
     for item in all_installed(manifest) {
-        if item.filename == filename || effective_installed_filename(item) == filename {
+        if (item.filename == filename || effective_installed_filename(item) == filename)
+            && content_type.map_or(true, |ct| {
+                normalized_content_type(&item.content_type) == normalized_content_type(ct)
+            })
+        {
             return instance_dir
                 .join(content_subdir(&item.content_type))
                 .join(effective_installed_filename(item));
@@ -2152,17 +2224,30 @@ fn locate_live_file(
     instance_dir.join("mods").join(filename)
 }
 
-fn remove_manifest_entry(manifest: &mut crate::models::InstanceManifest, filename: &str) {
-    for entries in [
-        &mut manifest.mods,
-        &mut manifest.resourcepacks,
-        &mut manifest.shaders,
-        &mut manifest.datapacks,
-        &mut manifest.worlds,
-    ] {
+fn remove_manifest_entry(
+    manifest: &mut crate::models::InstanceManifest,
+    filename: &str,
+    content_type: Option<&str>,
+) {
+    let ct_normalized = content_type.map(normalized_content_type);
+    let remove = |entries: &mut Vec<crate::models::InstalledMod>| {
         entries.retain(|item| {
             item.filename != filename && effective_installed_filename(item) != filename
         });
+    };
+    match ct_normalized {
+        Some("resourcepack") => remove(&mut manifest.resourcepacks),
+        Some("shader") => remove(&mut manifest.shaders),
+        Some("datapack") => remove(&mut manifest.datapacks),
+        Some("world") => remove(&mut manifest.worlds),
+        _ => {
+            // None or "mod" — search all collections (legacy behaviour).
+            remove(&mut manifest.mods);
+            remove(&mut manifest.resourcepacks);
+            remove(&mut manifest.shaders);
+            remove(&mut manifest.datapacks);
+            remove(&mut manifest.worlds);
+        }
     }
 }
 
@@ -2510,6 +2595,304 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_plan_exposes_required_and_optional_dependencies() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let required_path = tmp.path().join("required.jar");
+        let optional_path = tmp.path().join("optional.jar");
+        std::fs::write(&required_path, b"required").unwrap();
+        std::fs::write(&optional_path, b"optional").unwrap();
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::Install {
+                artifact: test_artifact(
+                    "root",
+                    "root.jar",
+                    "a".repeat(64),
+                    ArtifactSource::Download {
+                        url: "https://example.com/root.jar".into(),
+                    },
+                    SourceType::Curated,
+                ),
+            },
+            dependencies: vec![
+                ResolvedDep {
+                    mod_jar_id: "required-dep".into(),
+                    requirement: Requirement::Required,
+                    source: DepSource::Manifest,
+                    disposition: DepDisposition::InstallCandidate {
+                        artifact: test_artifact(
+                            "required-dep",
+                            "required.jar",
+                            crate::download::sha256_hex(b"required"),
+                            ArtifactSource::LocalFile {
+                                path: required_path.to_string_lossy().into_owned(),
+                            },
+                            SourceType::Curated,
+                        ),
+                    },
+                },
+                ResolvedDep {
+                    mod_jar_id: "optional-dep".into(),
+                    requirement: Requirement::Optional,
+                    source: DepSource::Manifest,
+                    disposition: DepDisposition::InstallCandidate {
+                        artifact: test_artifact(
+                            "optional-dep",
+                            "optional.jar",
+                            crate::download::sha256_hex(b"optional"),
+                            ArtifactSource::LocalFile {
+                                path: optional_path.to_string_lossy().into_owned(),
+                            },
+                            SourceType::Curated,
+                        ),
+                    },
+                },
+            ],
+            conflicts: vec![],
+            registry_revision: "registry-rev".into(),
+        };
+        let mut intent = local_intent("root");
+        intent.optional_deps = OptionalDepsPolicy::Prompt;
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(InstallPipeline.resolve_plan(intent, &instance_dir, prepared, &NoopReporter))
+            .unwrap();
+
+        assert_eq!(plan.dependencies.len(), 2);
+        assert_eq!(plan.dependencies[0].mod_jar_id, "optional-dep");
+        assert_eq!(plan.dependencies[0].requirement, Requirement::Optional);
+        assert_eq!(plan.dependencies[1].mod_jar_id, "required-dep");
+        assert_eq!(plan.dependencies[1].requirement, Requirement::Required);
+        assert!(matches!(
+            plan.pending_choices.as_slice(),
+            [PendingChoice::OptionalDependencies { options, .. }] if options.len() == 1
+        ));
+    }
+
+    #[test]
+    fn test_resolve_plan_reuses_installed_dependency_without_duplicate_file_action() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::Install {
+                artifact: test_artifact(
+                    "root",
+                    "root.jar",
+                    "a".repeat(64),
+                    ArtifactSource::Download {
+                        url: "https://example.com/root.jar".into(),
+                    },
+                    SourceType::Curated,
+                ),
+            },
+            dependencies: vec![ResolvedDep {
+                mod_jar_id: "fabric-api".into(),
+                requirement: Requirement::Required,
+                source: DepSource::Manifest,
+                disposition: DepDisposition::ReuseExisting {
+                    mod_jar_id: "fabric-api".into(),
+                    installed_filename: "fabric-api.jar".into(),
+                },
+            }],
+            conflicts: vec![],
+            registry_revision: "registry-rev".into(),
+        };
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(InstallPipeline.resolve_plan(
+                local_intent("root"),
+                &instance_dir,
+                prepared,
+                &NoopReporter,
+            ))
+            .unwrap();
+
+        assert!(matches!(
+            plan.dependencies[0].disposition,
+            DepDisposition::ReuseExisting { .. }
+        ));
+        assert_eq!(
+            plan.files_to_add.len(),
+            1,
+            "only the requested item is added"
+        );
+    }
+
+    #[test]
+    fn test_resolve_plan_surfaces_conflict_before_execution() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let conflict = DepConflict {
+            conflict_id: "known:root:other".into(),
+            kind: ConflictKind::IncompatibleMod,
+            existing_mod_jar_id: "other".into(),
+            incoming_mod_jar_id: "root".into(),
+            message: "These mods are incompatible.".into(),
+            blocking: true,
+            resolution_options: vec![ConflictResolution::Abort, ConflictResolution::Skip],
+            chosen: None,
+        };
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::Install {
+                artifact: test_artifact(
+                    "root",
+                    "root.jar",
+                    "a".repeat(64),
+                    ArtifactSource::Download {
+                        url: "https://example.com/root.jar".into(),
+                    },
+                    SourceType::Curated,
+                ),
+            },
+            dependencies: vec![],
+            conflicts: vec![conflict],
+            registry_revision: "registry-rev".into(),
+        };
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(InstallPipeline.resolve_plan(
+                local_intent("root"),
+                &instance_dir,
+                prepared,
+                &NoopReporter,
+            ))
+            .unwrap();
+
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(plan.conflicts[0].message, "These mods are incompatible.");
+        assert!(plan
+            .pending_choices
+            .iter()
+            .any(|choice| matches!(choice, PendingChoice::Conflict { conflict_id, .. } if conflict_id == "known:root:other")));
+        assert!(!plan.is_fully_resolved());
+    }
+
+    #[test]
+    fn test_resolve_plan_unresolved_required_dependency_is_blocking() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::Install {
+                artifact: test_artifact(
+                    "root",
+                    "root.jar",
+                    "a".repeat(64),
+                    ArtifactSource::Download {
+                        url: "https://example.com/root.jar".into(),
+                    },
+                    SourceType::Curated,
+                ),
+            },
+            dependencies: vec![ResolvedDep {
+                mod_jar_id: "missing-required".into(),
+                requirement: Requirement::Required,
+                source: DepSource::Manifest,
+                disposition: DepDisposition::Unresolved {
+                    reason: "no compatible artifact".into(),
+                },
+            }],
+            conflicts: vec![],
+            registry_revision: "registry-rev".into(),
+        };
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(InstallPipeline.resolve_plan(
+                local_intent("root"),
+                &instance_dir,
+                prepared,
+                &NoopReporter,
+            ))
+            .unwrap();
+
+        assert!(plan
+            .blocking_errors
+            .iter()
+            .any(|error| error.code == "ERR_REQUIRED_DEPENDENCY"));
+        assert!(!plan.is_fully_resolved());
+    }
+
+    #[test]
+    fn test_curated_and_modrinth_artifacts_normalize_to_the_same_plan_shape() {
+        fn object_keys(value: &serde_json::Value) -> Vec<String> {
+            let mut keys = value
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys
+        }
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let curated_dir = make_instance(&tmp);
+        let modrinth_dir = tmp.path().join("modrinth-instance");
+        std::fs::create_dir_all(modrinth_dir.join("mods")).unwrap();
+        std::fs::copy(
+            curated_dir.join("instance_manifest.json"),
+            modrinth_dir.join("instance_manifest.json"),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let resolve = |instance_dir: &Path, source_type: SourceType| {
+            let item_id = match &source_type {
+                SourceType::Curated => "curated-item",
+                SourceType::Modrinth => "modrinth-item",
+                SourceType::Manual => unreachable!(),
+            };
+            let intent = InstallIntent {
+                action: InstallAction::Install {
+                    source_type: source_type.clone(),
+                    item_id: item_id.into(),
+                    candidate_version: Some("1.0".into()),
+                },
+                target_instance: "test".into(),
+                optional_deps: OptionalDepsPolicy::ExcludeAll,
+                requested_by: RequestSource::Interactive,
+                overrides: PlanOverrides::default(),
+            };
+            let prepared = PreparedPlan {
+                operation: ResolvedOperation::Install {
+                    artifact: test_artifact(
+                        item_id,
+                        &format!("{item_id}.jar"),
+                        "a".repeat(64),
+                        ArtifactSource::Download {
+                            url: format!("https://example.com/{item_id}.jar"),
+                        },
+                        source_type,
+                    ),
+                },
+                dependencies: vec![],
+                conflicts: vec![],
+                registry_revision: "registry-rev".into(),
+            };
+            runtime
+                .block_on(InstallPipeline.resolve_plan(
+                    intent,
+                    instance_dir,
+                    prepared,
+                    &NoopReporter,
+                ))
+                .unwrap()
+        };
+        let curated = resolve(&curated_dir, SourceType::Curated);
+        let modrinth = resolve(&modrinth_dir, SourceType::Modrinth);
+        let curated_json = serde_json::to_value(curated).unwrap();
+        let modrinth_json = serde_json::to_value(modrinth).unwrap();
+
+        assert_eq!(object_keys(&curated_json), object_keys(&modrinth_json));
+        assert_eq!(
+            object_keys(&curated_json["operation"]),
+            object_keys(&modrinth_json["operation"])
+        );
+        assert_eq!(
+            object_keys(&curated_json["filesToAdd"][0]),
+            object_keys(&modrinth_json["filesToAdd"][0])
+        );
+    }
+
+    #[test]
     fn test_execute_local_artifact_commits_manifest_and_snapshot() {
         let tmp = tempfile::TempDir::new().unwrap();
         let instance_dir = make_instance(&tmp);
@@ -2716,10 +3099,484 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn test_stage_write_failure_leaves_live_state_unchanged() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let source_path = tmp.path().join("source.jar");
+        std::fs::write(&source_path, b"verified local artifact").unwrap();
+        let plan = resolve_local_plan(&instance_dir, &source_path, "manual.jar", None);
+        set_install_failpoint(Some("stage-write"));
+        let outcome =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(InstallPipeline.execute_plan(
+                    &plan,
+                    &instance_dir,
+                    "registry-rev",
+                    &NoopReporter,
+                    &CancellationToken::new(),
+                ));
+        set_install_failpoint(None);
+
+        assert!(matches!(
+            outcome,
+            InstallOutcome::Failed {
+                snapshot_id: None,
+                rollback_performed: false,
+                ..
+            }
+        ));
+        assert!(!instance_dir.join("mods/manual.jar").exists());
+        assert!(crate::snapshot::list_snapshots(&instance_dir)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_manifest_serialization_failure_is_pre_mutation() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let source_path = tmp.path().join("source.jar");
+        std::fs::write(&source_path, b"verified local artifact").unwrap();
+        let plan = resolve_local_plan(&instance_dir, &source_path, "manual.jar", None);
+        let before = crate::snapshot::live_file_index(&instance_dir).unwrap();
+        set_install_failpoint(Some("manifest-serialize"));
+        let outcome =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(InstallPipeline.execute_plan(
+                    &plan,
+                    &instance_dir,
+                    "registry-rev",
+                    &NoopReporter,
+                    &CancellationToken::new(),
+                ));
+        set_install_failpoint(None);
+
+        assert!(matches!(
+            outcome,
+            InstallOutcome::Failed {
+                snapshot_id: None,
+                rollback_performed: false,
+                ..
+            }
+        ));
+        assert_eq!(
+            crate::snapshot::live_file_index(&instance_dir).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn test_artifact_rename_failure_restores_original_state() {
+        assert_apply_failpoint_restores_original_state("artifact-rename");
+    }
+
+    #[test]
+    fn test_manifest_rename_failure_restores_original_state() {
+        assert_apply_failpoint_restores_original_state("manifest-rename");
+    }
+
+    #[test]
+    fn test_execute_health_warning_is_returned_without_rollback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let source_path = tmp.path().join("optional-warning.jar");
+        write_fabric_test_jar(
+            &source_path,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "id": "optional_warning",
+                "version": "1.0.0",
+                "name": "Optional Warning",
+                "recommends": { "missing_optional": "*" }
+            }),
+        );
+        let mut plan =
+            resolve_local_plan(&instance_dir, &source_path, "optional-warning.jar", None);
+        plan.intent.overrides.skip_health_scan = false;
+        plan.fingerprint = compute_plan_fingerprint(&plan).unwrap();
+        let outcome =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(InstallPipeline.execute_plan(
+                    &plan,
+                    &instance_dir,
+                    "registry-rev",
+                    &NoopReporter,
+                    &CancellationToken::new(),
+                ));
+
+        match outcome {
+            InstallOutcome::Success {
+                health: HealthOutcome::Completed { report },
+                ..
+            } => assert!(!report.warnings.is_empty()),
+            other => panic!("expected successful yellow health outcome, got {other:?}"),
+        }
+        assert!(instance_dir.join("mods/optional-warning.jar").is_file());
+    }
+
+    #[test]
+    fn test_execute_health_blocker_rolls_back_to_original_state() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let source_path = tmp.path().join("blocked.jar");
+        write_fabric_test_jar(
+            &source_path,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "id": "blocked_mod",
+                "version": "1.0.0",
+                "name": "Blocked Mod",
+                "depends": { "missing_required": "*" }
+            }),
+        );
+        let before = crate::snapshot::live_file_index(&instance_dir).unwrap();
+        let mut plan = resolve_local_plan(&instance_dir, &source_path, "blocked.jar", None);
+        plan.intent.overrides.skip_health_scan = false;
+        plan.fingerprint = compute_plan_fingerprint(&plan).unwrap();
+        let outcome =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(InstallPipeline.execute_plan(
+                    &plan,
+                    &instance_dir,
+                    "registry-rev",
+                    &NoopReporter,
+                    &CancellationToken::new(),
+                ));
+
+        assert!(matches!(outcome, InstallOutcome::HealthRollback { .. }));
+        assert_eq!(
+            crate::snapshot::live_file_index(&instance_dir).unwrap(),
+            before
+        );
+        assert!(!instance_dir.join("mods/blocked.jar").exists());
+    }
+
+    #[test]
+    fn test_batch_update_applies_atomically_and_snapshot_restores_all_versions() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        seed_installed_mod(&instance_dir, "alpha", "alpha-1.jar", "1.0", b"alpha old");
+        seed_installed_mod(&instance_dir, "beta", "beta-1.jar", "1.0", b"beta old");
+        let alpha_source = tmp.path().join("alpha-2.jar");
+        let beta_source = tmp.path().join("beta-2.jar");
+        std::fs::write(&alpha_source, b"alpha new").unwrap();
+        std::fs::write(&beta_source, b"beta new").unwrap();
+        let intent = batch_update_intent();
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::BatchUpdate {
+                operations: vec![
+                    ResolvedOperation::Update {
+                        old_version_id: "1.0".into(),
+                        new_artifact: test_artifact_with_version(
+                            "alpha",
+                            "alpha-2.jar",
+                            "2.0",
+                            crate::download::sha256_hex(b"alpha new"),
+                            ArtifactSource::LocalFile {
+                                path: alpha_source.to_string_lossy().into_owned(),
+                            },
+                            SourceType::Curated,
+                        ),
+                    },
+                    ResolvedOperation::Update {
+                        old_version_id: "1.0".into(),
+                        new_artifact: test_artifact_with_version(
+                            "beta",
+                            "beta-2.jar",
+                            "2.0",
+                            crate::download::sha256_hex(b"beta new"),
+                            ArtifactSource::LocalFile {
+                                path: beta_source.to_string_lossy().into_owned(),
+                            },
+                            SourceType::Curated,
+                        ),
+                    },
+                ],
+            },
+            dependencies: vec![],
+            conflicts: vec![],
+            registry_revision: "registry-rev".into(),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let plan = runtime
+            .block_on(InstallPipeline.resolve_plan(intent, &instance_dir, prepared, &NoopReporter))
+            .unwrap();
+        let outcome = runtime.block_on(InstallPipeline.execute_plan(
+            &plan,
+            &instance_dir,
+            "registry-rev",
+            &NoopReporter,
+            &CancellationToken::new(),
+        ));
+        let snapshot_id = match outcome {
+            InstallOutcome::Success { snapshot_id, .. } => snapshot_id,
+            other => panic!("expected batch update success, got {other:?}"),
+        };
+        assert_eq!(
+            std::fs::read(instance_dir.join("mods/alpha-2.jar")).unwrap(),
+            b"alpha new"
+        );
+        assert_eq!(
+            std::fs::read(instance_dir.join("mods/beta-2.jar")).unwrap(),
+            b"beta new"
+        );
+        assert!(!instance_dir.join("mods/alpha-1.jar").exists());
+        assert!(!instance_dir.join("mods/beta-1.jar").exists());
+
+        crate::snapshot::restore_snapshot(&instance_dir, &snapshot_id).unwrap();
+        assert_eq!(
+            std::fs::read(instance_dir.join("mods/alpha-1.jar")).unwrap(),
+            b"alpha old"
+        );
+        assert_eq!(
+            std::fs::read(instance_dir.join("mods/beta-1.jar")).unwrap(),
+            b"beta old"
+        );
+        assert!(!instance_dir.join("mods/alpha-2.jar").exists());
+        assert!(!instance_dir.join("mods/beta-2.jar").exists());
+    }
+
+    #[test]
+    fn test_batch_update_second_artifact_failure_keeps_every_original_version() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        seed_installed_mod(&instance_dir, "alpha", "alpha-1.jar", "1.0", b"alpha old");
+        seed_installed_mod(&instance_dir, "beta", "beta-1.jar", "1.0", b"beta old");
+        let alpha_source = tmp.path().join("alpha-2.jar");
+        let beta_source = tmp.path().join("beta-2.jar");
+        std::fs::write(&alpha_source, b"alpha new").unwrap();
+        std::fs::write(&beta_source, b"beta wrong bytes").unwrap();
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::BatchUpdate {
+                operations: vec![
+                    ResolvedOperation::Update {
+                        old_version_id: "1.0".into(),
+                        new_artifact: test_artifact_with_version(
+                            "alpha",
+                            "alpha-2.jar",
+                            "2.0",
+                            crate::download::sha256_hex(b"alpha new"),
+                            ArtifactSource::LocalFile {
+                                path: alpha_source.to_string_lossy().into_owned(),
+                            },
+                            SourceType::Curated,
+                        ),
+                    },
+                    ResolvedOperation::Update {
+                        old_version_id: "1.0".into(),
+                        new_artifact: test_artifact_with_version(
+                            "beta",
+                            "beta-2.jar",
+                            "2.0",
+                            crate::download::sha256_hex(b"expected beta bytes"),
+                            ArtifactSource::LocalFile {
+                                path: beta_source.to_string_lossy().into_owned(),
+                            },
+                            SourceType::Curated,
+                        ),
+                    },
+                ],
+            },
+            dependencies: vec![],
+            conflicts: vec![],
+            registry_revision: "registry-rev".into(),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let plan = runtime
+            .block_on(InstallPipeline.resolve_plan(
+                batch_update_intent(),
+                &instance_dir,
+                prepared,
+                &NoopReporter,
+            ))
+            .unwrap();
+        let outcome = runtime.block_on(InstallPipeline.execute_plan(
+            &plan,
+            &instance_dir,
+            "registry-rev",
+            &NoopReporter,
+            &CancellationToken::new(),
+        ));
+
+        assert!(matches!(
+            outcome,
+            InstallOutcome::Failed {
+                snapshot_id: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            std::fs::read(instance_dir.join("mods/alpha-1.jar")).unwrap(),
+            b"alpha old"
+        );
+        assert_eq!(
+            std::fs::read(instance_dir.join("mods/beta-1.jar")).unwrap(),
+            b"beta old"
+        );
+        assert!(!instance_dir.join("mods/alpha-2.jar").exists());
+        assert!(!instance_dir.join("mods/beta-2.jar").exists());
+    }
+
+    #[test]
+    fn test_batch_update_conflict_blocks_before_artifact_staging() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        seed_installed_mod(&instance_dir, "alpha", "alpha-1.jar", "1.0", b"alpha old");
+        let nonexistent = tmp.path().join("must-not-be-read.jar");
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::BatchUpdate {
+                operations: vec![ResolvedOperation::Update {
+                    old_version_id: "1.0".into(),
+                    new_artifact: test_artifact_with_version(
+                        "alpha",
+                        "alpha-2.jar",
+                        "2.0",
+                        "a".repeat(64),
+                        ArtifactSource::LocalFile {
+                            path: nonexistent.to_string_lossy().into_owned(),
+                        },
+                        SourceType::Curated,
+                    ),
+                }],
+            },
+            dependencies: vec![],
+            conflicts: vec![DepConflict {
+                conflict_id: "batch-conflict".into(),
+                kind: ConflictKind::IncompatibleMod,
+                existing_mod_jar_id: "other".into(),
+                incoming_mod_jar_id: "alpha".into(),
+                message: "Selected updates conflict.".into(),
+                blocking: true,
+                resolution_options: vec![ConflictResolution::Abort],
+                chosen: None,
+            }],
+            registry_revision: "registry-rev".into(),
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let plan = runtime
+            .block_on(InstallPipeline.resolve_plan(
+                batch_update_intent(),
+                &instance_dir,
+                prepared,
+                &NoopReporter,
+            ))
+            .unwrap();
+        assert!(!plan.is_fully_resolved());
+        let outcome = runtime.block_on(InstallPipeline.execute_plan(
+            &plan,
+            &instance_dir,
+            "registry-rev",
+            &NoopReporter,
+            &CancellationToken::new(),
+        ));
+        assert!(matches!(
+            outcome,
+            InstallOutcome::Failed {
+                snapshot_id: None,
+                ..
+            }
+        ));
+        assert!(crate::snapshot::list_snapshots(&instance_dir)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_locked_instance_batch_update_is_blocked_in_read_only_plan() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let manifest_path = instance_dir.join("instance_manifest.json");
+        let mut manifest: crate::models::InstanceManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.is_locked = true;
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let prepared = PreparedPlan {
+            operation: ResolvedOperation::BatchUpdate { operations: vec![] },
+            dependencies: vec![],
+            conflicts: vec![],
+            registry_revision: "registry-rev".into(),
+        };
+        let plan = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(InstallPipeline.resolve_plan(
+                batch_update_intent(),
+                &instance_dir,
+                prepared,
+                &NoopReporter,
+            ))
+            .unwrap();
+
+        assert!(plan
+            .blocking_errors
+            .iter()
+            .any(|error| error.code == "ERR_INSTANCE_LOCKED"));
+        assert!(!plan.is_fully_resolved());
+    }
+
     struct NoopReporter;
 
     impl ProgressReporter for NoopReporter {
         fn report(&self, _event: ProgressEvent) {}
+    }
+
+    fn set_install_failpoint(value: Option<&'static str>) {
+        INSTALL_TEST_FAILPOINT.with(|slot| *slot.borrow_mut() = value);
+    }
+
+    fn assert_apply_failpoint_restores_original_state(failpoint: &'static str) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let instance_dir = make_instance(&tmp);
+        let source_path = tmp.path().join("source.jar");
+        std::fs::write(&source_path, b"verified local artifact").unwrap();
+        let plan = resolve_local_plan(&instance_dir, &source_path, "manual.jar", None);
+        let before = crate::snapshot::live_file_index(&instance_dir).unwrap();
+        set_install_failpoint(Some(failpoint));
+        let outcome =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(InstallPipeline.execute_plan(
+                    &plan,
+                    &instance_dir,
+                    "registry-rev",
+                    &NoopReporter,
+                    &CancellationToken::new(),
+                ));
+        set_install_failpoint(None);
+
+        assert!(matches!(
+            outcome,
+            InstallOutcome::Failed {
+                rollback_performed: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            crate::snapshot::live_file_index(&instance_dir).unwrap(),
+            before
+        );
+        assert!(!instance_dir.join("mods/manual.jar").exists());
+    }
+
+    fn write_fabric_test_jar(path: &Path, metadata: serde_json::Value) {
+        use std::io::Write;
+        let file = std::fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file("fabric.mod.json", zip::write::FileOptions::default())
+            .unwrap();
+        archive
+            .write_all(serde_json::to_string(&metadata).unwrap().as_bytes())
+            .unwrap();
+        archive.finish().unwrap();
     }
 
     fn make_instance(tmp: &tempfile::TempDir) -> std::path::PathBuf {
@@ -2755,9 +3612,20 @@ mod tests {
         source: ArtifactSource,
         source_type: SourceType,
     ) -> ResolvedArtifact {
+        test_artifact_with_version(item_id, filename, "1.0", sha256, source, source_type)
+    }
+
+    fn test_artifact_with_version(
+        item_id: &str,
+        filename: &str,
+        version: &str,
+        sha256: String,
+        source: ArtifactSource,
+        source_type: SourceType,
+    ) -> ResolvedArtifact {
         ResolvedArtifact::Download(ResolvedDownload {
             item_id: item_id.into(),
-            version_id: "1.0".into(),
+            version_id: version.into(),
             source,
             hashes: HashSpec {
                 values: vec![HashedValue {
@@ -2774,6 +3642,67 @@ mod tests {
                 content_type: "mod".into(),
             },
         })
+    }
+
+    fn batch_update_intent() -> InstallIntent {
+        InstallIntent {
+            action: InstallAction::BatchUpdate {
+                items: vec![
+                    BatchUpdateItem {
+                        item_id: "alpha".into(),
+                        target_version: "2.0".into(),
+                    },
+                    BatchUpdateItem {
+                        item_id: "beta".into(),
+                        target_version: "2.0".into(),
+                    },
+                ],
+            },
+            target_instance: "test".into(),
+            optional_deps: OptionalDepsPolicy::ExcludeAll,
+            requested_by: RequestSource::AutoUpdate,
+            overrides: PlanOverrides {
+                skip_health_scan: true,
+                ..PlanOverrides::default()
+            },
+        }
+    }
+
+    fn seed_installed_mod(
+        instance_dir: &Path,
+        item_id: &str,
+        filename: &str,
+        version: &str,
+        contents: &[u8],
+    ) {
+        let file_path = instance_dir.join("mods").join(filename);
+        std::fs::write(&file_path, contents).unwrap();
+        let manifest_path = instance_dir.join("instance_manifest.json");
+        let mut manifest: crate::models::InstanceManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.mods.push(crate::models::InstalledMod {
+            filename: filename.into(),
+            registry_id: Some(item_id.into()),
+            modrinth_id: None,
+            source: "registry".into(),
+            source_url: Some(format!("https://example.com/{filename}")),
+            version: Some(version.into()),
+            sha256: crate::download::sha256_hex(contents),
+            installed_at: "2026-07-12T00:00:00Z".into(),
+            java_packages: vec![],
+            mod_jar_id: Some(item_id.into()),
+            enabled: true,
+            content_type: "mod".into(),
+            depends_on: vec![],
+            optional_deps: vec![],
+            incompatible_deps: vec![],
+            provided_mod_ids: vec![],
+        });
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     fn local_intent(item_id: &str) -> InstallIntent {

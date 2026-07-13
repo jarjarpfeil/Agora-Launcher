@@ -5,6 +5,7 @@ import { open as openUrl } from '@tauri-apps/plugin-shell';
 import {
   copilotStatus,
   copilotLogout,
+  detectMojangLauncher,
   formatError,
   getAuthStatus,
   getGithubProfile,
@@ -20,11 +21,13 @@ import {
   msaFinishLogin,
   msaGetStatus,
   msaLogout,
+  pickOpenFile,
   setMcpApproval,
   startMcpServer,
   stopMcpServer,
   getMCPToken,
   regenerateMCPToken,
+  testLauncherPath,
 } from '../lib/tauri';
 import type { CopilotToken, DeviceFlowResponse, GithubProfile, InstanceRow, McpStatus, McpTokenData, MsaAccountStatus } from '../lib/tauri';
 import { Privacy } from './Privacy';
@@ -118,6 +121,12 @@ export function Settings() {
   const [msaError, setMsaError] = useState<string | null>(null);
   const [msaBusy, setMsaBusy] = useState(false);
 
+
+  // Launcher path action states (Browse, Auto-detect, Test)
+  const [launcherPathError, setLauncherPathError] = useState<string | null>(null);
+  const [launcherPathSuccess, setLauncherPathSuccess] = useState<string | null>(null);
+  const [launcherPathTesting, setLauncherPathTesting] = useState(false);
+  const [launcherPathDetecting, setLauncherPathDetecting] = useState(false);
 
   const { advancedMode, toggleAdvanced } = useAdvancedMode();
   const isWindows = typeof navigator !== 'undefined' && navigator.platform.includes('Win');
@@ -424,6 +433,56 @@ export function Settings() {
     }
   };
 
+  // --- Launcher path actions ---
+
+  const clearLauncherPathFeedback = () => {
+    setLauncherPathError(null);
+    setLauncherPathSuccess(null);
+  };
+
+  const handleBrowseLauncher = async () => {
+    clearLauncherPathFeedback();
+    try {
+      const chosen = await pickOpenFile('Select Mojang Launcher executable', ['.exe']);
+      if (chosen) {
+        setLauncherPath(chosen);
+      }
+    } catch (e) {
+      setLauncherPathError(formatError(e));
+    }
+  };
+
+  const handleAutoDetectLauncher = async () => {
+    clearLauncherPathFeedback();
+    setLauncherPathDetecting(true);
+    try {
+      const detected = await detectMojangLauncher();
+      setLauncherPath(detected);
+      setLauncherPathSuccess(`Detected: ${detected}`);
+    } catch (e) {
+      setLauncherPathError(`Auto-detect failed: ${formatError(e)}`);
+    } finally {
+      setLauncherPathDetecting(false);
+    }
+  };
+
+  const handleTestLauncherPath = async () => {
+    clearLauncherPathFeedback();
+    if (!launcherPath.trim()) {
+      setLauncherPathError('No launcher path entered. Type a path or use Auto-detect.');
+      return;
+    }
+    setLauncherPathTesting(true);
+    try {
+      await testLauncherPath(launcherPath.trim());
+      setLauncherPathSuccess('Path is valid.');
+    } catch (e) {
+      setLauncherPathError(`Test failed: ${formatError(e)}`);
+    } finally {
+      setLauncherPathTesting(false);
+    }
+  };
+
   // --- MCP helpers ---
 
   const handleStartServer = async () => {
@@ -493,6 +552,18 @@ export function Settings() {
         <p className="text-muted-foreground">Loading settings…</p>
       ) : (
         <>
+          {/* Inline error banner for any setting that failed to load */}
+          {Object.keys(ts.errors).length > 0 && (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 space-y-1">
+              <p className="text-xs font-semibold text-destructive">Some settings failed to load</p>
+              {Object.entries(ts.errors).map(([key, err]) => (
+                <p key={key} className="text-xs text-destructive/80">
+                  <code className="bg-destructive/10 px-1 rounded">{key}</code>: {err}
+                </p>
+              ))}
+            </div>
+          )}
+
           <div className="rounded-xl border border-border bg-card p-4 space-y-4">
             <h3 className="font-semibold">External Services</h3>
 
@@ -508,6 +579,9 @@ export function Settings() {
             <p className="text-xs text-muted-foreground">
               Allow live Modrinth API queries and show Modrinth-sourced curated mods.
             </p>
+            {ts.statuses['modrinth_enabled']?.status === 'error' && (
+              <p className="text-xs text-destructive">{ts.statuses['modrinth_enabled']?.error}</p>
+            )}
 
             
             <label className="flex items-center justify-between pt-2 border-t border-border">
@@ -524,6 +598,9 @@ export function Settings() {
                 className="h-5 w-5 accent-brand-600"
               />
             </label>
+            {ts.statuses['ai_chat_enabled']?.status === 'error' && (
+              <p className="text-xs text-destructive">{ts.statuses['ai_chat_enabled']?.error}</p>
+            )}
              {(aiMcp || aiChatEnabled) && (
               <div className="rounded-lg bg-muted p-3 space-y-2">
                 <h4 className="text-xs font-semibold">Two ways to use AI with Agora</h4>
@@ -576,6 +653,9 @@ export function Settings() {
             <p className="text-xs text-muted-foreground">
               Enable the local MCP server for external AI tools.
             </p>
+            {ts.statuses['ai_mcp_enabled']?.status === 'error' && (
+              <p className="text-xs text-destructive">{ts.statuses['ai_mcp_enabled']?.error}</p>
+            )}
 
 
             {advancedMode && aiMcp && (
@@ -1029,13 +1109,20 @@ export function Settings() {
             <p className="text-xs text-muted-foreground">
               <strong>On:</strong> Agora launches Minecraft directly — shows game console output in-app and gives you more control. Requires a Microsoft Account sign-in above for full online play.
             </p>
+            {ts.statuses['launch_mode']?.status === 'error' && (
+              <p className="text-xs text-destructive">{ts.statuses['launch_mode']?.error}</p>
+            )}
+
           </div>
 
           <div className="rounded-xl border border-border bg-card p-4 space-y-3">
             <h3 className="font-semibold">Launcher Path</h3>
             <input
               value={launcherPath}
-              onChange={(e) => setLauncherPath(e.target.value)}
+              onChange={(e) => {
+                setLauncherPath(e.target.value);
+                clearLauncherPathFeedback();
+              }}
               placeholder="Auto-discovered if empty"
               className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm"
             />
@@ -1046,7 +1133,42 @@ export function Settings() {
               >
                 Save
               </button>
+              <button
+                onClick={handleBrowseLauncher}
+                className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent"
+              >
+                Browse…
+              </button>
+              <button
+                onClick={handleAutoDetectLauncher}
+                disabled={launcherPathDetecting}
+                className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+              >
+                {launcherPathDetecting ? 'Detecting…' : 'Auto-detect'}
+              </button>
+              <button
+                onClick={handleTestLauncherPath}
+                disabled={launcherPathTesting || !launcherPath.trim()}
+                className="rounded-lg border border-input px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+              >
+                {launcherPathTesting ? 'Testing…' : 'Test'}
+              </button>
             </div>
+            {launcherPathError && (
+              <p className="text-xs text-destructive">{launcherPathError}</p>
+            )}
+            {launcherPathSuccess && (
+              <p className="text-xs text-green-600 dark:text-green-400">{launcherPathSuccess}</p>
+            )}
+            {/* Show persistent setting error from typed settings */}
+            {ts.statuses['mojang_launcher_path']?.status === 'error' && (
+              <p className="text-xs text-destructive">
+                Failed to save: {ts.statuses['mojang_launcher_path']?.error}
+              </p>
+            )}
+            {ts.statuses['mojang_launcher_path']?.status === 'write-pending' && (
+              <p className="text-xs text-muted-foreground">Saving…</p>
+            )}
             <p className="text-xs text-muted-foreground">
               Override the official Mojang launcher executable location.
             </p>
@@ -1066,6 +1188,9 @@ export function Settings() {
             <p className="text-xs text-muted-foreground">
               Recommended for G1GC, may cause issues with ZGC/Shenandoah.
             </p>
+            {ts.statuses['always_pre_touch']?.status === 'error' && (
+              <p className="text-xs text-destructive">{ts.statuses['always_pre_touch']?.error}</p>
+            )}
           </div>
 
           {/* <div className="rounded-xl border border-border bg-card p-4 space-y-3">

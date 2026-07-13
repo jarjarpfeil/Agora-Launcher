@@ -23,6 +23,7 @@ import {
   createSnapshot,
   restoreSnapshot,
   deleteSnapshot,
+  detectDrift,
   listLoadoutProfiles,
   createLoadoutProfile,
   applyLoadoutProfile,
@@ -40,6 +41,7 @@ import {
   type PackModRow,
   type InstalledMod,
   type Snapshot,
+  type SnapshotDiff,
   type LoadoutProfile,
   type LockfileDriftReport,
 } from '../lib/tauri';
@@ -71,6 +73,7 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const [snapshotLabelInput, setSnapshotLabelInput] = useState('');
   const [snapshotBusy, setSnapshotBusy] = useState<string | null>(null);
   const [confirmDeleteSnapshot, setConfirmDeleteSnapshot] = useState<string | null>(null);
+  const [snapshotDiff, setSnapshotDiff] = useState<{ snapshotId: string; diff: SnapshotDiff } | null>(null);
 
   // Loadout profiles state (Phase 6)
   const [profiles, setProfiles] = useState<LoadoutProfile[]>([]);
@@ -1369,12 +1372,41 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
               {snapshots.map((snap) => (
                 <div key={snap.id} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm">
                   <div className="min-w-0 flex-1">
-                    <span className="font-medium block">{snap.label}</span>
+                    <span className="font-medium flex items-center gap-2">
+                      <span>{snap.label}</span>
+                      {snap.is_current_lkg && (
+                        <span className="rounded-full bg-green-500/10 px-2 py-0.5 text-[10px] text-green-700 dark:text-green-300">Current LKG</span>
+                      )}
+                      {!snap.is_current_lkg && snap.is_lkg && (
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary">Known good</span>
+                      )}
+                      {snap.is_pre_restore && (
+                        <span className="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">Undo restore</span>
+                      )}
+                    </span>
                     <span className="text-xs text-muted-foreground">
                       {snap.created_at} · {snap.file_count} file{snap.file_count !== 1 ? 's' : ''}
                     </span>
                   </div>
                   <div className="flex gap-2 ml-3">
+                    <button
+                      onClick={async () => {
+                        setSnapshotBusy(snap.id);
+                        setError(null);
+                        try {
+                          const diff = await detectDrift(instanceId, snap.id);
+                          setSnapshotDiff({ snapshotId: snap.id, diff });
+                        } catch (e) {
+                          setError(formatError(e));
+                        } finally {
+                          setSnapshotBusy(null);
+                        }
+                      }}
+                      disabled={snapshotBusy === snap.id}
+                      className="text-xs text-primary hover:underline disabled:opacity-50"
+                    >
+                      Show diff
+                    </button>
                     <button
                       onClick={async () => {
                         setSnapshotBusy(snap.id);
@@ -1435,6 +1467,36 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                   </div>
                 </div>
               ))}
+              {snapshotDiff && (
+                <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="font-semibold">Changes since snapshot</p>
+                    <button onClick={() => setSnapshotDiff(null)} className="text-muted-foreground hover:text-foreground">Close</button>
+                  </div>
+                  <p className="text-muted-foreground">
+                    +{snapshotDiff.diff.added.length} added · -{snapshotDiff.diff.removed.length} removed · ~{snapshotDiff.diff.modified.length} modified · {snapshotDiff.diff.unchangedCount} unchanged
+                  </p>
+                  {[
+                    ...snapshotDiff.diff.added.map((entry) => ({ ...entry, marker: '+', label: 'Added' })),
+                    ...snapshotDiff.diff.removed.map((entry) => ({ ...entry, marker: '-', label: 'Removed' })),
+                    ...snapshotDiff.diff.modified.map((entry) => ({ ...entry, marker: '~', label: 'Modified' })),
+                  ].length > 0 ? (
+                    <ul className="max-h-48 overflow-y-auto space-y-1 font-mono">
+                      {[
+                        ...snapshotDiff.diff.added.map((entry) => ({ ...entry, marker: '+', label: 'Added' })),
+                        ...snapshotDiff.diff.removed.map((entry) => ({ ...entry, marker: '-', label: 'Removed' })),
+                        ...snapshotDiff.diff.modified.map((entry) => ({ ...entry, marker: '~', label: 'Modified' })),
+                      ].map((entry) => (
+                        <li key={`${entry.marker}:${entry.path}`} className="break-all">
+                          <span className="font-semibold">{entry.marker}</span> {entry.path} <span className="font-sans text-muted-foreground">({entry.label})</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-green-700 dark:text-green-300">The current instance matches this snapshot exactly.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </section>
@@ -1627,17 +1689,36 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 {lockfileBusy === 'copy' ? 'Copying…' : 'Copy'}
               </button>
             )}
+            {lockfileText && (
+              <button
+                onClick={() => {
+                  setLockfileText('');
+                  setLockfileReport(null);
+                  setLockfileNotice(null);
+                }}
+                disabled={lockfileBusy !== null}
+                className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
+              >
+                Clear
+              </button>
+            )}
           </div>
 
-          {lockfileText && (
-            <>
-              <textarea
-                readOnly
-                value={lockfileText}
-                rows={12}
-                className="w-full rounded-lg border border-input bg-background p-3 text-xs font-mono resize-y"
-              />
+          <textarea
+            value={lockfileText}
+            onChange={(event) => {
+              setLockfileText(event.target.value);
+              setLockfileReport(null);
+              setLockfileNotice(null);
+            }}
+            rows={12}
+            aria-label="Instance lockfile JSON"
+            placeholder="Export this instance or paste an Agora lockfile JSON here…"
+            className="w-full rounded-lg border border-input bg-background p-3 text-xs font-mono resize-y"
+          />
 
+          {lockfileText.trim() && (
+            <>
               <div className="flex flex-wrap gap-2">
                 <button
                   onClick={() => void handleVerifyLockfile()}
@@ -1648,7 +1729,8 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
                 </button>
                 <button
                   onClick={() => void handleRepairLockfile()}
-                  disabled={lockfileBusy !== null}
+                  disabled={lockfileBusy !== null || Boolean(row?.is_locked)}
+                  title={row?.is_locked ? 'Unlock this instance before repairing drift.' : undefined}
                   className="rounded-lg border border-input bg-background hover:bg-accent px-3 py-1.5 text-sm font-medium disabled:opacity-50"
                 >
                   {lockfileBusy === 'repair' ? 'Repairing…' : 'Repair'}
@@ -1681,9 +1763,9 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
             </div>
           )}
 
-          {!lockfileText && (
+          {!lockfileText.trim() && (
             <div className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted-foreground">
-              Export the lockfile above to see verification and repair options.
+              Export this instance or paste a received lockfile to verify, repair, or clone it.
             </div>
           )}
         </section>

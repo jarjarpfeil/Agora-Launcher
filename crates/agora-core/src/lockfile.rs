@@ -111,6 +111,8 @@ pub enum DriftKind {
     Added,
     Removed,
     Modified,
+    Enabled,
+    Disabled,
     ConfigModified,
 }
 
@@ -223,14 +225,32 @@ pub fn detect_drift(
     }
 
     let mut differences = Vec::new();
+    let mut status_counterparts = std::collections::BTreeSet::new();
     for (path, hash) in &expected {
         match live_files.get(path) {
-            None => differences.push(DriftDifference {
-                path: path.clone(),
-                kind: DriftKind::Removed,
-                expected_sha256: Some(hash.clone()),
-                actual_sha256: None,
-            }),
+            None => {
+                let (alternate, kind) = if let Some(enabled_path) = path.strip_suffix(".disabled") {
+                    (enabled_path.to_string(), DriftKind::Enabled)
+                } else {
+                    (format!("{path}.disabled"), DriftKind::Disabled)
+                };
+                if let Some(actual) = live_files.get(&alternate) {
+                    status_counterparts.insert(alternate);
+                    differences.push(DriftDifference {
+                        path: path.clone(),
+                        kind,
+                        expected_sha256: Some(hash.clone()),
+                        actual_sha256: Some(actual.clone()),
+                    });
+                } else {
+                    differences.push(DriftDifference {
+                        path: path.clone(),
+                        kind: DriftKind::Removed,
+                        expected_sha256: Some(hash.clone()),
+                        actual_sha256: None,
+                    });
+                }
+            }
             Some(actual) if !actual.eq_ignore_ascii_case(hash) => {
                 differences.push(DriftDifference {
                     path: path.clone(),
@@ -243,7 +263,7 @@ pub fn detect_drift(
         }
     }
     for (path, hash) in live_files {
-        if !expected.contains_key(path) {
+        if !expected.contains_key(path) && !status_counterparts.contains(path) {
             differences.push(DriftDifference {
                 path: path.clone(),
                 kind: DriftKind::Added,
@@ -432,6 +452,36 @@ mod tests {
         let report = detect_drift(&reference, &live, Some(&"34".repeat(32)));
         assert_eq!(report.status, DriftStatus::Drifted);
         assert_eq!(report.differences.len(), 3);
+    }
+
+    #[test]
+    fn drift_reports_enabled_state_change_once() {
+        let mut reference = lockfile();
+        reference.artifacts[0].enabled = false;
+        reference.content_hash = reference.recompute_content_hash().unwrap();
+        let live = BTreeMap::from([("mods/example.jar".into(), "ab".repeat(32))]);
+        let report = detect_drift(&reference, &live, Some(&"12".repeat(32)));
+        assert_eq!(report.differences.len(), 1);
+        assert_eq!(report.differences[0].kind, DriftKind::Enabled);
+        assert_eq!(report.differences[0].path, "mods/example.jar.disabled");
+    }
+
+    #[test]
+    fn artifact_paths_cover_every_supported_content_type() {
+        let mut artifact = lockfile().artifacts.remove(0);
+        for (content_type, expected_directory) in [
+            ("mod", "mods"),
+            ("resourcepack", "resourcepacks"),
+            ("shader", "shaderpacks"),
+            ("datapack", "datapacks"),
+            ("world", "saves"),
+        ] {
+            artifact.content_type = content_type.into();
+            assert_eq!(
+                artifact_path(&artifact),
+                format!("{expected_directory}/example.jar")
+            );
+        }
     }
 
     #[test]

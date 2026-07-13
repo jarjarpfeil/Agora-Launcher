@@ -1,19 +1,11 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
-/// Hosts allowed for mod downloads (GitHub + Modrinth).
-/// Separate from the loader-manifest allowlist to enforce the whitelist principle.
-const MOD_ALLOWED_HOSTS: &[&str] = &[
-    "cdn.modrinth.com",
-    "github.com",
-    "objects.githubusercontent.com",
-    "codeload.github.com",
-    "raw.githubusercontent.com",
-];
+/// A silent progress reporter for the CLI — no progress events are emitted.
+struct SilentReporter;
 
-/// Check whether a URL host is on the mod-download allowlist.
-fn is_allowed_mod_host(host: &str) -> bool {
-    MOD_ALLOWED_HOSTS.contains(&host)
+impl agora_core::install_pipeline::ProgressReporter for SilentReporter {
+    fn report(&self, _event: agora_core::install_pipeline::ProgressEvent) {}
 }
 
 #[derive(Parser)]
@@ -32,7 +24,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     ListInstances,
-    GetInstance { id: String },
+    GetInstance {
+        id: String,
+    },
     Mods {
         #[command(subcommand)]
         action: ModsCmd,
@@ -71,9 +65,19 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ModsCmd {
-    List { instance: String },
-    Install { project: String, instance: String, #[arg(short, long)] version: Option<String> },
-    Remove { project: String, instance: String },
+    List {
+        instance: String,
+    },
+    Install {
+        project: String,
+        instance: String,
+        #[arg(short, long)]
+        version: Option<String>,
+    },
+    Remove {
+        project: String,
+        instance: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -84,9 +88,18 @@ enum RegistryCmd {
 
 #[derive(Subcommand)]
 enum SnapshotsCmd {
-    List { instance: String },
-    Create { instance: String, #[arg(short, long)] label: Option<String> },
-    Restore { instance: String, snapshot_id: String },
+    List {
+        instance: String,
+    },
+    Create {
+        instance: String,
+        #[arg(short, long)]
+        label: Option<String>,
+    },
+    Restore {
+        instance: String,
+        snapshot_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,7 +134,8 @@ fn print_table(columns: &[&str], rows: &[Vec<String>]) {
         }
     }
     println!();
-    let total: usize = widths.iter().map(|w| w + 2).sum::<usize>() + columns.len().saturating_sub(1);
+    let total: usize =
+        widths.iter().map(|w| w + 2).sum::<usize>() + columns.len().saturating_sub(1);
     for _ in 0..total {
         print!("-");
     }
@@ -208,7 +222,10 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                         println!("Loader:   {} {}", instance.loader, instance.loader_version);
                         println!("Locked:   {}", instance.is_locked);
                         println!("Modpack:  {}", instance.is_modpack);
-                        println!("Launched: {}", instance.last_launched_at.unwrap_or_default());
+                        println!(
+                            "Launched: {}",
+                            instance.last_launched_at.unwrap_or_default()
+                        );
                     }
                 }
                 None => {
@@ -225,8 +242,7 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                     std::process::exit(1);
                 }
                 let text = std::fs::read_to_string(&manifest_path)?;
-                let manifest: agora_core::models::InstanceManifest =
-                    serde_json::from_str(&text)?;
+                let manifest: agora_core::models::InstanceManifest = serde_json::from_str(&text)?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&manifest.mods)?);
                 } else {
@@ -258,6 +274,13 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 let conn = agora_core::db::local_state_connection(&db_path)?;
                 let instance_row = agora_core::db::get_instance(&conn, &instance)?;
 
+                let instance_dir = agora_core::paths::instance_dir(data_dir, &instance)?;
+                if !instance_dir.exists() {
+                    eprintln!("Instance '{}' not found", instance);
+                    std::process::exit(1);
+                }
+
+                // Resolve Modrinth version candidates
                 let candidates = agora_core::modrinth::list_raw_modrinth_versions(
                     &conn,
                     instance_row.as_ref(),
@@ -276,89 +299,196 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                     candidates
                         .into_iter()
                         .find(|v| v.primary)
-                        .unwrap_or_else(|| {
-                            panic!("no versions available for project {}", project)
-                        })
+                        .unwrap_or_else(|| panic!("no versions available for project {}", project))
                 };
 
-                let instance_dir = agora_core::paths::instance_dir(data_dir, &instance)?;
-                if !instance_dir.exists() {
-                    eprintln!("Instance '{}' not found", instance);
+                // Build the hash spec from Modrinth's published hashes
+                let hashes = match &candidate.sha1 {
+                    Some(sha1) if !sha1.is_empty() => agora_core::install_pipeline::HashSpec {
+                        values: vec![agora_core::install_pipeline::HashedValue {
+                            algorithm: agora_core::install_pipeline::HashAlgorithm::Sha1,
+                            value: sha1.clone(),
+                        }],
+                    },
+                    _ => agora_core::install_pipeline::HashSpec { values: vec![] },
+                };
+
+                let artifact = agora_core::install_pipeline::ResolvedArtifact::Download(
+                    agora_core::install_pipeline::ResolvedDownload {
+                        item_id: project.clone(),
+                        version_id: candidate.version_id.clone(),
+                        source: agora_core::install_pipeline::ArtifactSource::Download {
+                            url: candidate.download_url.clone(),
+                        },
+                        hashes,
+                        size: 0,
+                        filename: candidate.filename.clone(),
+                        metadata: agora_core::install_pipeline::ArtifactMetadata {
+                            source_type: agora_core::install_pipeline::SourceType::Modrinth,
+                            registry_id: None,
+                            modrinth_id: Some(project.clone()),
+                            content_type: "mod".into(),
+                        },
+                    },
+                );
+
+                let registry_revision = agora_core::registry_sync::get_status(data_dir, &db_path)
+                    .cached_tag
+                    .unwrap_or_default();
+
+                let prepared = agora_core::install_pipeline::PreparedPlan {
+                    operation: agora_core::install_pipeline::ResolvedOperation::Install {
+                        artifact: artifact.clone(),
+                    },
+                    dependencies: vec![],
+                    conflicts: vec![],
+                    registry_revision: registry_revision.clone(),
+                };
+
+                let intent = agora_core::install_pipeline::InstallIntent {
+                    action: agora_core::install_pipeline::InstallAction::Install {
+                        source_type: agora_core::install_pipeline::SourceType::Modrinth,
+                        item_id: project.clone(),
+                        candidate_version: Some(candidate.version.clone()),
+                    },
+                    target_instance: instance.clone(),
+                    optional_deps: agora_core::install_pipeline::OptionalDepsPolicy::ExcludeAll,
+                    requested_by: agora_core::install_pipeline::RequestSource::CLI,
+                    overrides: agora_core::install_pipeline::PlanOverrides {
+                        allow_replace: true,
+                        skip_health_scan: true,
+                        ..Default::default()
+                    },
+                };
+
+                let pipeline = agora_core::install_pipeline::InstallPipeline;
+                let reporter = SilentReporter;
+                let cancel = agora_core::install_pipeline::CancellationToken::new();
+
+                let plan = pipeline
+                    .resolve_plan(intent, &instance_dir, prepared, &reporter)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to resolve install plan: {e}"))?;
+
+                // Preview / error gate — fail closed on unresolved plans
+                if !plan.is_fully_resolved() {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "blocked",
+                                "blockingErrors": plan.blocking_errors,
+                                "pendingChoices": plan.pending_choices,
+                                "conflicts": plan.conflicts,
+                            }))?
+                        );
+                    } else {
+                        for err in &plan.blocking_errors {
+                            eprintln!("[BLOCK] {}: {}", err.code, err.message);
+                        }
+                        for conflict in &plan.conflicts {
+                            if conflict.chosen.is_none() {
+                                eprintln!("[CONFLICT] {}", conflict.message);
+                            }
+                        }
+                        for choice in &plan.pending_choices {
+                            let label = match choice {
+                                agora_core::install_pipeline::PendingChoice::OptionalDependencies { .. } => "Optional dependencies",
+                                agora_core::install_pipeline::PendingChoice::Conflict { .. } => "Conflict resolution",
+                            };
+                            eprintln!("[CHOICE] {} requires user input", label);
+                        }
+                    }
                     std::process::exit(1);
                 }
 
-                let installed = agora_core::modrinth::install_raw_modrinth(
-                    &instance_dir,
-                    &instance,
-                    &project,
-                    &candidate,
-                    "mod",
-                    |url| {
-                        let u = url.to_string();
-                        Box::pin(async move {
-                            let download_client = reqwest::Client::builder()
-                                .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                                    if let Some(host) = attempt.url().host_str() {
-                                        if is_allowed_mod_host(host) {
-                                            return attempt.follow();
-                                        }
-                                    }
-                                    attempt.stop()
-                                }))
-                                .build()
-                                .map_err(|e| agora_core::error::LauncherError::Generic {
-                                    code: "ERR_NETWORK".to_string(),
-                                    message: format!("Failed to build HTTP client: {e}"),
-                                })?;
-                            let resp = download_client
-                                .get(&u)
-                                .send()
-                                .await
-                                .map_err(|e| agora_core::error::LauncherError::Generic {
-                                    code: "ERR_DOWNLOAD".into(),
-                                    message: e.to_string(),
-                                })?;
-                            let bytes = resp
-                                .bytes()
-                                .await
-                                .map_err(|e| agora_core::error::LauncherError::Generic {
-                                    code: "ERR_DOWNLOAD".into(),
-                                    message: e.to_string(),
-                                })?;
-                            Ok(bytes.to_vec())
-                        })
-                    },
-                    |_path| None,
-                    |path| {
-                        let meta = agora_core::jar_metadata::parse_jar_metadata(path);
-                        agora_core::crash_diagnostics::JarMetadata {
-                            mod_jar_id: meta.mod_jar_id,
-                            depends_on: meta.depends_on,
-                            optional_deps: meta.optional_deps,
-                            incompatible_deps: meta.incompatible_deps,
-                            java_packages: meta.java_packages,
+                // Execute the plan with snapshot, verifiable staging, and health gate
+                let outcome = pipeline
+                    .execute_plan(&plan, &instance_dir, &registry_revision, &reporter, &cancel)
+                    .await;
+
+                match outcome {
+                    agora_core::install_pipeline::InstallOutcome::Success {
+                        warnings,
+                        snapshot_id,
+                        ..
+                    } => {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "status": "success",
+                                    "filename": plan.files_to_add.first().map(|f| &f.target_filename),
+                                    "version": candidate.version,
+                                    "snapshotId": snapshot_id,
+                                    "warnings": warnings,
+                                }))?
+                            );
+                        } else {
+                            let filename = plan
+                                .files_to_add
+                                .first()
+                                .map(|f| &f.target_filename)
+                                .unwrap_or(&candidate.filename);
+                            println!("Installed {} ({})", filename, candidate.version);
                         }
-                    },
-                    data_dir,
-                )
-                .await?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&installed)?);
-                } else {
-                    println!("Installed {} ({})", installed.filename, candidate.version);
+                    }
+                    agora_core::install_pipeline::InstallOutcome::HealthRollback {
+                        health_report,
+                        ..
+                    } => {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "status": "health_rollback",
+                                    "blockers": health_report.blockers,
+                                }))?
+                            );
+                        } else {
+                            eprintln!(
+                                "Install completed but post-install health check found blockers; rolled back."
+                            );
+                            for b in &health_report.blockers {
+                                eprintln!("  [BLOCK] {}", b.message);
+                            }
+                        }
+                        std::process::exit(1);
+                    }
+                    agora_core::install_pipeline::InstallOutcome::Cancelled { phase, .. } => {
+                        eprintln!("Install was cancelled during {}.", phase);
+                        std::process::exit(1);
+                    }
+                    agora_core::install_pipeline::InstallOutcome::Failed {
+                        error,
+                        rollback_performed,
+                        ..
+                    } => {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "status": "failed",
+                                    "error": error,
+                                    "rollbackPerformed": rollback_performed,
+                                }))?
+                            );
+                        } else {
+                            eprintln!("Install failed: {}", error);
+                        }
+                        std::process::exit(1);
+                    }
                 }
             }
             ModsCmd::Remove { project, instance } => {
                 let instance_dir = agora_core::paths::instance_dir(data_dir, &instance)?;
-                let manifest_path =
-                    agora_core::paths::instance_manifest_path(data_dir, &instance)?;
+                let manifest_path = agora_core::paths::instance_manifest_path(data_dir, &instance)?;
                 if !manifest_path.exists() {
                     eprintln!("Instance '{}' not found", instance);
                     std::process::exit(1);
                 }
                 let text = std::fs::read_to_string(&manifest_path)?;
-                let mut manifest: agora_core::models::InstanceManifest =
-                    serde_json::from_str(&text)?;
+                let manifest: agora_core::models::InstanceManifest = serde_json::from_str(&text)?;
                 let idx = manifest
                     .mods
                     .iter()
@@ -368,18 +498,108 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                             || m.registry_id.as_deref() == Some(&project)
                     })
                     .ok_or_else(|| anyhow::anyhow!("Mod '{}' not found in instance", project))?;
-                let removed = manifest.mods.remove(idx);
-                let mod_path = instance_dir.join("mods").join(&removed.filename);
-                if mod_path.exists() {
-                    std::fs::remove_file(&mod_path)?;
+                let removed = manifest.mods[idx].clone();
+                let target_filename = removed.filename.clone();
+
+                let db_path = data_dir.join("local_state.db");
+                let registry_revision = agora_core::registry_sync::get_status(data_dir, &db_path)
+                    .cached_tag
+                    .unwrap_or_default();
+
+                let prepared = agora_core::install_pipeline::PreparedPlan {
+                    operation: agora_core::install_pipeline::ResolvedOperation::Remove {
+                        target_filename: target_filename.clone(),
+                        reverse_dependents: vec![],
+                        content_type: None,
+                    },
+                    dependencies: vec![],
+                    conflicts: vec![],
+                    registry_revision: registry_revision.clone(),
+                };
+
+                let intent = agora_core::install_pipeline::InstallIntent {
+                    action: agora_core::install_pipeline::InstallAction::Remove {
+                        filename: target_filename.clone(),
+                    },
+                    target_instance: instance.clone(),
+                    optional_deps: agora_core::install_pipeline::OptionalDepsPolicy::ExcludeAll,
+                    requested_by: agora_core::install_pipeline::RequestSource::CLI,
+                    overrides: agora_core::install_pipeline::PlanOverrides {
+                        allow_replace: true,
+                        skip_health_scan: true,
+                        ..Default::default()
+                    },
+                };
+
+                let pipeline = agora_core::install_pipeline::InstallPipeline;
+                let reporter = SilentReporter;
+                let cancel = agora_core::install_pipeline::CancellationToken::new();
+
+                let plan = pipeline
+                    .resolve_plan(intent, &instance_dir, prepared, &reporter)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to resolve remove plan: {e}"))?;
+
+                // Preview / error gate — fail closed on unresolved plans
+                if !plan.is_fully_resolved() {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "status": "blocked",
+                                "blockingErrors": plan.blocking_errors,
+                            }))?
+                        );
+                    } else {
+                        for err in &plan.blocking_errors {
+                            eprintln!("[BLOCK] {}: {}", err.code, err.message);
+                        }
+                    }
+                    std::process::exit(1);
                 }
-                let tmp_path = manifest_path.with_extension("json.tmp");
-                std::fs::write(&tmp_path, serde_json::to_string_pretty(&manifest)?)?;
-                std::fs::rename(&tmp_path, &manifest_path)?;
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&removed)?);
-                } else {
-                    println!("Removed {}", removed.filename);
+
+                // Execute the remove plan with snapshot, file removal, and health gate
+                let outcome = pipeline
+                    .execute_plan(&plan, &instance_dir, &registry_revision, &reporter, &cancel)
+                    .await;
+
+                match outcome {
+                    agora_core::install_pipeline::InstallOutcome::Success { .. } => {
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&removed)?);
+                        } else {
+                            println!("Removed {}", target_filename);
+                        }
+                    }
+                    agora_core::install_pipeline::InstallOutcome::Failed { error, .. } => {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "status": "failed",
+                                    "error": error,
+                                }))?
+                            );
+                        } else {
+                            eprintln!("Remove failed: {}", error);
+                        }
+                        std::process::exit(1);
+                    }
+                    other => {
+                        let err_msg = format!("Remove encountered unexpected state: {:?}", other);
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::to_string_pretty(&serde_json::json!({
+                                    "status": "unexpected",
+                                    "error": err_msg,
+                                }))?
+                            );
+                        } else {
+                            eprintln!("{}", err_msg);
+                        }
+                        std::process::exit(1);
+                    }
                 }
             }
         },
@@ -395,8 +615,7 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 std::process::exit(1);
             }
             let text = std::fs::read_to_string(&manifest_path)?;
-            let manifest: agora_core::models::InstanceManifest =
-                serde_json::from_str(&text)?;
+            let manifest: agora_core::models::InstanceManifest = serde_json::from_str(&text)?;
             let reg_path = data_dir.join("registry.db");
             let reg_opt = if reg_path.exists() {
                 Some(reg_path)
@@ -536,17 +755,10 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
             let result = if path.is_dir() {
                 agora_core::import::import_directory(&path, &target, symlink_saves)?
             } else {
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 match ext {
-                    "mrpack" => {
-                        agora_core::import::import_mrpack(&path, &target, symlink_saves)?
-                    }
-                    "zip" => {
-                        agora_core::import::import_prism_zip(&path, &target, symlink_saves)?
-                    }
+                    "mrpack" => agora_core::import::import_mrpack(&path, &target, symlink_saves)?,
+                    "zip" => agora_core::import::import_prism_zip(&path, &target, symlink_saves)?,
                     _ => anyhow::bail!(
                         "Unsupported file type '.{}'. Use .mrpack, .zip, or a directory",
                         ext
@@ -571,8 +783,7 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 std::process::exit(1);
             }
             let text = std::fs::read_to_string(&manifest_path)?;
-            let manifest: agora_core::models::InstanceManifest =
-                serde_json::from_str(&text)?;
+            let manifest: agora_core::models::InstanceManifest = serde_json::from_str(&text)?;
 
             let creds = agora_core::msa::load_credentials()?;
             let (username, uuid, access_token) = match creds {
@@ -629,7 +840,55 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 loader: Some(loader),
             };
 
-            agora_core::launch::spawn_java(&opts).await?;
+            let snapshot_label = format!(
+                "pre-launch-cli-{}",
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            );
+            let snapshot_id = {
+                let lkg = agora_core::lkg::read_lkg_state(&instance_dir)
+                    .map_err(|error| anyhow::anyhow!(error))?;
+                let reusable = lkg.current_lkg_snapshot_id.and_then(|snapshot_id| {
+                    let reference =
+                        agora_core::snapshot::snapshot_file_index(&instance_dir, &snapshot_id)
+                            .ok()?;
+                    let current = agora_core::snapshot::live_file_index(&instance_dir).ok()?;
+                    (reference == current).then_some(snapshot_id)
+                });
+                match reusable {
+                    Some(snapshot_id) => snapshot_id,
+                    None => {
+                        agora_core::snapshot::create_snapshot(&instance_dir, Some(&snapshot_label))
+                            .map_err(|error| anyhow::anyhow!(error))?
+                            .id
+                    }
+                }
+            };
+            if !json {
+                println!(
+                    "Launching '{}'; Agora will remain attached until the game exits.",
+                    instance
+                );
+            }
+            let (spawned, outcome) = agora_core::launch::spawn_java_and_wait(&opts).await?;
+            agora_core::lkg::record_launch_outcome(
+                &instance_dir,
+                Some(&snapshot_id),
+                &format!("cli-{}", spawned.pid),
+                outcome.clone(),
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pid": spawned.pid,
+                        "outcome": outcome,
+                        "snapshot_id": snapshot_id,
+                    })
+                );
+            } else {
+                println!("Launch finished with outcome {:?}.", outcome);
+            }
         }
         Commands::Auth { action } => match action {
             AuthCmd::Login => {
@@ -661,45 +920,46 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                     println!("Signed in as {}", credentials.username);
                 }
             }
-            AuthCmd::Status => {
-                match agora_core::msa::load_credentials()? {
-                    Some(creds) => {
-                        if creds.is_expired() {
-                            if json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({"status": "expired", "username": creds.username})
-                                );
-                            } else {
-                                println!(
-                                    "Signed in as {} (expired — run 'agora auth login')",
-                                    creds.username
-                                );
-                            }
-                        } else {
-                            if json {
-                                println!(
-                                    "{}",
-                                    serde_json::json!({
-                                        "status": "valid",
-                                        "username": creds.username,
-                                        "expires": creds.expires,
-                                    })
-                                );
-                            } else {
-                                println!("Signed in as {} (expires {})", creds.username, creds.expires);
-                            }
-                        }
-                    }
-                    None => {
+            AuthCmd::Status => match agora_core::msa::load_credentials()? {
+                Some(creds) => {
+                    if creds.is_expired() {
                         if json {
-                            println!("{}", serde_json::json!({"status": "not_authenticated"}));
+                            println!(
+                                "{}",
+                                serde_json::json!({"status": "expired", "username": creds.username})
+                            );
                         } else {
-                            println!("Not authenticated. Run 'agora auth login'.");
+                            println!(
+                                "Signed in as {} (expired — run 'agora auth login')",
+                                creds.username
+                            );
+                        }
+                    } else {
+                        if json {
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "valid",
+                                    "username": creds.username,
+                                    "expires": creds.expires,
+                                })
+                            );
+                        } else {
+                            println!(
+                                "Signed in as {} (expires {})",
+                                creds.username, creds.expires
+                            );
                         }
                     }
                 }
-            }
+                None => {
+                    if json {
+                        println!("{}", serde_json::json!({"status": "not_authenticated"}));
+                    } else {
+                        println!("Not authenticated. Run 'agora auth login'.");
+                    }
+                }
+            },
             AuthCmd::Logout => {
                 agora_core::msa::clear_credentials()?;
                 if json {
@@ -755,8 +1015,10 @@ fn extract_auth_redirect(input: &str) -> anyhow::Result<(String, String)> {
         }
     }
 
-    let code = code.ok_or_else(|| anyhow::anyhow!("Redirect URL did not include an OAuth code."))?;
-    let state = state.ok_or_else(|| anyhow::anyhow!("Redirect URL did not include an OAuth state."))?;
+    let code =
+        code.ok_or_else(|| anyhow::anyhow!("Redirect URL did not include an OAuth code."))?;
+    let state =
+        state.ok_or_else(|| anyhow::anyhow!("Redirect URL did not include an OAuth state."))?;
     Ok((code, state))
 }
 
@@ -794,14 +1056,16 @@ fn find_java() -> anyhow::Result<PathBuf> {
             }
         }
     }
-    anyhow::bail!(
-        "Could not find Java. Install JDK 17+ and ensure java is on your PATH."
-    );
+    anyhow::bail!("Could not find Java. Install JDK 17+ and ensure java is on your PATH.");
 }
 
 #[cfg(test)]
 mod tests {
     use super::extract_auth_redirect;
+    use super::SilentReporter;
+    use agora_core::install_pipeline::{
+        CancellationToken, ProgressEvent, ProgressPhase, ProgressReporter,
+    };
 
     #[test]
     fn parses_code_and_state_from_redirect_url() {
@@ -816,5 +1080,39 @@ mod tests {
     #[test]
     fn rejects_redirect_without_state() {
         assert!(extract_auth_redirect("https://example.invalid/?code=abc").is_err());
+    }
+
+    #[test]
+    fn silent_reporter_accepts_progress_events() {
+        let reporter = SilentReporter;
+        // Should not panic
+        reporter.report(ProgressEvent {
+            plan_id: "test".into(),
+            phase: ProgressPhase::Resolving,
+            step: 0,
+            total_steps: 1,
+            bytes_downloaded: 0,
+            bytes_total: 0,
+            message: "test".into(),
+        });
+    }
+
+    #[test]
+    fn silent_reporter_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SilentReporter>();
+    }
+
+    #[test]
+    fn cancellation_token_default_is_not_cancelled() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn cancellation_token_cancel_works() {
+        let token = CancellationToken::new();
+        token.cancel();
+        assert!(token.is_cancelled());
     }
 }

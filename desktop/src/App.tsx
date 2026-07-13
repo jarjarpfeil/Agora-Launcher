@@ -71,12 +71,46 @@ function destToTab(dest: Destination): Tab {
   return 'home'; // mod-detail doesn't change the tab
 }
 
+/** Deliberate recoverable not-found view for unrecognized destinations. */
+function NotFoundView({ canGoBack, onGoHome, onGoBack }: { canGoBack: boolean; onGoHome: () => void; onGoBack: () => void }) {
+  return (
+    <div className="space-y-6">
+      {canGoBack ? (
+        <button
+          onClick={onGoBack}
+          className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent"
+        >
+          ← Back
+        </button>
+      ) : (
+        <button
+          onClick={onGoHome}
+          className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent"
+        >
+          ← Back to Home
+        </button>
+      )}
+      <div className="rounded-xl border border-destructive bg-destructive/10 p-6 text-center" data-testid="not-found-view">
+        <h2 className="text-xl font-bold text-foreground">Page Not Found</h2>
+        <p className="text-sm text-muted-foreground mt-2">
+          The requested page could not be found.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** The three known destination types used for validation. */
+const KNOWN_DEST_TYPES = new Set(['tab', 'mod-detail', 'instance-detail']);
+
 export default function App() {
   const {
     destination,
+    canGoBack,
     navigateToTab,
     navigateToModDetail,
     navigateToInstanceDetail,
+    goBack,
   } = useDestination();
 
   const processController = useProcessController();
@@ -190,6 +224,11 @@ export default function App() {
       ? 'home'
       : destToTab(destination);
 
+  // Validate destination type — corrupt state or future versions must not
+  // silently fall to home. This is a defense-in-depth check; the type system
+  // already prevents invalid Destination types at compile time.
+  const isKnownDestType = KNOWN_DEST_TYPES.has(destination.type);
+
   const showInstanceEditor = destination.type === 'instance-detail';
   const showModDetail = destination.type === 'mod-detail';
 
@@ -224,7 +263,13 @@ export default function App() {
         )}
 
         <main className="flex-1 overflow-y-auto p-6 bg-background">
-          {showInstanceEditor ? (
+          {!isKnownDestType ? (
+            <NotFoundView
+              canGoBack={canGoBack}
+              onGoHome={() => navigateToTab('home')}
+              onGoBack={goBack}
+            />
+          ) : showInstanceEditor ? (
             <InstanceEditor
               instanceId={destination.instanceId}
               onBack={() => navigateToTab('instances')}

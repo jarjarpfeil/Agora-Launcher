@@ -94,7 +94,7 @@ export const SETTINGS = {
   modrinthEnabled: boolDef('modrinth_enabled'),
   aiMcpEnabled: boolDef('ai_mcp_enabled'),
   aiChatEnabled: boolDef('ai_chat_enabled'),
-  launcherPath: stringDef('launcher_path'),
+  launcherPath: stringDef('mojang_launcher_path'),
   javaPath: stringDef('java_path'),
   alwaysPreTouch: boolDef('always_pre_touch'),
   launchMode: enumDef('launch_mode', ['direct', 'delegation'] as const, 'delegation'),
@@ -132,11 +132,15 @@ async function readAll(): Promise<{
     Object.entries(SETTINGS).map(async ([name, def]) => {
       try {
         const raw = await getSetting(def.key);
-        return { name, value: def.parse(raw) };
+        return { name, key: def.key, value: def.parse(raw) };
       } catch (e) {
-        // Tag the rejection with the setting name so the error
+        // Tag the rejection with both identifiers: values use the typed
+        // property name while status/error UI consistently uses the persisted key.
         // handler below can attribute it correctly.
-        throw Object.assign(e instanceof Error ? e : new Error(formatError(e)), { settingName: name });
+        throw Object.assign(e instanceof Error ? e : new Error(formatError(e)), {
+          settingName: name,
+          settingKey: def.key,
+        });
       }
     }),
   );
@@ -144,11 +148,12 @@ async function readAll(): Promise<{
   for (const result of results) {
     if (result.status === 'fulfilled') {
       values[result.value.name] = result.value.value;
-      statuses[result.value.name] = { status: 'ready' };
+      statuses[result.value.key] = { status: 'ready' };
     } else {
-      const reason = result.reason as Error & { settingName?: string };
+      const reason = result.reason as Error & { settingName?: string; settingKey?: string };
       const name = reason.settingName ?? 'unknown';
-      statuses[name] = { status: 'error', error: formatError(reason) };
+      const key = reason.settingKey ?? name;
+      statuses[key] = { status: 'error', error: formatError(reason) };
       // Also store a default value so callers don't crash on missing keys
       values[name] = null;
     }
@@ -184,6 +189,11 @@ export function useTypedSettings(): UseTypedSettingsReturn {
 
   const update = useCallback(
     async <T>(def: SettingDef<T>, value: T) => {
+      // Map persisted key back to typed property name so `values` stays
+      // consistent with the initial `readAll` shape.
+      const name =
+        Object.entries(SETTINGS).find(([, d]) => d.key === def.key)?.[0] ?? def.key;
+
       setStatuses((prev) => ({
         ...prev,
         [def.key]: { status: 'write-pending' },
@@ -193,7 +203,7 @@ export function useTypedSettings(): UseTypedSettingsReturn {
       try {
         await setSetting(def.key, serialized);
         if (mountedRef.current) {
-          setValues((prev) => ({ ...prev, [def.key]: value }));
+          setValues((prev) => ({ ...prev, [name]: value }));
           setStatuses((prev) => ({
             ...prev,
             [def.key]: { status: 'ready' },
