@@ -902,11 +902,8 @@ export interface GcResult {
   recommended: boolean;
 }
 
-export const msaBeginLogin = () =>
-  invoke<{ auth_uri: string }>('msa_begin_login');
-
-export const msaFinishLogin = (code: string, oauthState?: string | null) =>
-  invoke<MsaAccountStatus>('msa_finish_login', { code, oauthState });
+export const msaLogin = () =>
+  invoke<MsaAccountStatus>('msa_login');
 
 export const msaGetStatus = () =>
   invoke<MsaAccountStatus | null>('msa_get_status');

@@ -78,6 +78,8 @@ const MC_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profil
 // Keyring storage
 const KEYRING_SERVICE: &str = "com.agoramc";
 const KEYRING_ACCOUNT: &str = "msa-credentials";
+const CREDENTIALS_FALLBACK_FILE: &str = "msa-credentials.enc";
+const CREDENTIALS_KEY_CONTEXT: &[u8] = b"agora-msa-credentials-fallback";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -349,8 +351,8 @@ async fn send_signed_request<T: for<'de> serde::Deserialize<'de>>(
     key: &DeviceTokenKey,
     authorization: Option<&str>,
     include_contract_version: bool,
+    current_date: DateTime<Utc>,
 ) -> LauncherResult<(DateTime<Utc>, T)> {
-    let current_date = Utc::now();
     let body_str = serde_json::to_string(&body).unwrap_or_default();
     let sig = sign_request(key, url_path, authorization, &body_str, current_date);
 
@@ -377,6 +379,7 @@ async fn send_signed_request<T: for<'de> serde::Deserialize<'de>>(
         })?;
 
     let status = resp.status();
+    let current_date = response_date(resp.headers());
     let raw = resp.text().await.unwrap_or_default();
 
     if !status.is_success() {
@@ -412,15 +415,27 @@ fn proof_key_json(key: &DeviceTokenKey) -> serde_json::Value {
     })
 }
 
+fn xbox_device_id(id: Uuid) -> String {
+    format!("{{{}}}", id.to_string().to_uppercase())
+}
+
+fn response_date(headers: &reqwest::header::HeaderMap) -> DateTime<Utc> {
+    headers
+        .get(reqwest::header::DATE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| DateTime::parse_from_rfc2822(value).ok())
+        .map_or_else(Utc::now, |value| value.with_timezone(&Utc))
+}
+
 /// Step 1: Get device token from Xbox Live.
 async fn get_device_token(
     client: &reqwest::Client,
     key: &DeviceTokenKey,
-) -> LauncherResult<xbox_types::XboxToken> {
+) -> LauncherResult<(DateTime<Utc>, xbox_types::XboxToken)> {
     let body = serde_json::json!({
         "Properties": {
             "AuthMethod": "ProofOfPossession",
-            "Id": key.id.to_string(),
+            "Id": xbox_device_id(key.id),
             "DeviceType": "Win32",
             "Version": "10.16.0",
             "ProofKey": proof_key_json(key),
@@ -429,17 +444,18 @@ async fn get_device_token(
         "TokenType": "JWT"
     });
 
-    let (_, token) = send_signed_request(
+    let (date, token) = send_signed_request(
         client,
         DEVICE_AUTH_URL,
         "/device/authenticate",
         body,
         key,
         None,
-        false,
+        true,
+        Utc::now(),
     )
     .await?;
-    Ok(token)
+    Ok((date, token))
 }
 
 // ---------------------------------------------------------------------------
@@ -466,7 +482,8 @@ async fn sisu_authenticate(
     device_token: &str,
     challenge: &str,
     key: &DeviceTokenKey,
-) -> LauncherResult<(Option<String>, String, String)> {
+    current_date: DateTime<Utc>,
+) -> LauncherResult<(String, String, String)> {
     let state: String = (0..32)
         .map(|_| format!("{:x}", rand::random::<u8>() % 16))
         .collect();
@@ -488,13 +505,14 @@ async fn sisu_authenticate(
     });
 
     let body_str = serde_json::to_string(&body).unwrap_or_default();
-    let sig = sign_request(key, "/authenticate", None, &body_str, Utc::now());
+    let sig = sign_request(key, "/authenticate", None, &body_str, current_date);
 
     let resp = client
         .post(SISU_AUTH_URL)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json")
         .header("Signature", &sig)
+        .header("x-xbl-contract-version", "1")
         .body(body_str)
         .send()
         .await
@@ -503,11 +521,26 @@ async fn sisu_authenticate(
             message: format!("SISU authenticate failed: {}", e),
         })?;
 
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(LauncherError::Generic {
+            code: "ERR_MSA_SISU_AUTH_HTTP".into(),
+            message: format!(
+                "SISU authenticate returned HTTP {} (response suppressed)",
+                status
+            ),
+        });
+    }
+
     let session_id = resp
         .headers()
         .get("X-SessionId")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(str::to_owned)
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_MSA_NO_SESSION_ID".into(),
+            message: "SISU authenticate response did not contain a session ID.".into(),
+        })?;
 
     let redirect: xbox_types::SisuRedirect =
         resp.json().await.map_err(|e| LauncherError::Generic {
@@ -543,7 +576,7 @@ async fn exchange_oauth_token(
     client: &reqwest::Client,
     code: &str,
     verifier: &str,
-) -> LauncherResult<OAuthToken> {
+) -> LauncherResult<(DateTime<Utc>, OAuthToken)> {
     let params = [
         ("client_id", MICROSOFT_CLIENT_ID),
         ("code", code),
@@ -564,6 +597,7 @@ async fn exchange_oauth_token(
         })?;
 
     let status = resp.status();
+    let date = response_date(resp.headers());
     if !status.is_success() {
         let _body = resp.text().await.unwrap_or_default();
         return Err(LauncherError::Generic {
@@ -575,18 +609,20 @@ async fn exchange_oauth_token(
         });
     }
 
-    resp.json::<OAuthToken>()
+    let token = resp
+        .json::<OAuthToken>()
         .await
         .map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_OAUTH_TOKEN_PARSE".into(),
             message: format!("Failed to parse OAuth token: {}", e),
-        })
+        })?;
+    Ok((date, token))
 }
 
 async fn refresh_oauth_token(
     client: &reqwest::Client,
     refresh_token: &str,
-) -> LauncherResult<OAuthToken> {
+) -> LauncherResult<(DateTime<Utc>, OAuthToken)> {
     let params = [
         ("client_id", MICROSOFT_CLIENT_ID),
         ("refresh_token", refresh_token),
@@ -606,6 +642,7 @@ async fn refresh_oauth_token(
         })?;
 
     let status = resp.status();
+    let date = response_date(resp.headers());
     if !status.is_success() {
         let _body = resp.text().await.unwrap_or_default();
         return Err(LauncherError::Generic {
@@ -617,12 +654,14 @@ async fn refresh_oauth_token(
         });
     }
 
-    resp.json::<OAuthToken>()
+    let token = resp
+        .json::<OAuthToken>()
         .await
         .map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_OAUTH_REFRESH_PARSE".into(),
             message: format!("Failed to parse refreshed OAuth token: {}", e),
-        })
+        })?;
+    Ok((date, token))
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +674,8 @@ async fn sisu_authorize(
     access_token: &str,
     device_token: &str,
     key: &DeviceTokenKey,
-) -> LauncherResult<xbox_types::SisuAuthorize> {
+    current_date: DateTime<Utc>,
+) -> LauncherResult<(DateTime<Utc>, xbox_types::SisuAuthorize)> {
     let body = serde_json::json!({
         "AccessToken": format!("t={}", access_token),
         "AppId": MICROSOFT_CLIENT_ID,
@@ -648,7 +688,7 @@ async fn sisu_authorize(
         "UseModernGamertag": true
     });
 
-    let (_, result) = send_signed_request(
+    let (date, result) = send_signed_request(
         client,
         SISU_AUTHORIZE_URL,
         "/authorize",
@@ -656,9 +696,10 @@ async fn sisu_authorize(
         key,
         None,
         false,
+        current_date,
     )
     .await?;
-    Ok(result)
+    Ok((date, result))
 }
 
 async fn xsts_authorize(
@@ -843,10 +884,7 @@ async fn get_minecraft_profile(
 ///
 /// `db_path` is the path to `local_state.db` — the caller must provide the
 /// correct path for the running binary (desktop app vs CLI).
-pub async fn begin_login(
-    client: &reqwest::Client,
-    db_path: &Path,
-) -> LauncherResult<LoginFlow> {
+pub async fn begin_login(client: &reqwest::Client, db_path: &Path) -> LauncherResult<LoginFlow> {
     check_network_enabled(
         db_path,
         "network_msa_enabled",
@@ -854,18 +892,18 @@ pub async fn begin_login(
     )?;
     // Step 1: Generate p256 key + get device token
     let key = DeviceTokenKey::generate();
-    let device_token = get_device_token(client, &key).await?;
+    let (device_date, device_token) = get_device_token(client, &key).await?;
 
     // Step 2: Generate PKCE challenge + SISU authenticate
     let verifier = generate_pkce_verifier();
     let challenge = pkce_challenge(&verifier);
     let (session_id, auth_uri, state) =
-        sisu_authenticate(client, &device_token.token, &challenge, &key).await?;
+        sisu_authenticate(client, &device_token.token, &challenge, &key, device_date).await?;
 
     Ok(LoginFlow {
         auth_uri,
         verifier,
-        session_id,
+        session_id: Some(session_id),
         key_json: key.to_json(),
         device_token: device_token.token,
         state,
@@ -912,22 +950,22 @@ pub async fn finish_login(
     let key = DeviceTokenKey::from_json(&flow.key_json)?;
 
     // Step 4: Exchange auth code for OAuth token
-    let oauth = exchange_oauth_token(client, code, &flow.verifier).await?;
-    let auth_date = Utc::now();
+    let (auth_date, oauth) = exchange_oauth_token(client, code, &flow.verifier).await?;
 
     // Step 5: SISU authorize
-    let sisu = sisu_authorize(
+    let (sisu_date, sisu) = sisu_authorize(
         client,
         flow.session_id.as_deref(),
         &oauth.access_token,
         &flow.device_token,
         &key,
+        auth_date,
     )
     .await?;
 
     // Step 6: XSTS authorize → user hash + Xbox token
     let (uhs, xsts_token) =
-        xsts_authorize(client, &sisu, &flow.device_token, &key, auth_date).await?;
+        xsts_authorize(client, &sisu, &flow.device_token, &key, sisu_date).await?;
 
     // Step 7: Minecraft login → access token
     let mc_access_token = get_minecraft_token(client, &uhs, &xsts_token).await?;
@@ -966,17 +1004,24 @@ pub async fn refresh_credentials(
         "Microsoft account login is disabled in Privacy settings.",
     )?;
     // Step 4 (refresh): Get new OAuth token from refresh token
-    let oauth = refresh_oauth_token(client, &creds.refresh_token).await?;
-    let auth_date = Utc::now();
+    let (auth_date, oauth) = refresh_oauth_token(client, &creds.refresh_token).await?;
 
     // Regenerate device token + key (simpler + more secure than caching)
     let key = DeviceTokenKey::generate();
-    let device_token = get_device_token(client, &key).await?;
+    let (device_date, device_token) = get_device_token(client, &key).await?;
 
     // Steps 5-7: SISU authorize → XSTS → Minecraft token
-    let sisu = sisu_authorize(client, None, &oauth.access_token, &device_token.token, &key).await?;
+    let (sisu_date, sisu) = sisu_authorize(
+        client,
+        None,
+        &oauth.access_token,
+        &device_token.token,
+        &key,
+        device_date,
+    )
+    .await?;
     let (uhs, xsts_token) =
-        xsts_authorize(client, &sisu, &device_token.token, &key, auth_date).await?;
+        xsts_authorize(client, &sisu, &device_token.token, &key, sisu_date).await?;
     let mc_access_token = get_minecraft_token(client, &uhs, &xsts_token).await?;
 
     let refreshed = MsaCredentials {
@@ -993,76 +1038,41 @@ pub async fn refresh_credentials(
 
 /// Get stored credentials from the OS keyring, or None if not authenticated.
 pub fn load_credentials() -> LauncherResult<Option<MsaCredentials>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
-        LauncherError::Generic {
-            code: "ERR_MSA_KEYRING".into(),
-            message: format!("Failed to access keyring: {}", e),
-        }
-    })?;
-
-    match entry.get_password() {
-        Ok(json) => {
-            let creds: MsaCredentials =
-                serde_json::from_str(&json).map_err(|e| LauncherError::Generic {
-                    code: "ERR_MSA_STORED_PARSE".into(),
-                    message: format!("Failed to parse stored credentials: {}", e),
-                })?;
-            Ok(Some(creds))
-        }
-        Err(e) => {
-            if matches!(e, keyring::Error::NoEntry) {
-                Ok(None)
-            } else {
-                Err(LauncherError::Generic {
-                    code: "ERR_MSA_KEYRING_READ".into(),
-                    message: format!("Failed to read keyring: {}", e),
-                })
-            }
-        }
-    }
+    let Some(json) = crate::auth::load_secret(
+        KEYRING_SERVICE,
+        KEYRING_ACCOUNT,
+        CREDENTIALS_FALLBACK_FILE,
+        CREDENTIALS_KEY_CONTEXT,
+    )?
+    else {
+        return Ok(None);
+    };
+    serde_json::from_str(&json)
+        .map(Some)
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_STORED_PARSE".into(),
+            message: format!("Failed to parse stored credentials: {e}"),
+        })
 }
 
 /// Store credentials in the OS keyring as JSON.
 pub fn store_credentials(creds: &MsaCredentials) -> LauncherResult<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
-        LauncherError::Generic {
-            code: "ERR_MSA_KEYRING".into(),
-            message: format!("Failed to access keyring: {}", e),
-        }
+    let json = serde_json::to_string(creds).map_err(|e| LauncherError::Generic {
+        code: "ERR_MSA_STORED_SERIALIZE".into(),
+        message: format!("Failed to serialize credentials: {e}"),
     })?;
-
-    let json = serde_json::to_string(creds).unwrap_or_default();
-    entry
-        .set_password(&json)
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_KEYRING_WRITE".into(),
-            message: format!("Failed to write credentials to keyring: {}", e),
-        })?;
-    Ok(())
+    crate::auth::store_secret(
+        KEYRING_SERVICE,
+        KEYRING_ACCOUNT,
+        CREDENTIALS_FALLBACK_FILE,
+        CREDENTIALS_KEY_CONTEXT,
+        &json,
+    )
 }
 
 /// Clear stored MSA credentials (sign out).
 pub fn clear_credentials() -> LauncherResult<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|e| {
-        LauncherError::Generic {
-            code: "ERR_MSA_KEYRING".into(),
-            message: format!("Failed to access keyring: {}", e),
-        }
-    })?;
-
-    match entry.delete_password() {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            if matches!(e, keyring::Error::NoEntry) {
-                Ok(())
-            } else {
-                Err(LauncherError::Generic {
-                    code: "ERR_MSA_KEYRING_DELETE".into(),
-                    message: format!("Failed to delete credentials: {}", e),
-                })
-            }
-        }
-    }
+    crate::auth::clear_secret(KEYRING_SERVICE, KEYRING_ACCOUNT, CREDENTIALS_FALLBACK_FILE)
 }
 
 #[cfg(test)]
@@ -1092,6 +1102,12 @@ mod tests {
         assert_eq!(key.x, restored.x);
         assert_eq!(key.y, restored.y);
         assert_eq!(key.id, restored.id);
+    }
+
+    #[test]
+    fn xbox_device_id_is_braced_uppercase_uuid() {
+        let id = Uuid::parse_str("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        assert_eq!(xbox_device_id(id), "{123E4567-E89B-12D3-A456-426614174000}");
     }
 
     #[test]

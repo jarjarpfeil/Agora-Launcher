@@ -203,7 +203,7 @@ pub async fn poll_device_flow(
 
 /// Derive a 256-bit key using PBKDF2-HMAC-SHA256.
 /// Salt is derived from the OS username and a stable machine identifier.
-fn derive_fallback_key() -> Vec<u8> {
+fn derive_fallback_key_for(context: &[u8]) -> Vec<u8> {
     use pbkdf2::pbkdf2_hmac;
     use sha2::Sha256;
 
@@ -216,13 +216,12 @@ fn derive_fallback_key() -> Vec<u8> {
     let salt = format!("agora-fallback:{}:{}", username, std::env::consts::OS);
 
     let mut key = vec![0u8; 32];
-    pbkdf2_hmac::<Sha256>(
-        b"agora-mcp-keyring-fallback",
-        salt.as_bytes(),
-        PBKDF2_ITERATIONS,
-        &mut key,
-    );
+    pbkdf2_hmac::<Sha256>(context, salt.as_bytes(), PBKDF2_ITERATIONS, &mut key);
     key
+}
+
+fn derive_fallback_key() -> Vec<u8> {
+    derive_fallback_key_for(b"agora-mcp-keyring-fallback")
 }
 
 /// Encrypt the token using AES-256-GCM with a random 12-byte nonce.
@@ -274,6 +273,110 @@ fn decrypt_token(data: &[u8], key: &[u8]) -> Option<String> {
 /// Return the path to the fallback token file.
 fn fallback_token_path() -> Option<std::path::PathBuf> {
     dirs::data_local_dir().map(|d| d.join("agora").join(TOKEN_FALLBACK_FILE))
+}
+
+fn fallback_secret_path(file_name: &str) -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("agora").join(file_name))
+}
+
+pub(crate) fn store_secret(
+    service: &str,
+    account: &str,
+    fallback_file: &str,
+    key_context: &[u8],
+    value: &str,
+) -> LauncherResult<()> {
+    if let Ok(entry) = keyring::Entry::new(service, account) {
+        if entry.set_password(value).is_ok() {
+            if let Some(path) = fallback_secret_path(fallback_file) {
+                let _ = std::fs::remove_file(path);
+            }
+            return Ok(());
+        }
+    }
+
+    let path = fallback_secret_path(fallback_file).ok_or_else(|| LauncherError::Generic {
+        code: "ERR_AUTH_FALLBACK_PATH".into(),
+        message: "Could not determine data directory for encrypted credential storage.".into(),
+    })?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| LauncherError::Generic {
+            code: "ERR_AUTH_FALLBACK_WRITE".into(),
+            message: "Failed to create encrypted credential directory.".into(),
+        })?;
+    }
+    let encrypted = encrypt_token(value, &derive_fallback_key_for(key_context))?;
+    std::fs::write(path, encrypted).map_err(|_| LauncherError::Generic {
+        code: "ERR_AUTH_FALLBACK_WRITE".into(),
+        message: "Failed to write encrypted credentials.".into(),
+    })
+}
+
+pub(crate) fn load_secret(
+    service: &str,
+    account: &str,
+    fallback_file: &str,
+    key_context: &[u8],
+) -> LauncherResult<Option<String>> {
+    let mut keyring_error = None;
+    match keyring::Entry::new(service, account) {
+        Ok(entry) => match entry.get_password() {
+            Ok(value) => return Ok(Some(value)),
+            Err(keyring::Error::NoEntry) => {}
+            Err(error) => keyring_error = Some(error.to_string()),
+        },
+        Err(error) => keyring_error = Some(error.to_string()),
+    }
+
+    if let Some(path) = fallback_secret_path(fallback_file) {
+        if path.exists() {
+            let encrypted = std::fs::read(path).map_err(|_| LauncherError::Generic {
+                code: "ERR_AUTH_FALLBACK_READ".into(),
+                message: "Failed to read encrypted credentials.".into(),
+            })?;
+            return decrypt_token(&encrypted, &derive_fallback_key_for(key_context))
+                .map(Some)
+                .ok_or_else(|| LauncherError::Generic {
+                    code: "ERR_AUTH_FALLBACK_DECRYPT".into(),
+                    message: "Failed to decrypt stored credentials.".into(),
+                });
+        }
+    }
+
+    if let Some(error) = keyring_error {
+        return Err(LauncherError::Generic {
+            code: "ERR_AUTH_KEYRING_READ".into(),
+            message: format!("Failed to read credentials from the OS keyring: {error}"),
+        });
+    }
+    Ok(None)
+}
+
+pub(crate) fn clear_secret(
+    service: &str,
+    account: &str,
+    fallback_file: &str,
+) -> LauncherResult<()> {
+    if let Ok(entry) = keyring::Entry::new(service, account) {
+        match entry.delete_password() {
+            Ok(()) | Err(keyring::Error::NoEntry) => {}
+            Err(error) => {
+                return Err(LauncherError::Generic {
+                    code: "ERR_AUTH_KEYRING_DELETE".into(),
+                    message: format!("Failed to delete credentials from the OS keyring: {error}"),
+                });
+            }
+        }
+    }
+    if let Some(path) = fallback_secret_path(fallback_file) {
+        if path.exists() {
+            std::fs::remove_file(path).map_err(|_| LauncherError::Generic {
+                code: "ERR_AUTH_FALLBACK_DELETE".into(),
+                message: "Failed to delete encrypted credentials.".into(),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Returns 	rue — the fallback is always available on all platforms.
@@ -401,4 +504,21 @@ pub async fn get_github_user(token: String) -> LauncherResult<GithubProfile> {
         login: parsed.login,
         avatar_url: parsed.avatar_url,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encrypted_fallback_roundtrips_large_credentials() {
+        let credentials = "x".repeat(8_192);
+        let key = derive_fallback_key_for(b"agora-msa-credentials-fallback");
+        let encrypted = encrypt_token(&credentials, &key).unwrap();
+        assert_ne!(encrypted, credentials.as_bytes());
+        assert_eq!(
+            decrypt_token(&encrypted, &key).as_deref(),
+            Some(credentials.as_str())
+        );
+    }
 }

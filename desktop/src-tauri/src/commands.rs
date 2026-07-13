@@ -24,8 +24,11 @@ use agora_core::modrinth::{ModrinthSearchParams, ModrinthSort};
 use agora_core::pack_install;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use tauri::Manager;
+
+const MSA_AUTH_REPLY_HOST: &str = "login.live.com";
+const MSA_AUTH_REPLY_PATH: &str = "/oauth20_desktop.srf";
 
 /// Current status of the MCP server.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2749,49 +2752,109 @@ pub async fn explain_crash(
 // Phase 5: MSA auth + GC architect
 // ---------------------------------------------------------------------------
 
-#[derive(serde::Serialize)]
-pub struct MsaBeginLoginResponse {
-    pub auth_uri: String,
-}
-
-/// Begin the Microsoft Account login flow. Returns a URL the frontend should
-/// open in a browser/webview. After the user completes login, call
-/// `msa_finish_login` with the `?code=` from the redirect URL.
-#[tauri::command]
-pub async fn msa_begin_login(
+async fn capture_msa_callback(
     app: tauri::AppHandle,
-    state: tauri::State<'_, LauncherState>,
-) -> LauncherResult<MsaBeginLoginResponse> {
-    let db_path = crate::paths::local_state_db_path(&app).map_err(|e| LauncherError::Generic {
-        code: "ERR_DB".into(),
-        message: e.to_string(),
+    auth_uri: &str,
+) -> LauncherResult<(String, String)> {
+    let auth_url: tauri::Url = auth_uri.parse().map_err(|e| LauncherError::Generic {
+        code: "ERR_MSA_AUTH_URL".into(),
+        message: format!("Microsoft returned an invalid sign-in URL: {e}"),
     })?;
-    let mut s = state.lock().await;
-    let flow = agora_core::msa::begin_login(&s.client, &db_path).await?;
-    let auth_uri = flow.auth_uri.clone();
-    s.login_flow = Some(flow);
-    Ok(MsaBeginLoginResponse { auth_uri })
+
+    if let Some(existing) = app.get_webview_window("msa-login") {
+        let _ = existing.destroy();
+    }
+
+    let (sender, receiver) = tokio::sync::oneshot::channel::<Result<(String, String), String>>();
+    let sender = Arc::new(Mutex::new(Some(sender)));
+    let navigation_sender = Arc::clone(&sender);
+    let close_sender = Arc::clone(&sender);
+    let close_app = app.clone();
+
+    let auth_window =
+        tauri::WebviewWindowBuilder::new(&app, "msa-login", tauri::WebviewUrl::External(auth_url))
+            .title("Sign in to Microsoft")
+            .inner_size(520.0, 720.0)
+            .center()
+            .on_navigation(move |url| {
+                let is_callback = url.scheme() == "https"
+                    && url.host_str() == Some(MSA_AUTH_REPLY_HOST)
+                    && url.path() == MSA_AUTH_REPLY_PATH;
+                if !is_callback {
+                    return true;
+                }
+
+                let query: std::collections::HashMap<_, _> =
+                    url.query_pairs().into_owned().collect();
+                let result = match (query.get("code").cloned(), query.get("state").cloned()) {
+                    (Some(code), Some(state)) => Ok((code, state)),
+                    _ => Err(query
+                        .get("error_description")
+                        .cloned()
+                        .or_else(|| query.get("error").cloned())
+                        .unwrap_or_else(|| "Microsoft returned no authorization code.".into())),
+                };
+
+                if let Ok(mut guard) = navigation_sender.lock() {
+                    if let Some(sender) = guard.take() {
+                        let _ = sender.send(result);
+                    }
+                }
+                if let Some(window) = close_app.get_webview_window("msa-login") {
+                    let _ = window.destroy();
+                }
+                false
+            })
+            .build()
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_MSA_WINDOW".into(),
+                message: format!("Could not open Microsoft sign-in window: {e}"),
+            })?;
+
+    auth_window.on_window_event(move |event| {
+        if matches!(
+            event,
+            tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+        ) {
+            if let Ok(mut guard) = close_sender.lock() {
+                if let Some(sender) = guard.take() {
+                    let _ = sender.send(Err(
+                        "The Microsoft sign-in window was closed before authentication completed."
+                            .into(),
+                    ));
+                }
+            }
+        }
+    });
+
+    receiver
+        .await
+        .map_err(|_| LauncherError::Generic {
+            code: "ERR_MSA_WINDOW_CLOSED".into(),
+            message: "The Microsoft sign-in window closed unexpectedly.".into(),
+        })?
+        .map_err(|message| LauncherError::Generic {
+            code: "ERR_MSA_LOGIN_CANCELLED".into(),
+            message,
+        })
 }
 
-/// Complete the MSA login flow with the auth code from the browser redirect.
+/// Run the complete Microsoft Account login flow in a dedicated OAuth window.
+/// The callback is intercepted before Microsoft sanitizes its query string.
 #[tauri::command]
-pub async fn msa_finish_login(
+pub async fn msa_login(
     app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
-    code: String,
-    oauth_state: Option<String>,
 ) -> LauncherResult<MsaAccountStatus> {
     let db_path = crate::paths::local_state_db_path(&app).map_err(|e| LauncherError::Generic {
         code: "ERR_DB".into(),
         message: e.to_string(),
     })?;
-    let mut s = state.lock().await;
-    let flow = s.login_flow.take().ok_or_else(|| LauncherError::Generic {
-        code: "ERR_MSA_NO_FLOW".into(),
-        message: "No login flow in progress. Call msa_begin_login first.".into(),
-    })?;
+    let client = { state.lock().await.client.clone() };
+    let flow = agora_core::msa::begin_login(&client, &db_path).await?;
+    let (code, oauth_state) = capture_msa_callback(app, &flow.auth_uri).await?;
     let creds =
-        agora_core::msa::finish_login(&s.client, &code, &flow, oauth_state.as_deref(), &db_path).await?;
+        agora_core::msa::finish_login(&client, &code, &flow, Some(&oauth_state), &db_path).await?;
     Ok(MsaAccountStatus::from(&creds))
 }
 
@@ -2818,7 +2881,7 @@ pub async fn msa_refresh(
     let s = state.lock().await;
     let creds = agora_core::msa::load_credentials()?.ok_or_else(|| LauncherError::Generic {
         code: "ERR_MSA_NOT_AUTHENTICATED".into(),
-        message: "Not signed in. Use msa_begin_login first.".into(),
+        message: "Not signed in. Sign in with your Microsoft account first.".into(),
     })?;
     let refreshed = agora_core::msa::refresh_credentials(&s.client, &creds, &db_path).await?;
     Ok(MsaAccountStatus::from(&refreshed))

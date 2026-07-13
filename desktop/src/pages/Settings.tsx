@@ -17,8 +17,7 @@ import {
   githubLogout,
   isAuthExpired,
   listInstances,
-  msaBeginLogin,
-  msaFinishLogin,
+  msaLogin,
   msaGetStatus,
   msaLogout,
   pickOpenFile,
@@ -116,8 +115,6 @@ export function Settings() {
   // MSA auth state
   const [msaCreds, setMsaCreds] = useState<MsaAccountStatus | null>(null);
   const [msaLoading, setMsaLoading] = useState(true);
-  const [msaAuthUri, setMsaAuthUri] = useState<string | null>(null);
-  const [msaCode, setMsaCode] = useState('');
   const [msaError, setMsaError] = useState<string | null>(null);
   const [msaBusy, setMsaBusy] = useState(false);
 
@@ -330,33 +327,8 @@ export function Settings() {
     setMsaError(null);
     setMsaBusy(true);
     try {
-      const resp = await msaBeginLogin();
-      setMsaAuthUri(resp.auth_uri);
-      try {
-        const { open } = await import('@tauri-apps/plugin-shell');
-        open(resp.auth_uri).catch(() => {});
-      } catch {
-        // Browser open best-effort
-      }
-    } catch (e) {
-      setMsaError(formatError(e));
-      setMsaBusy(false);
-    }
-  };
-
-  const handleMsaComplete = async () => {
-    if (!msaCode.trim()) return;
-    setMsaError(null);
-    setMsaBusy(true);
-    try {
-      // Extract code from URL if the user pasted the full redirect URL
-      let code = msaCode.trim();
-      const urlMatch = code.match(/[?&]code=([^&]+)/);
-      if (urlMatch) code = decodeURIComponent(urlMatch[1]);
-      const creds = await msaFinishLogin(code, null);
+      const creds = await msaLogin();
       setMsaCreds(creds);
-      setMsaAuthUri(null);
-      setMsaCode('');
     } catch (e) {
       setMsaError(formatError(e));
     } finally {
@@ -1047,45 +1019,14 @@ export function Settings() {
                   Sign in with your Microsoft account to enable direct in-app launching (without the Mojang launcher).
                 </p>
 
-                {msaAuthUri ? (
-                  <div className="rounded-lg border border-border bg-muted p-3 space-y-2">
-                    <p className="text-xs">A browser window should open. If not, use this link:</p>
-                    <p className="text-xs font-semibold text-primary break-all">{msaAuthUri}</p>
-                    <p className="text-xs text-muted-foreground">
-                      After signing in, you'll be redirected to a URL. Paste the full redirect URL or the <code className="bg-muted px-1 py-0.5 rounded">?code=</code> value below:
-                    </p>
-                    <input
-                      value={msaCode}
-                      onChange={(e) => setMsaCode(e.target.value)}
-                      placeholder="Paste the redirect URL or code here"
-                      className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs font-mono"
-                    />
-                    {msaError && <p className="text-xs text-destructive">{msaError}</p>}
-                    <div className="flex gap-2">
-                      <button
-                        onClick={handleMsaComplete}
-                        disabled={msaBusy || !msaCode.trim()}
-                        className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                      >
-                        {msaBusy ? 'Completing…' : 'Complete Sign In'}
-                      </button>
-                      <button
-                        onClick={() => { setMsaAuthUri(null); setMsaCode(''); setMsaError(null); }}
-                        className="rounded-lg border border-input px-3 py-1.5 text-xs font-medium hover:bg-accent"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <button
-                    onClick={handleMsaSignIn}
-                    disabled={msaBusy}
-                    className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-                  >
-                    {msaBusy ? 'Starting…' : 'Sign in with Microsoft'}
-                  </button>
-                )}
+                {msaError && <p className="text-xs text-destructive">{msaError}</p>}
+                <button
+                  onClick={handleMsaSignIn}
+                  disabled={msaBusy}
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                >
+                  {msaBusy ? 'Signing in…' : 'Sign in with Microsoft'}
+                </button>
               </div>
             )}
           </div>
