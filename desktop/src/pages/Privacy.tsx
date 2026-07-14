@@ -52,6 +52,33 @@ const ENDPOINTS: Endpoint[] = [
     group: 'Governance',
   },
   {
+    key: 'network_mojang_metadata_enabled',
+    name: 'Mojang Metadata',
+    hosts: 'piston-meta.mojang.com / launcher.mojang.com',
+    purpose: 'Fetch the Minecraft version manifest and version-specific metadata JSON files.',
+    note: 'Enabled by default; cached files remain usable if disabled.',
+    default: true,
+    group: 'Launch',
+  },
+  {
+    key: 'network_mojang_content_enabled',
+    name: 'Mojang Content',
+    hosts: 'piston-data.mojang.com / libraries.minecraft.net / resources.download.minecraft.net',
+    purpose: 'Download the Minecraft client JAR, official libraries, native binaries, and game assets.',
+    note: 'Enabled by default; cached files remain usable if disabled.',
+    default: true,
+    group: 'Launch',
+  },
+  {
+    key: 'network_loader_enabled',
+    name: 'Modloader Metadata & Content',
+    hosts: 'maven.fabricmc.net / maven.quiltmc.org / loader pinned hosts',
+    purpose: 'Fetch Fabric/Quilt profile JSONs and Maven-hosted loader libraries.',
+    note: 'Enabled by default; cached files remain usable if disabled.',
+    default: true,
+    group: 'Launch',
+  },
+  {
     key: 'network_msa_enabled',
     name: 'Minecraft Authentication',
     hosts: 'login.live.com / user.auth.xboxlive.com / api.minecraftservices.com',
@@ -92,7 +119,12 @@ export function Privacy() {
       const states: Record<string, boolean> = {};
       keys.forEach((k, i) => {
         const v = results[i];
-        states[k] = typeof v === 'boolean' ? v : ENDPOINTS[i].default;
+        // Accept both JSON booleans and legacy JSON string "true"/"false".
+        states[k] = typeof v === 'boolean'
+          ? v
+          : typeof v === 'string'
+            ? v === 'true'
+            : ENDPOINTS[i].default;
       });
       setEndpointStates(states);
 

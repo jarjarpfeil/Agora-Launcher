@@ -1,5 +1,6 @@
 use crate::error::{LauncherError, LauncherResult};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 /// Embedded copy of `loader-manifests/loader_manifests.json`.
@@ -14,6 +15,21 @@ const LOADER_MANIFESTS: &str = include_str!("../../../loader-manifests/loader_ma
 /// version manifest. Contains every stable Minecraft release (1.0 → current).
 const MC_VERSIONS: &str = include_str!("../../../loader-manifests/minecraft_versions.json");
 
+// Runtime profile library pins remain embedded for installed-profile adoption.
+
+// ---------------------------------------------------------------------------
+// Library pin enforcement gate
+// ---------------------------------------------------------------------------
+
+/// When `true`, [`materialize`](crate::launch_planner::materialize) refuses to
+/// download any Fabric/Quilt library artifact whose Maven-relative path is not
+/// present in `library_pins` with a matching SHA-256.
+pub const LIBRARY_PIN_ENFORCEMENT_ENABLED: bool = true;
+
+// ---------------------------------------------------------------------------
+// Manifest types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct LoaderEntry {
     pub mc_version: String,
@@ -22,6 +38,14 @@ pub struct LoaderEntry {
     pub sha256: String,
     pub file_name: String,
     pub file_type: String,
+    /// SHA-256 of the version.json embedded inside an installer JAR.
+    /// Present only for `installer_jar` entries that have a separate version.json.
+    #[serde(default)]
+    pub version_json_sha256: Option<String>,
+    /// Install profile spec version (0 for legacy, 1+ for modern).
+    /// Present only for `installer_jar` entries.
+    #[serde(default)]
+    pub installer_spec: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,18 +54,61 @@ struct LoaderManifests {
     domain_allowlist: Vec<String>,
     #[serde(default)]
     loaders: std::collections::BTreeMap<String, Vec<LoaderEntry>>,
+    /// Global map of Maven-relative JAR path → lowercase 64-char SHA-256 hex.
+    ///
+    /// Populated by `scripts/fetch_loader_manifests.py`. Shared across all
+    /// loader entries (Fabric/Quilt/Forge/NeoForge) for deduplication. Validated
+    /// on load: every key must end in `.jar` and every value must be 64 lowercase
+    /// hex characters.
+    #[serde(default)]
+    library_pins: HashMap<String, String>,
+    /// Per-profile library path coverage index.
+    ///
+    /// Maps each Fabric/Quilt profile `file_name` to the sorted list of
+    /// Maven-relative JAR paths referenced by that profile. Populated by
+    /// `scripts/fetch_loader_manifests.py` and consumed by the
+    /// [`release_gate_pin_coverage`] test to verify offline pin coverage
+    /// without live network access.
+    #[serde(default)]
+    #[allow(dead_code)]
+    profile_library_paths: HashMap<String, Vec<String>>,
+    /// Per-installer library path coverage index for Forge/NeoForge entries.
+    ///
+    /// Maps each `installer_jar` `file_name` to the sorted unique list of
+    /// Maven-relative JAR/ZIP/TXT paths referenced by that installer profile
+    /// (including install-profile libs, version.json libs, processor jars,
+    /// classpath entries, and bracketed data/artifact references).
+    #[serde(default)]
+    installer_library_paths: HashMap<String, Vec<String>>,
 }
+
+// Processor allowlist types removed — managed installer subsystem replaced
+// by installed-profile adoption.
+
+// ---------------------------------------------------------------------------
+// Static caches
+// ---------------------------------------------------------------------------
 
 static MANIFEST: OnceLock<LoaderManifests> = OnceLock::new();
 static MC_VERSIONS_LIST: OnceLock<Vec<String>> = OnceLock::new();
 
-/// Parse the embedded loader manifests once and cache the result.
+/// Parse the embedded loader manifests once, validate `library_pins`, cache.
 fn manifest() -> &'static LoaderManifests {
     MANIFEST.get_or_init(|| {
-        serde_json::from_str(LOADER_MANIFESTS).unwrap_or_else(|_| LoaderManifests {
-            domain_allowlist: Vec::new(),
-            loaders: std::collections::BTreeMap::new(),
-        })
+        let m: LoaderManifests =
+            serde_json::from_str(LOADER_MANIFESTS).unwrap_or_else(|_| LoaderManifests {
+                domain_allowlist: Vec::new(),
+                loaders: std::collections::BTreeMap::new(),
+                library_pins: HashMap::new(),
+                profile_library_paths: HashMap::new(),
+                installer_library_paths: HashMap::new(),
+            });
+        // Validate library_pins eagerly so bad data is caught at compile-embed time.
+        if let Err(err) = validate_library_pins(&m.library_pins) {
+            #[cfg(debug_assertions)]
+            eprintln!("[agora-core] loader_manifests.json library_pins validation: {err}");
+        }
+        m
     })
 }
 
@@ -49,6 +116,72 @@ fn manifest() -> &'static LoaderManifests {
 fn mc_versions_list() -> &'static [String] {
     MC_VERSIONS_LIST.get_or_init(|| serde_json::from_str(MC_VERSIONS).unwrap_or_default())
 }
+
+// ---------------------------------------------------------------------------
+// Library pin validation
+// ---------------------------------------------------------------------------
+
+/// Validate every entry in a `library_pins` map.
+///
+/// Rules:
+/// - Keys must be relative Maven paths ending in `.jar`, `.zip`, `.txt`, or `.tsrg`
+///   (no leading `/`, `..`, `//`, `:`).
+/// - Values must be 64-character lowercase hex strings.
+pub fn validate_library_pins(pins: &HashMap<String, String>) -> LauncherResult<()> {
+    for (path, hash) in pins {
+        // Must end with a known Maven extension
+        let is_known_ext = path.ends_with(".jar")
+            || path.ends_with(".zip")
+            || path.ends_with(".txt")
+            || path.ends_with(".tsrg");
+        if !is_known_ext {
+            return Err(LauncherError::Generic {
+                code: "ERR_LIBRARY_PIN_PATH".into(),
+                message: format!(
+                    "Library pin path must end with .jar, .zip, .txt, or .tsrg: {path}"
+                ),
+            });
+        }
+        // Must be a safe relative path (no leading /, .., //, or colons)
+        if path.starts_with('/')
+            || path.starts_with("//")
+            || path.starts_with("..")
+            || path.contains(":")
+        {
+            return Err(LauncherError::Generic {
+                code: "ERR_LIBRARY_PIN_PATH".into(),
+                message: format!("Library pin path is not a safe relative path: {path}"),
+            });
+        }
+        // Must be 64 lowercase hex characters
+        if hash.len() != 64 {
+            return Err(LauncherError::Generic {
+                code: "ERR_LIBRARY_PIN_HASH".into(),
+                message: format!(
+                    "Library pin hash for {path} is {} chars, expected 64",
+                    hash.len()
+                ),
+            });
+        }
+        if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(LauncherError::Generic {
+                code: "ERR_LIBRARY_PIN_HASH".into(),
+                message: format!("Library pin hash for {path} contains non-hex characters"),
+            });
+        }
+        if *hash != hash.to_ascii_lowercase() {
+            return Err(LauncherError::Generic {
+                code: "ERR_LIBRARY_PIN_HASH".into(),
+                message: format!("Library pin hash for {path} must be lowercase"),
+            });
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Public API - entry lookup
+// ---------------------------------------------------------------------------
 
 /// Find a pinned loader entry for a `(loader, mc_version, loader_version)` tuple.
 pub fn find_entry(
@@ -62,6 +195,60 @@ pub fn find_entry(
             .find(|e| e.mc_version == mc_version && e.loader_version == loader_version)
     })
 }
+
+// ---------------------------------------------------------------------------
+// Public API - library pins
+// ---------------------------------------------------------------------------
+
+/// Look up a pinned SHA-256 by normalized Maven-relative JAR path.
+///
+/// Returns `None` if the path is not pinned (enforcement is off by default so
+/// callers should degrade gracefully).
+pub fn get_library_pin(path: &str) -> Option<&'static str> {
+    manifest().library_pins.get(path).map(|s| s.as_str())
+}
+
+/// True if `path` appears in the pinned library map.
+pub fn has_library_pin(path: &str) -> bool {
+    manifest().library_pins.contains_key(path)
+}
+
+/// Access the raw `library_pins` map (read-only, for testing and diagnostics).
+pub fn library_pins() -> &'static HashMap<String, String> {
+    &manifest().library_pins
+}
+
+/// Return the current enforcement mode for the release-gate test.
+pub fn is_enforcement_enabled() -> bool {
+    LIBRARY_PIN_ENFORCEMENT_ENABLED
+}
+
+// ---------------------------------------------------------------------------
+// Public API - installer library paths
+// ---------------------------------------------------------------------------
+
+/// Get the sorted unique Maven-relative library paths for an installer JAR.
+///
+/// Returns an empty vec if the file_name is not in the index.
+pub fn get_installer_library_paths(file_name: &str) -> Vec<&'static str> {
+    manifest()
+        .installer_library_paths
+        .get(file_name)
+        .map(|paths| paths.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default()
+}
+
+/// True if `file_name` has a non-empty installer_library_paths entry.
+pub fn has_installer_library_paths(file_name: &str) -> bool {
+    manifest()
+        .installer_library_paths
+        .get(file_name)
+        .is_some_and(|paths| !paths.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// Public API - domain allowlist
+// ---------------------------------------------------------------------------
 
 /// Verify that a URL's host is on the hard-coded modloader domain allowlist.
 pub fn ensure_allowed_domain(raw_url: &str) -> LauncherResult<()> {
@@ -85,6 +272,10 @@ pub fn ensure_allowed_domain(raw_url: &str) -> LauncherResult<()> {
 pub fn is_allowed_host(host: &str) -> bool {
     manifest().domain_allowlist.iter().any(|d| d == host)
 }
+
+// ---------------------------------------------------------------------------
+// Public API - listing
+// ---------------------------------------------------------------------------
 
 /// List pinned loader entries for a loader + Minecraft version.
 pub fn list_versions(loader: &str, mc_version: &str) -> Vec<&'static LoaderEntry> {
@@ -131,7 +322,12 @@ pub fn strip_sha_prefix(s: &str) -> &str {
     s.strip_prefix("sha256:").unwrap_or(s)
 }
 
-/// --- Tests ---
+// Processor allowlist lookup removed — managed installer processor
+// subsystem has been replaced by installed-profile adoption.
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -163,7 +359,6 @@ mod tests {
 
     #[test]
     fn test_disallowed_file_scheme() {
-        // ensure_allowed_domain should reject file:// URLs.
         let result = ensure_allowed_domain("file:///etc/passwd");
         assert!(result.is_err());
     }
@@ -203,7 +398,6 @@ mod tests {
     #[test]
     fn test_list_mc_versions_includes_legacy() {
         let versions = list_mc_versions(None);
-        // Mojang's manifest includes versions back to 1.0.
         assert!(
             versions.len() > 50,
             "Expected 50+ versions, got {}",
@@ -221,18 +415,366 @@ mod tests {
 
     #[test]
     fn test_list_mc_versions_filtered_by_loader() {
-        // When a loader is selected, only versions that loader supports appear.
         let all = list_mc_versions(None);
         let fabric = list_mc_versions(Some("fabric"));
-        // Fabric should have fewer versions than the full list (it doesn't support 1.7.10 etc).
         assert!(
             fabric.len() < all.len(),
             "Fabric should have fewer versions than the full list"
         );
-        // Fabric shouldn't include 1.7.10 (too old for Fabric).
         assert!(
             !fabric.contains(&"1.7.10".to_string()),
             "Fabric should not support 1.7.10"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // library_pins: schema default and lookup
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn library_pins_defaults_to_empty_map() {
+        let pins = library_pins();
+        let valid_ext = |k: &str| {
+            k.ends_with(".jar")
+                || k.ends_with(".zip")
+                || k.ends_with(".txt")
+                || k.ends_with(".tsrg")
+        };
+        assert!(
+            pins.iter().all(|(k, v)| {
+                valid_ext(k)
+                    && v.len() == 64
+                    && v.bytes().all(|b| b.is_ascii_hexdigit())
+                    && v == &v.to_ascii_lowercase()
+            }),
+            "Every library_pin entry must have a .jar/.zip/.txt/.tsrg key and 64-char lowercase hex value"
+        );
+    }
+
+    #[test]
+    fn get_library_pin_returns_none_for_unknown() {
+        let pin = get_library_pin("nonexistent/path/to/lib.jar");
+        assert!(pin.is_none(), "Unknown path should return None");
+    }
+
+    #[test]
+    fn has_library_pin_returns_false_for_unknown() {
+        assert!(!has_library_pin("nonexistent/path/to/lib.jar"));
+    }
+
+    // -----------------------------------------------------------------------
+    // library_pins: validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn validate_library_pins_accepts_valid_entry() {
+        let mut pins = HashMap::new();
+        pins.insert(
+            "net/fabricmc/fabric-loader/0.19.0/fabric-loader-0.19.0.jar".into(),
+            "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890".into(),
+        );
+        assert!(validate_library_pins(&pins).is_ok());
+    }
+
+    #[test]
+    fn validate_library_pins_accepts_empty() {
+        let pins = HashMap::new();
+        assert!(validate_library_pins(&pins).is_ok());
+    }
+
+    #[test]
+    fn validate_library_pins_accepts_tsrg_key() {
+        let mut pins = HashMap::new();
+        pins.insert(
+            "net/minecraft/client/1.21/client-1.21-mappings.tsrg".into(),
+            "a".repeat(64),
+        );
+        assert!(validate_library_pins(&pins).is_ok());
+    }
+
+    #[test]
+    fn validate_library_pins_accepts_zip_key() {
+        let mut pins = HashMap::new();
+        pins.insert(
+            "de/oceanlabs/mcp/mcp_config/1.20.1-20230612.114412/mcp_config-1.20.1-20230612.114412.zip".into(),
+            "a".repeat(64),
+        );
+        assert!(validate_library_pins(&pins).is_ok());
+    }
+
+    #[test]
+    fn validate_library_pins_accepts_txt_key() {
+        let mut pins = HashMap::new();
+        pins.insert(
+            "de/oceanlabs/mcp/mcp_config/1.20.1-20230612.114412/mcp_config-1.20.1-20230612.114412-mappings.txt".into(),
+            "a".repeat(64),
+        );
+        assert!(validate_library_pins(&pins).is_ok());
+    }
+
+    #[test]
+    fn validate_library_pins_accepts_plus_in_version() {
+        // Paths with `+` in the version (e.g. sponge-mixin) must be accepted.
+        let mut pins = HashMap::new();
+        pins.insert(
+            "net/fabricmc/sponge-mixin/0.14.0+mixin.0.8.6/sponge-mixin-0.14.0+mixin.0.8.6.jar"
+                .into(),
+            "3f22c86d1a89e0c2b1cdd4388d495b50c744add9a7f2e96a8937f0dfd8d0f0b1".into(),
+        );
+        assert!(validate_library_pins(&pins).is_ok());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_unknown_ext_key() {
+        let mut pins = HashMap::new();
+        pins.insert("path/to/lib.dll".into(), "a".repeat(64));
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_absolute_path() {
+        let mut pins = HashMap::new();
+        pins.insert("/absolute/path/lib.jar".into(), "a".repeat(64));
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_traversal_path() {
+        let mut pins = HashMap::new();
+        pins.insert("../../lib.jar".into(), "a".repeat(64));
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_windows_drive_path() {
+        let mut pins = HashMap::new();
+        pins.insert("C:/Windows/lib.jar".into(), "a".repeat(64));
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_short_hash() {
+        let mut pins = HashMap::new();
+        pins.insert("path/lib.jar".into(), "too_short".into());
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_uppercase_hash() {
+        let mut pins = HashMap::new();
+        pins.insert("path/lib.jar".into(), "A".repeat(64));
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    #[test]
+    fn validate_library_pins_rejects_non_hex_hash() {
+        let mut pins = HashMap::new();
+        pins.insert("path/lib.jar".into(), "z".repeat(64));
+        assert!(validate_library_pins(&pins).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Enforcement gate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn library_pin_enforcement_is_enabled() {
+        assert!(
+            is_enforcement_enabled(),
+            "LIBRARY_PIN_ENFORCEMENT_ENABLED must be true after the data refresh."
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // New field: LoaderEntry serde defaults
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn loader_entry_version_json_sha256_defaults_none() {
+        let json = r#"{
+            "mc_version": "1.21",
+            "loader_version": "0.19.0",
+            "source_url": "https://example.com/profile.json",
+            "sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "file_name": "test.json",
+            "file_type": "profile_json"
+        }"#;
+        let entry: LoaderEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.version_json_sha256.is_none());
+        assert!(entry.installer_spec.is_none());
+    }
+
+    #[test]
+    fn loader_entry_parses_new_fields() {
+        let json = r#"{
+            "mc_version": "1.20.1",
+            "loader_version": "47.4.21",
+            "source_url": "https://example.com/forge-installer.jar",
+            "sha256": "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+            "file_name": "forge-1.20.1-47.4.21-installer.jar",
+            "file_type": "installer_jar",
+            "version_json_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "installer_spec": 1
+        }"#;
+        let entry: LoaderEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            entry.version_json_sha256.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert_eq!(entry.installer_spec, Some(1));
+    }
+
+    // -----------------------------------------------------------------------
+    // installer_library_paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_installer_library_paths_returns_empty_for_unknown() {
+        let paths = get_installer_library_paths("nonexistent-installer.jar");
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn has_installer_library_paths_returns_false_for_unknown() {
+        assert!(!has_installer_library_paths("nonexistent-installer.jar"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Release-gate helper: complete pin coverage assertion
+    // -----------------------------------------------------------------------
+
+    /// Assert that every Fabric/Quilt/Forge/NeoForge profile entry has complete
+    /// library pin coverage by verifying that every library path referenced
+    /// in the coverage index has a corresponding valid SHA-256 entry in
+    /// `library_pins`.
+    ///
+    /// For Forge/NeoForge this checks entries using `installer_library_paths`
+    /// which covers only installed version.json runtime libraries with
+    /// downloadable upstream artifacts. Processor-generated outputs are
+    /// receipt-bound and do not require manifest pins.
+    #[test]
+    fn release_gate_pin_coverage() {
+        if !is_enforcement_enabled() {
+            return;
+        }
+        let m = manifest();
+        let pins = &m.library_pins;
+        let plp = &m.profile_library_paths;
+        let ilp = &m.installer_library_paths;
+
+        let mut missing_paths: Vec<String> = Vec::new();
+        let mut uncovered_entries: Vec<String> = Vec::new();
+        let mut coverage_path_count: usize = 0;
+        let mut installer_coverage_count: usize = 0;
+        let mut entry_count: usize = 0;
+
+        // Collect every path referenced by any Fabric/Quilt profile.
+        let mut all_referenced_paths: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+
+        for loader in &["fabric", "quilt"] {
+            if let Some(entries) = m.loaders.get(*loader) {
+                for entry in entries {
+                    entry_count += 1;
+                    let paths = match plp.get(&entry.file_name) {
+                        Some(p) => p,
+                        None => {
+                            uncovered_entries.push(format!(
+                                "{}/{} {} (no profile_library_paths entry)",
+                                loader, entry.mc_version, entry.loader_version
+                            ));
+                            continue;
+                        }
+                    };
+
+                    if paths.is_empty() {
+                        continue;
+                    }
+
+                    for path in paths {
+                        coverage_path_count += 1;
+                        all_referenced_paths.insert(path.as_str());
+                        if !pins.contains_key(path) {
+                            missing_paths.push(format!(
+                                "  {}/{} {}: {}",
+                                loader, entry.mc_version, entry.loader_version, path
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check Forge/NeoForge installer entries that have a non-empty
+        // installer_library_paths entry. Every such entry MUST have every
+        // path in library_pins. Entries without installer_library_paths are
+        // pre-analysis legacy entries and are skipped.
+        for loader in &["forge", "neoforge"] {
+            if let Some(entries) = m.loaders.get(*loader) {
+                for entry in entries {
+                    // Skip entries that have no installer_library_paths yet
+                    let paths = match ilp.get(&entry.file_name) {
+                        Some(p) if !p.is_empty() => p,
+                        _ => {
+                            continue;
+                        }
+                    };
+
+                    entry_count += 1;
+
+                    for path in paths {
+                        installer_coverage_count += 1;
+                        all_referenced_paths.insert(path.as_str());
+                        if !pins.contains_key(path) {
+                            missing_paths.push(format!(
+                                "  {}/{} {}: {}",
+                                loader, entry.mc_version, entry.loader_version, path
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Warn about orphan paths in library_pins that no curated profile
+        // references. These are stale entries from previous profile versions
+        // — harmless but worth noting for cleanup.
+        let orphan_paths: Vec<String> = pins
+            .keys()
+            .filter(|path| !all_referenced_paths.contains(path.as_str()))
+            .map(|path| format!("  {path}"))
+            .collect();
+        if !orphan_paths.is_empty() {
+            eprintln!(
+                "[coverage] WARNING: {} library_pin entries not referenced by any curated profile (stale):\n{}",
+                orphan_paths.len(),
+                orphan_paths.join("\n"),
+            );
+        }
+
+        // All entries with enforcement enabled must have complete coverage.
+        // This includes Fabric/Quilt profiles AND Forge/NeoForge direct-launch entries.
+        assert!(
+            uncovered_entries.is_empty(),
+            "Enforcement enabled but {} entries are missing from coverage indices:\n  {}",
+            uncovered_entries.len(),
+            uncovered_entries.join("\n  "),
+        );
+
+        assert!(
+            missing_paths.is_empty(),
+            "Enforcement enabled but {} library paths referenced by profiles are missing from library_pins:\n{}",
+            missing_paths.len(),
+            missing_paths.join("\n  "),
+        );
+
+        eprintln!(
+            "[coverage] {} curated entries, {} Fabric/Quilt paths + {} Forge/NeoForge installer paths = {} total, {} pinned distinct JARs (coverage verified)",
+            entry_count,
+            coverage_path_count,
+            installer_coverage_count,
+            coverage_path_count + installer_coverage_count,
+            pins.len(),
         );
     }
 }

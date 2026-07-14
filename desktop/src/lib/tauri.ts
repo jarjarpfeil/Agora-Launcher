@@ -47,6 +47,156 @@ export function formatError(e: unknown): string {
   return String(e);
 }
 
+// ---------------------------------------------------------------------------
+// Structured error parsing — recoverable profile issues (Phase 5/Stage 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * The kind of profile issue encountered during direct-launch adoption.
+ * Mirrors Rust `ProfileIssueKind` serde serialization (externally-tagged
+ * string values: "MissingProfile", "UnsupportedProfileMetadata", "CorruptProfile").
+ */
+export type ProfileIssueKind =
+  | 'MissingProfile'
+  | 'UnsupportedProfileMetadata'
+  | 'CorruptProfile';
+
+/**
+ * Structured recoverable issue extracted from a LauncherError details envelope.
+ * Mirrors Rust `ProfileIssue` with the same field names (camelCase in JS).
+ */
+export interface RecoverableProfileIssue {
+  kind: ProfileIssueKind;
+  profile_path: string | null;
+  reasons: string[];
+}
+
+/**
+ * Available user actions for a recoverable profile issue.
+ * Derived from Rust's SUGGEST_* constants in installed_profile.rs.
+ */
+export type LauncherAction = 'reinstall_loader' | 'use_delegated_launch' | 'dismiss';
+
+/**
+ * Parsed structured launcher error envelope.
+ *
+ * All errors (even non-recoverable ones) produce a ParsedLauncherError by
+ * extracting code + message. Only profile-related errors populate
+ * `recoverableIssue` and `availableActions`.
+ */
+export interface ParsedLauncherError {
+  code: string;
+  message: string;
+  recoverableIssue: RecoverableProfileIssue | null;
+  availableActions: LauncherAction[];
+}
+
+/**
+ * Parse any thrown error into a structured ParsedLauncherError.
+ *
+ * Unlike `formatError` (which returns a plain string), this inspects the
+ * Tauri-serialized error envelope without string-matching error text.
+ *
+ * The Rust backend serializes LauncherError as a map:
+ *   { code: string, message: string, details: {...} | null, suggested_action: string | null }
+ *
+ * For profile issues (ProfileMissing, ProfileUnsupportedMetadata, ProfileCorrupt),
+ * details contains:
+ *   { recoverable_issue: { kind, profile_path, reasons }, suggested_actions: string[] }
+ */
+export function parseLauncherError(e: unknown): ParsedLauncherError {
+  // Default fallback — no structured info.
+  const fallback = (message: string): ParsedLauncherError => ({
+    code: 'ERR_UNKNOWN',
+    message,
+    recoverableIssue: null,
+    availableActions: [],
+  });
+
+  if (e == null) return fallback('Unknown error');
+  if (typeof e === 'string') return fallback(e);
+  if (e instanceof Error) return fallback(e.message);
+
+  if (typeof e === 'object') {
+    const obj = e as Record<string, unknown>;
+
+    // Check for the standard LauncherError envelope: { code, message, details }
+    const code = typeof obj.code === 'string' ? obj.code : null;
+    const message = typeof obj.message === 'string' ? obj.message : null;
+
+    // If we have a code and message, try to extract recoverable details.
+    if (code && message) {
+      const details = obj.details;
+      let recoverableIssue: RecoverableProfileIssue | null = null;
+      let availableActions: LauncherAction[] = [];
+
+      if (details && typeof details === 'object') {
+        const det = details as Record<string, unknown>;
+        const rawIssue = det.recoverable_issue;
+        const rawActions = det.suggested_actions;
+
+        if (rawIssue && typeof rawIssue === 'object') {
+          const ri = rawIssue as Record<string, unknown>;
+          const kind = ri.kind;
+          if (
+            typeof kind === 'string' &&
+            (kind === 'MissingProfile' || kind === 'UnsupportedProfileMetadata' || kind === 'CorruptProfile')
+          ) {
+            recoverableIssue = {
+              kind: kind as ProfileIssueKind,
+              profile_path: typeof ri.profile_path === 'string' ? ri.profile_path : null,
+              reasons: Array.isArray(ri.reasons)
+                ? ri.reasons.filter((r): r is string => typeof r === 'string')
+                : [],
+            };
+
+            if (Array.isArray(rawActions)) {
+              availableActions = rawActions.filter(
+                (a): a is LauncherAction =>
+                  a === 'reinstall_loader' || a === 'use_delegated_launch' || a === 'dismiss',
+              );
+            }
+          }
+        }
+      }
+
+      return { code, message, recoverableIssue, availableActions };
+    }
+
+    // Try Tauri externally-tagged enum variant: { VariantName: { code, message } }
+    for (const key of Object.keys(obj)) {
+      const inner = obj[key];
+      if (inner && typeof inner === 'object') {
+        const innerObj = inner as Record<string, unknown>;
+        if (typeof innerObj.code === 'string' && typeof innerObj.message === 'string') {
+          return {
+            code: innerObj.code as string,
+            message: innerObj.message as string,
+            recoverableIssue: null,
+            availableActions: [],
+          };
+        }
+        if (typeof innerObj.message === 'string') {
+          return fallback(innerObj.message as string);
+        }
+      }
+      if (typeof inner === 'string') return fallback(inner);
+    }
+
+    // Bare { message } or { code }
+    if (typeof obj.message === 'string') return fallback(obj.message);
+    if (typeof obj.code === 'string') return fallback(obj.code);
+
+    try {
+      return fallback(JSON.stringify(e));
+    } catch {
+      return fallback('[object]');
+    }
+  }
+
+  return fallback(String(e));
+}
+
 /** Check whether a thrown error is an expired-GitHub-session error. */
 export function isAuthExpired(e: unknown): boolean {
   if (e == null || typeof e !== 'object') return false;
@@ -1103,3 +1253,18 @@ export const browseLoadMore = (queryKey: string, pageIndex: number) =>
 
 export const browsePage = (queryKey: string, page: number) =>
   invoke<BrowsePage>('browse_page', { queryKey, page });
+
+// --- Repair loader ---
+
+export interface InstallReceiptSummary {
+  tuple: { loader: string; minecraft_version: string; loader_version: string };
+  profile_id: string;
+  cache_hit: boolean;
+  profile_stable_hash: string;
+  receipt_schema_version: number;
+  installer_exit_status: number;
+}
+
+/** Force-reinstall the loader for an instance. Returns the install receipt. */
+export const repairInstanceLoader = (instanceId: string) =>
+  invoke<InstallReceiptSummary>('repair_instance_loader', { instanceId });

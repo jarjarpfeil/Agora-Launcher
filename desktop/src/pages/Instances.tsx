@@ -15,6 +15,8 @@ import {
   type InstanceRow,
   type LoaderVersionSummary,
   type UpdateInfo,
+  type LauncherAction,
+  type RecoverableProfileIssue,
 } from '../lib/tauri';
 import type { InstallIntent } from '../lib/installFlow';
 import { type ProcessState } from '../lib/useProcessController';
@@ -33,6 +35,9 @@ export function Instances({
   onStartLaunch,
   onKillProcess,
   onStartCrashInvestigation,
+  onRepairAndRetry,
+  onUseDelegatedLaunch,
+  onClearError,
 }: {
   onEditInstance: (id: string) => void;
   processState: ProcessState;
@@ -45,6 +50,9 @@ export function Instances({
     manualLogText: string | null;
     directLaunch: boolean;
   }) => void;
+  onRepairAndRetry: () => Promise<void>;
+  onUseDelegatedLaunch: () => Promise<void>;
+  onClearError: () => void;
 }) {
   const [instances, setInstances] = useState<InstanceRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -165,6 +173,9 @@ export function Instances({
         <ul className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {instances.map((instance) => {
             const isRunning = processState.instanceId === instance.instance_id && processState.phase === 'running';
+            const isCurrentFailed = processState.instanceId === instance.instance_id && processState.phase === 'failed';
+            const isLaunchBusy = processState.phase === 'launching' || processState.phase === 'checking-health';
+            const isCurrentLaunchBusy = isLaunchBusy && processState.instanceId === instance.instance_id;
 
             const instanceLogs = processLogs.filter((l) => l.instance_id === instance.instance_id);
 
@@ -177,14 +188,17 @@ export function Instances({
                 onOpenCrashInvestigator={openCrashInvestigator}
                 isRunning={isRunning}
                 runningPid={isRunning ? processState.pid : null}
-                launchBusy={processState.phase === 'launching' || processState.phase === 'checking-health'}
+                launchBusy={isLaunchBusy}
                 onLaunch={() => onStartLaunch(instance.instance_id, directLaunch)}
                 onKill={onKillProcess}
                 controllerError={processState.phase === 'failed' ? processState.error : null}
-                onDismissError={() => {
-                  onStartLaunch(instance.instance_id, directLaunch);
-                }}
+                controllerRecoverableIssue={isCurrentFailed ? processState.recoverableIssue : null}
+                controllerAvailableActions={isCurrentFailed ? processState.availableActions : []}
+                onDismissError={onClearError}
                 logs={instanceLogs}
+                onRepairAndRetry={onRepairAndRetry}
+                onUseDelegatedLaunch={onUseDelegatedLaunch}
+                repairBusy={isCurrentLaunchBusy}
               />
             );
           })}
@@ -215,6 +229,26 @@ export function Instances({
   );
 }
 
+// ─── Instance Card with recoverable profile warning panel ─────────────────
+
+const PROFILE_ISSUE_MESSAGES: Record<string, { title: string; description: string }> = {
+  UnsupportedProfileMetadata: {
+    title: 'Unsupported Profile',
+    description:
+      'Agora Direct Launch does not understand part of this loader profile. This may be a newer profile format or a damaged installation.',
+  },
+  CorruptProfile: {
+    title: 'Corrupted Profile',
+    description:
+      'This loader profile failed integrity or safety checks and may be corrupted.',
+  },
+  MissingProfile: {
+    title: 'Missing Profile',
+    description:
+      'The installed loader profile is missing.',
+  },
+};
+
 function InstanceCard({
   instance,
   onChanged,
@@ -226,8 +260,13 @@ function InstanceCard({
   onLaunch,
   onKill,
   controllerError,
+  controllerRecoverableIssue,
+  controllerAvailableActions,
   onDismissError,
   logs,
+  onRepairAndRetry,
+  onUseDelegatedLaunch,
+  repairBusy,
 }: {
   instance: InstanceRow;
   onChanged: () => void;
@@ -239,12 +278,19 @@ function InstanceCard({
   onLaunch: () => void;
   onKill: () => void;
   controllerError: string | null;
+  controllerRecoverableIssue: RecoverableProfileIssue | null;
+  controllerAvailableActions: LauncherAction[];
   onDismissError: () => void;
   logs?: import('../lib/useProcessController').LogLine[];
+  onRepairAndRetry: () => Promise<void>;
+  onUseDelegatedLaunch: () => Promise<void>;
+  repairBusy: boolean;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [repairing, setRepairing] = useState(false);
 
   const displayError = error ?? controllerError;
+  const effectiveBusy = launchBusy || repairBusy || repairing;
 
   const remove = async () => {
     if (!confirm(`Delete instance "${instance.name}"? This moves the folder to trash.`)) return;
@@ -256,6 +302,32 @@ function InstanceCard({
       setError(formatError(e));
     }
   };
+
+  const handleReinstall = async () => {
+    setRepairing(true);
+    try {
+      await onRepairAndRetry();
+    } catch {
+      // Error state is already managed by the controller.
+    } finally {
+      setRepairing(false);
+    }
+  };
+
+  const handleDelegatedLaunch = async () => {
+    setRepairing(true);
+    try {
+      await onUseDelegatedLaunch();
+    } catch {
+      // Error state is already managed by the controller.
+    } finally {
+      setRepairing(false);
+    }
+  };
+
+  const issueDef = controllerRecoverableIssue
+    ? PROFILE_ISSUE_MESSAGES[controllerRecoverableIssue.kind]
+    : null;
 
   return (
     <li className="rounded-xl border border-border bg-card p-4">
@@ -280,7 +352,83 @@ function InstanceCard({
         </span>
       </div>
 
-      {displayError && (
+      {/* ── Recoverable profile warning panel ── */}
+      {controllerRecoverableIssue && issueDef && (
+        <div
+          className="mt-3 rounded-lg border border-amber-500 bg-amber-500/10 p-3 space-y-2"
+          role="alert"
+          aria-label={`Profile issue: ${issueDef.title}`}
+          data-testid="recoverable-profile-warning"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <p className="text-sm font-semibold text-amber-700 dark:text-amber-300">
+                {issueDef.title}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {issueDef.description}
+              </p>
+            </div>
+          </div>
+
+          {/* Render reasons (max 5) */}
+          {controllerRecoverableIssue.reasons.length > 0 && (
+            <ul className="text-xs text-muted-foreground space-y-0.5 list-disc list-inside">
+              {controllerRecoverableIssue.reasons.slice(0, 5).map((reason, i) => (
+                <li key={i}>{reason}</li>
+              ))}
+              {controllerRecoverableIssue.reasons.length > 5 && (
+                <li className="text-[10px] italic">… and {controllerRecoverableIssue.reasons.length - 5} more</li>
+              )}
+            </ul>
+          )}
+
+          {/* Action buttons based on availableActions */}
+          <div className="flex flex-wrap gap-2 mt-2">
+            {controllerAvailableActions.includes('reinstall_loader') && (
+              <button
+                onClick={handleReinstall}
+                disabled={effectiveBusy}
+                aria-label="Reinstall loader and retry launch"
+                className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                {repairing ? 'Reinstalling loader…' : 'Reinstall loader'}
+              </button>
+            )}
+            {controllerAvailableActions.includes('use_delegated_launch') && (
+              <button
+                onClick={handleDelegatedLaunch}
+                disabled={effectiveBusy}
+                aria-label="Use delegated launch"
+                className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
+              >
+                {repairing ? 'Launching via Mojang…' : 'Use delegated launch'}
+              </button>
+            )}
+            {controllerAvailableActions.includes('dismiss') && (
+              <button
+                onClick={onDismissError}
+                disabled={effectiveBusy}
+                aria-label="Dismiss this error"
+                className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-muted-foreground hover:bg-accent disabled:opacity-50"
+              >
+                Dismiss
+              </button>
+            )}
+          </div>
+
+          {repairing && (
+            <p className="text-xs text-muted-foreground italic" aria-live="polite">
+              {controllerAvailableActions.includes('reinstall_loader') && !controllerAvailableActions.includes('use_delegated_launch')
+                ? 'Reinstalling loader…'
+                : 'Processing…'}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* ── Plain error display (fallback, non-recoverable) ── */}
+      {displayError && !controllerRecoverableIssue && (
         <div className="mt-2 flex items-center gap-2">
           <p className="text-xs text-destructive flex-1">{displayError}</p>
           {controllerError && (
@@ -305,29 +453,29 @@ function InstanceCard({
         ) : (
           <button
             onClick={onLaunch}
-            disabled={launchBusy}
+            disabled={effectiveBusy}
             className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
           >
-            {launchBusy ? 'Starting…' : 'Launch'}
+            {effectiveBusy && !repairing ? 'Starting…' : 'Launch'}
           </button>
         )}
         <button
           onClick={onEdit}
-          disabled={launchBusy}
+          disabled={effectiveBusy}
           className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
         >
           Edit
         </button>
         <button
           onClick={() => onOpenCrashInvestigator(instance.instance_id)}
-          disabled={launchBusy}
+          disabled={effectiveBusy}
           className="rounded-lg border border-border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50"
         >
           Troubleshoot
         </button>
         <button
           onClick={remove}
-          disabled={launchBusy}
+          disabled={effectiveBusy}
           className="rounded-lg border border-destructive/30 px-3 py-1.5 text-sm font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50"
         >
           Delete

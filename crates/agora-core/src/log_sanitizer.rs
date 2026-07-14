@@ -37,6 +37,21 @@ pub fn sanitize_log_lines(input: &str) -> String {
         .join("\n")
 }
 
+/// Sanitize `input` using the standard rules and also replace every non-empty
+/// known secret with `[REDACTED]`. This handles arbitrary opaque/JWT/base64
+/// tokens without relying on regex shape assumptions.
+///
+/// Empty-string secrets are silently ignored to avoid blanket redaction.
+pub fn sanitize_log_with_secrets(input: &str, secrets: &[&str]) -> String {
+    let mut s = sanitize_log(input);
+    for secret in secrets {
+        if !secret.is_empty() {
+            s = s.replace(secret, "[REDACTED]");
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +99,40 @@ mod tests {
         let input = "This is a normal log line with no PII";
         let result = sanitize_log(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_sanitize_with_secrets_redacts_arbitrary_token() {
+        let token = "eyJhbGciOiJIUzI1NiJ9.eyJ4dWlkIjoiMjUzNTQzMjM0NTY3ODkwMSJ9.abcd1234+5678/90";
+        let input = format!("Got token: {token}");
+        let result = sanitize_log_with_secrets(&input, &[token]);
+        assert!(!result.contains(token), "token should not appear in output");
+        assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_sanitize_with_secrets_skips_empty() {
+        let input = "Some text";
+        let result = sanitize_log_with_secrets(input, &[""]);
+        assert_eq!(result, "Some text");
+    }
+
+    #[test]
+    fn test_sanitize_with_secrets_still_redacts_users() {
+        let input = r"Loading mod from C:\Users\JohnDoe\.minecraft\mods";
+        let result = sanitize_log_with_secrets(input, &[]);
+        assert!(!result.contains("JohnDoe"));
+        assert!(result.contains(r"C:\Users\<user>"));
+    }
+
+    #[test]
+    fn test_sanitize_with_secrets_multiple_secrets() {
+        let token1 = "abc123";
+        let token2 = "xyz789";
+        let input = format!("token1={token1} token2={token2} normal");
+        let result = sanitize_log_with_secrets(&input, &[token1, token2]);
+        assert!(!result.contains("abc123"));
+        assert!(!result.contains("xyz789"));
+        assert_eq!(result, "token1=[REDACTED] token2=[REDACTED] normal");
     }
 }

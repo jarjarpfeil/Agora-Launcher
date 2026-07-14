@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};

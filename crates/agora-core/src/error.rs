@@ -43,8 +43,35 @@ pub enum LauncherError {
     RegistryMissing,
     /// ERR_UNSUPPORTED_LOADER — This modloader version is not yet verified.
     UnsupportedLoader,
+    /// ERR_UNPINNED_ARTIFACT — A loader library artifact has no pinned SHA-256
+    /// in the manifest and enforcement is enabled. Run the data refresh script
+    /// to populate `library_pins`, or disable enforcement.
+    UnpinnedArtifact,
     /// ERR_VERSION_NOT_FOUND — Requested mod version not found.
     VersionNotFound,
+    /// ERR_GAME_VERSION_NOT_FOUND — The Minecraft version is not in the Mojang
+    /// manifest. Distinct from `VersionNotFound`, which refers to *mod* versions.
+    GameVersionNotFound,
+    /// ERR_LOADER_PROFILE_NOT_FOUND — The modloader profile JSON (Fabric/Quilt
+    /// partial version, or Forge/NeoForge install profile) could not be
+    /// resolved or merged with the base Minecraft version.
+    LoaderProfileNotFound,
+    /// ERR_PROFILE_MISSING — The loader profile JSON is missing from the
+    /// Mojang launcher's version directory.
+    ProfileMissing(crate::installed_profile::ProfileIssue),
+    /// ERR_PROFILE_UNSUPPORTED_METADATA — The installed profile is structurally
+    /// valid but contains metadata or artifacts that this launcher version
+    /// does not support (unknown rules, unverifiable generated libraries, etc.).
+    ProfileUnsupportedMetadata(crate::installed_profile::ProfileIssue),
+    /// ERR_PROFILE_CORRUPT — The installed profile is malformed, corrupted,
+    /// or fails security validation.
+    ProfileCorrupt(crate::installed_profile::ProfileIssue),
+    /// ERR_JAVA_INCOMPATIBLE — The selected Java runtime is older than the
+    /// major version required by this Minecraft version's metadata.
+    JavaIncompatible,
+    /// ERR_UNRESOLVED_PLACEHOLDER — A `${...}` token in the JVM or game
+    /// arguments could not be substituted before spawn.
+    UnresolvedPlaceholder,
     /// ERR_DEPENDENCY_MISSING — A mod requires a dependency.
     DependencyMissing,
     /// ERR_MCP_TOO_MANY_REQUESTS — AI client sent too many requests.
@@ -53,6 +80,25 @@ pub enum LauncherError {
     McpDenied,
     /// ERR_MCP_UNAUTHORIZED — AI client connection rejected.
     McpUnauthorized,
+    /// ERR_NETWORK_MOJANG_METADATA_DISABLED — Mojang metadata fetches are disabled in Privacy settings.
+    NetworkMojangMetadataDisabled,
+    /// ERR_NETWORK_MOJANG_CONTENT_DISABLED — Mojang content downloads are disabled in Privacy settings.
+    NetworkMojangContentDisabled,
+    /// ERR_NETWORK_LOADER_DISABLED — Modloader metadata/content downloads are disabled in Privacy settings.
+    NetworkLoaderDisabled,
+    /// ERR_NETWORK_MSA_DISABLED — Microsoft account authentication is disabled in Privacy settings.
+    NetworkMsaDisabled,
+    /// ERR_NETWORK_JAVA_DISABLED — Java runtime downloads are disabled in Privacy settings.
+    NetworkJavaDisabled,
+    /// ERR_MAVEN_DESCRIPTOR — A Maven descriptor string is malformed or unsafe.
+    MavenDescriptor,
+    /// ERR_PROCESS_CAPTURE_FAILED — Could not capture OS identity for a just‑spawned
+    /// process. The child was killed and the launch aborted.
+    ProcessCaptureFailed { pid: u32, detail: String },
+    /// ERR_PROCESS_STALE — The tracked OS process no longer matches its captured
+    /// identity (PID was reused, the process died, or the executable changed).
+    /// The stale record has been detached and the caller should treat it as idle.
+    ProcessStale { pid: u32, detail: String },
     /// Catch-all for errors that do not yet have a dedicated code.
     Generic { code: String, message: String },
 }
@@ -83,11 +129,33 @@ impl LauncherError {
             LauncherError::ProfileWriteFailed => "ERR_PROFILE_WRITE_FAILED".to_string(),
             LauncherError::RegistryMissing => "ERR_REGISTRY_MISSING".to_string(),
             LauncherError::UnsupportedLoader => "ERR_UNSUPPORTED_LOADER".to_string(),
+            LauncherError::UnpinnedArtifact => "ERR_UNPINNED_ARTIFACT".to_string(),
             LauncherError::VersionNotFound => "ERR_VERSION_NOT_FOUND".to_string(),
+            LauncherError::GameVersionNotFound => "ERR_GAME_VERSION_NOT_FOUND".to_string(),
+            LauncherError::LoaderProfileNotFound => "ERR_LOADER_PROFILE_NOT_FOUND".to_string(),
+            LauncherError::ProfileMissing(..) => "ERR_PROFILE_MISSING".to_string(),
+            LauncherError::ProfileUnsupportedMetadata(..) => {
+                "ERR_PROFILE_UNSUPPORTED_METADATA".to_string()
+            }
+            LauncherError::ProfileCorrupt(..) => "ERR_PROFILE_CORRUPT".to_string(),
+            LauncherError::JavaIncompatible => "ERR_JAVA_INCOMPATIBLE".to_string(),
+            LauncherError::UnresolvedPlaceholder => "ERR_UNRESOLVED_PLACEHOLDER".to_string(),
             LauncherError::DependencyMissing => "ERR_DEPENDENCY_MISSING".to_string(),
             LauncherError::McpTooManyRequests => "ERR_MCP_TOO_MANY_REQUESTS".to_string(),
             LauncherError::McpDenied => "ERR_MCP_DENIED".to_string(),
             LauncherError::McpUnauthorized => "ERR_MCP_UNAUTHORIZED".to_string(),
+            LauncherError::NetworkMojangMetadataDisabled => {
+                "ERR_NETWORK_MOJANG_METADATA_DISABLED".to_string()
+            }
+            LauncherError::NetworkMojangContentDisabled => {
+                "ERR_NETWORK_MOJANG_CONTENT_DISABLED".to_string()
+            }
+            LauncherError::NetworkLoaderDisabled => "ERR_NETWORK_LOADER_DISABLED".to_string(),
+            LauncherError::NetworkMsaDisabled => "ERR_NETWORK_MSA_DISABLED".to_string(),
+            LauncherError::NetworkJavaDisabled => "ERR_NETWORK_JAVA_DISABLED".to_string(),
+            LauncherError::MavenDescriptor => "ERR_MAVEN_DESCRIPTOR".to_string(),
+            LauncherError::ProcessCaptureFailed { .. } => "ERR_PROCESS_CAPTURE_FAILED".to_string(),
+            LauncherError::ProcessStale { .. } => "ERR_PROCESS_STALE".to_string(),
             LauncherError::Generic { code, .. } => code.clone(),
         }
     }
@@ -184,10 +252,55 @@ impl std::fmt::Display for LauncherError {
                     "This modloader version is not yet verified by the curation team."
                 )
             }
+            LauncherError::UnpinnedArtifact => {
+                write!(
+                    f,
+                    "A loader library artifact has no pinned SHA-256 in the manifest. \
+                     Run the data refresh script to populate library_pins, or leave \
+                     enforcement disabled."
+                )
+            }
             LauncherError::VersionNotFound => {
                 write!(
                     f,
                     "Requested mod version not found. Install the closest compatible version?"
+                )
+            }
+            LauncherError::GameVersionNotFound => {
+                write!(
+                    f,
+                    "This Minecraft version was not found in the official version manifest."
+                )
+            }
+            LauncherError::LoaderProfileNotFound => {
+                write!(
+                    f,
+                    "The modloader profile for this instance could not be resolved or merged with the base Minecraft version."
+                )
+            }
+            LauncherError::ProfileMissing(ref issue) => {
+                write!(f, "Profile missing: {}", issue.reasons.join("; "))
+            }
+            LauncherError::ProfileUnsupportedMetadata(ref issue) => {
+                write!(
+                    f,
+                    "Profile metadata not supported: {}",
+                    issue.reasons.join("; ")
+                )
+            }
+            LauncherError::ProfileCorrupt(ref issue) => {
+                write!(f, "Profile corrupted: {}", issue.reasons.join("; "))
+            }
+            LauncherError::JavaIncompatible => {
+                write!(
+                    f,
+                    "The selected Java runtime is older than the version required by this Minecraft version."
+                )
+            }
+            LauncherError::UnresolvedPlaceholder => {
+                write!(
+                    f,
+                    "The launch arguments reference a placeholder that could not be substituted."
                 )
             }
             LauncherError::DependencyMissing => {
@@ -211,6 +324,45 @@ impl std::fmt::Display for LauncherError {
                     "AI client connection rejected: invalid or missing token."
                 )
             }
+            LauncherError::NetworkMojangMetadataDisabled => {
+                write!(
+                    f,
+                    "Mojang metadata fetches are disabled in Privacy settings."
+                )
+            }
+            LauncherError::NetworkMojangContentDisabled => {
+                write!(
+                    f,
+                    "Mojang content downloads are disabled in Privacy settings."
+                )
+            }
+            LauncherError::NetworkLoaderDisabled => {
+                write!(
+                    f,
+                    "Modloader metadata and content downloads are disabled in Privacy settings."
+                )
+            }
+            LauncherError::NetworkMsaDisabled => {
+                write!(
+                    f,
+                    "Microsoft account authentication is disabled in Privacy settings."
+                )
+            }
+            LauncherError::NetworkJavaDisabled => {
+                write!(
+                    f,
+                    "Java runtime downloads are disabled in Privacy settings."
+                )
+            }
+            LauncherError::MavenDescriptor => {
+                write!(f, "Invalid Maven descriptor string.")
+            }
+            LauncherError::ProcessCaptureFailed { pid, detail } => {
+                write!(f, "Could not capture OS identity for PID {pid}: {detail}")
+            }
+            LauncherError::ProcessStale { pid, detail } => {
+                write!(f, "Process PID {pid} is stale: {detail}")
+            }
             LauncherError::Generic { message, .. } => write!(f, "{}", message),
         }
     }
@@ -233,13 +385,45 @@ impl serde::Serialize for LauncherError {
             LauncherError::NetworkOffline => Some("Check your internet connection and try again."),
             LauncherError::AuthExpired => Some("Sign in again via Settings to continue."),
             LauncherError::AuthRequired => Some("Sign in via Settings to use this feature."),
+            LauncherError::GameVersionNotFound => {
+                Some("Check that the instance targets a released Minecraft version and update the registry.")
+            }
+            LauncherError::LoaderProfileNotFound => {
+                Some("Re-create the instance or select a supported modloader version.")
+            }
+            LauncherError::JavaIncompatible => {
+                Some("Install a newer Java runtime or select a compatible one in Settings.")
+            }
+            LauncherError::UnresolvedPlaceholder => {
+                Some("This Minecraft version's arguments are not fully supported yet. Update Agora.")
+            }
             _ => None,
         };
 
         let mut map = serializer.serialize_map(None)?;
         map.serialize_entry("code", &self.code())?;
         map.serialize_entry("message", &self.to_string())?;
-        map.serialize_entry("details", &None::<String>)?;
+
+        // For profile issue variants, serialize structured recoverable_issue details.
+        match self {
+            LauncherError::ProfileMissing(ref issue)
+            | LauncherError::ProfileUnsupportedMetadata(ref issue)
+            | LauncherError::ProfileCorrupt(ref issue) => {
+                let details = serde_json::json!({
+                    "recoverable_issue": {
+                        "kind": issue.kind,
+                        "profile_path": issue.profile_path,
+                        "reasons": issue.reasons,
+                    },
+                    "suggested_actions": issue.suggested_actions(),
+                });
+                map.serialize_entry("details", &details)?;
+            }
+            _ => {
+                map.serialize_entry("details", &None::<String>)?;
+            }
+        }
+
         map.serialize_entry("suggested_action", &suggested_action)?;
         map.end()
     }
@@ -341,11 +525,45 @@ mod tests {
             LauncherError::ProfileWriteFailed,
             LauncherError::RegistryMissing,
             LauncherError::UnsupportedLoader,
+            LauncherError::UnpinnedArtifact,
             LauncherError::VersionNotFound,
+            LauncherError::GameVersionNotFound,
+            LauncherError::LoaderProfileNotFound,
+            LauncherError::JavaIncompatible,
+            LauncherError::UnresolvedPlaceholder,
             LauncherError::DependencyMissing,
             LauncherError::McpTooManyRequests,
             LauncherError::McpDenied,
             LauncherError::McpUnauthorized,
+            LauncherError::NetworkMojangMetadataDisabled,
+            LauncherError::NetworkMojangContentDisabled,
+            LauncherError::NetworkLoaderDisabled,
+            LauncherError::NetworkMsaDisabled,
+            LauncherError::NetworkJavaDisabled,
+            LauncherError::MavenDescriptor,
+            LauncherError::ProcessCaptureFailed {
+                pid: 42,
+                detail: "test".into(),
+            },
+            LauncherError::ProcessStale {
+                pid: 42,
+                detail: "test".into(),
+            },
+            LauncherError::ProfileMissing(crate::installed_profile::ProfileIssue {
+                kind: crate::installed_profile::ProfileIssueKind::MissingProfile,
+                profile_path: None,
+                reasons: vec!["test".into()],
+            }),
+            LauncherError::ProfileUnsupportedMetadata(crate::installed_profile::ProfileIssue {
+                kind: crate::installed_profile::ProfileIssueKind::UnsupportedProfileMetadata,
+                profile_path: None,
+                reasons: vec!["test".into()],
+            }),
+            LauncherError::ProfileCorrupt(crate::installed_profile::ProfileIssue {
+                kind: crate::installed_profile::ProfileIssueKind::CorruptProfile,
+                profile_path: None,
+                reasons: vec!["test".into()],
+            }),
             LauncherError::Generic {
                 code: "ERR_X".into(),
                 message: "x".into(),
@@ -355,5 +573,166 @@ mod tests {
             let val = serde_json::to_value(err).unwrap();
             assert!(val.get("code").is_some());
         }
+    }
+
+    #[test]
+    fn test_serialize_profile_missing_structured_details() {
+        use crate::installed_profile::{ProfileIssue, ProfileIssueKind};
+
+        let issue = ProfileIssue {
+            kind: ProfileIssueKind::MissingProfile,
+            profile_path: None,
+            reasons: vec!["File not found".into()],
+        };
+        let err = LauncherError::ProfileMissing(issue);
+        let val = serde_json::to_value(err).unwrap();
+
+        assert_eq!(
+            val.get("code").unwrap().as_str().unwrap(),
+            "ERR_PROFILE_MISSING"
+        );
+        let details = val.get("details").unwrap().as_object().unwrap();
+        let recoverable = details
+            .get("recoverable_issue")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            recoverable.get("kind").unwrap().as_str().unwrap(),
+            "MissingProfile"
+        );
+        assert_eq!(
+            recoverable.get("reasons").unwrap().as_array().unwrap()[0]
+                .as_str()
+                .unwrap(),
+            "File not found"
+        );
+        let suggested_actions = details
+            .get("suggested_actions")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(!suggested_actions.is_empty());
+        assert_eq!(val.get("suggested_action"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn test_serialize_profile_unsupported_structured_details() {
+        use crate::installed_profile::{ProfileIssue, ProfileIssueKind};
+
+        let issue = ProfileIssue {
+            kind: ProfileIssueKind::UnsupportedProfileMetadata,
+            profile_path: Some(std::path::PathBuf::from("/fake/path.json")),
+            reasons: vec!["Unknown feature".into()],
+        };
+        let err = LauncherError::ProfileUnsupportedMetadata(issue);
+        let val = serde_json::to_value(err).unwrap();
+
+        assert_eq!(
+            val.get("code").unwrap().as_str().unwrap(),
+            "ERR_PROFILE_UNSUPPORTED_METADATA"
+        );
+        let details = val.get("details").unwrap().as_object().unwrap();
+        let recoverable = details
+            .get("recoverable_issue")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            recoverable.get("kind").unwrap().as_str().unwrap(),
+            "UnsupportedProfileMetadata"
+        );
+        assert!(recoverable.get("profile_path").is_some());
+    }
+
+    #[test]
+    fn test_serialize_profile_corrupt_structured_details() {
+        use crate::installed_profile::{ProfileIssue, ProfileIssueKind};
+
+        let issue = ProfileIssue {
+            kind: ProfileIssueKind::CorruptProfile,
+            profile_path: None,
+            reasons: vec!["Truncated JSON".into()],
+        };
+        let err = LauncherError::ProfileCorrupt(issue);
+        let val = serde_json::to_value(err).unwrap();
+
+        assert_eq!(
+            val.get("code").unwrap().as_str().unwrap(),
+            "ERR_PROFILE_CORRUPT"
+        );
+        let details = val.get("details").unwrap().as_object().unwrap();
+        let recoverable = details
+            .get("recoverable_issue")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        assert_eq!(
+            recoverable.get("kind").unwrap().as_str().unwrap(),
+            "CorruptProfile"
+        );
+    }
+
+    #[test]
+    fn test_profile_missing_suggested_actions() {
+        use crate::installed_profile::{ProfileIssue, ProfileIssueKind};
+        let issue = ProfileIssue {
+            kind: ProfileIssueKind::MissingProfile,
+            profile_path: None,
+            reasons: vec!["gone".into()],
+        };
+        let err = LauncherError::ProfileMissing(issue);
+        let val = serde_json::to_value(err).unwrap();
+        let actions = val["details"]["suggested_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(actions, vec!["reinstall_loader", "use_delegated_launch"]);
+    }
+
+    #[test]
+    fn test_profile_unsupported_suggested_actions() {
+        use crate::installed_profile::{ProfileIssue, ProfileIssueKind};
+        let issue = ProfileIssue {
+            kind: ProfileIssueKind::UnsupportedProfileMetadata,
+            profile_path: None,
+            reasons: vec!["weird".into()],
+        };
+        let err = LauncherError::ProfileUnsupportedMetadata(issue);
+        let val = serde_json::to_value(err).unwrap();
+        let actions = val["details"]["suggested_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            vec!["reinstall_loader", "use_delegated_launch", "dismiss"]
+        );
+    }
+
+    #[test]
+    fn test_profile_corrupt_suggested_actions_includes_delegated() {
+        use crate::installed_profile::{ProfileIssue, ProfileIssueKind};
+        let issue = ProfileIssue {
+            kind: ProfileIssueKind::CorruptProfile,
+            profile_path: None,
+            reasons: vec!["bad data".into()],
+        };
+        let err = LauncherError::ProfileCorrupt(issue);
+        let val = serde_json::to_value(err).unwrap();
+        let actions = val["details"]["suggested_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            vec!["reinstall_loader", "use_delegated_launch", "dismiss"]
+        );
     }
 }

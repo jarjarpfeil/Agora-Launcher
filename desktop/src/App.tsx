@@ -240,6 +240,9 @@ export default function App() {
     approveLaunch,
     cancelLaunch,
     kill: killProcess,
+    clearError,
+    repairAndRetry,
+    useDelegatedLaunch,
   } = processController;
 
   return (
@@ -306,6 +309,9 @@ export default function App() {
                   onStartLaunch={startLaunch}
                   onKillProcess={killProcess}
                   onStartCrashInvestigation={setCrashInvestigation}
+                  onRepairAndRetry={repairAndRetry}
+                  onUseDelegatedLaunch={useDelegatedLaunch}
+                  onClearError={clearError}
                 />
               )}
               {effectiveTab === 'governance' && <Governance />}

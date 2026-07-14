@@ -162,7 +162,8 @@ pub fn run() {
             commands::get_curated_annotation,
             commands::get_windows_accent_color,
             commands::detect_mojang_launcher,
-            commands::test_launcher_path
+            commands::test_launcher_path,
+            commands::repair_instance_loader
         ])
         .setup(|app| {
             let handle = app.handle().clone();

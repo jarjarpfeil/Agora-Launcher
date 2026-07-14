@@ -6,8 +6,12 @@ import {
   launchInstance,
   launchInstanceDirect,
   queryLaunchState,
+  repairInstanceLoader,
   formatError,
+  parseLauncherError,
   type HealthReport,
+  type RecoverableProfileIssue,
+  type LauncherAction,
 } from './tauri';
 
 // ---------------------------------------------------------------------------
@@ -37,6 +41,10 @@ export interface ProcessState {
   outcome: 'success' | 'crash' | 'cancelled' | 'unknown' | 'abandoned' | null;
   snapshotId: string | null;
   exitedAt: string | null;
+  /** Structured recoverable profile issue (populated on direct-launch profile adoption failures). */
+  recoverableIssue: RecoverableProfileIssue | null;
+  /** Available user actions for the current recoverable issue. */
+  availableActions: LauncherAction[];
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +67,20 @@ export interface ProcessController {
   kill: () => Promise<void>;
   /** Clear a terminal error. */
   clearError: () => void;
+  /**
+   * Reinstall the current instance's loader and retry direct launch.
+   * Phase is set to 'launching' during the repair-and-retry flow.
+   * If repair or retry fails the parsed error is preserved.
+   * Rejects with an error string if no instance or not in a failed/recoverable state.
+   */
+  repairAndRetry: () => Promise<void>;
+  /**
+   * Explicitly switch to delegated launch for the current instance,
+   * bypassing only the Direct profile adoption (health checks already completed).
+   * Calls executeLaunch(..., false) and transitions to 'delegated'.
+   * Rejects with an error string if no instance is set.
+   */
+  useDelegatedLaunch: () => Promise<void>;
 }
 
 const INITIAL_STATE: ProcessState = {
@@ -72,6 +94,8 @@ const INITIAL_STATE: ProcessState = {
   outcome: null,
   snapshotId: null,
   exitedAt: null,
+  recoverableIssue: null,
+  availableActions: [],
 };
 
 // Bounded log buffer per instance ID.
@@ -107,6 +131,8 @@ export function useProcessController(): ProcessController {
             outcome: null,
             snapshotId: null,
             exitedAt: null,
+            recoverableIssue: null,
+            availableActions: [],
           });
         }
       } catch {
@@ -138,6 +164,8 @@ export function useProcessController(): ProcessController {
             pid: null,
             error: null,
             healthReport: null,
+            recoverableIssue: null,
+            availableActions: [],
             exitCode: event.payload.exit_code,
             outcome: event.payload.outcome,
             snapshotId: event.payload.snapshot_id,
@@ -177,6 +205,16 @@ export function useProcessController(): ProcessController {
     };
   }, []);
 
+  const clearError = useCallback(() => {
+    setState((prev) => ({
+      ...prev,
+      error: null,
+      phase: 'idle',
+      recoverableIssue: null,
+      availableActions: [],
+    }));
+  }, []);
+
   const startLaunch = useCallback(
     async (instanceId: string, directLaunch: boolean) => {
       // Reject if any non-terminal phase is active (concurrent-launch guard).
@@ -201,6 +239,8 @@ export function useProcessController(): ProcessController {
         outcome: null,
         snapshotId: null,
         exitedAt: null,
+        recoverableIssue: null,
+        availableActions: [],
       });
 
       try {
@@ -222,10 +262,13 @@ export function useProcessController(): ProcessController {
         setState(newState);
         return true;
       } catch (e) {
+        const parsed = parseLauncherError(e);
         setState((prev) => ({
           ...prev,
           phase: 'failed',
-          error: formatError(e),
+          error: parsed.message,
+          recoverableIssue: parsed.recoverableIssue,
+          availableActions: parsed.availableActions,
         }));
         return false;
       }
@@ -245,15 +288,17 @@ export function useProcessController(): ProcessController {
         setState(newState);
         return null;
       } catch (e) {
-        const msg = formatError(e);
+        const parsed = parseLauncherError(e);
         // Stay in awaiting-decision so the HealthDialog remains open
         // with the error visible. The user can try again or cancel.
         setState((prev) => ({
           ...prev,
           phase: 'awaiting-decision',
-          error: msg,
+          error: parsed.message,
+          recoverableIssue: parsed.recoverableIssue,
+          availableActions: parsed.availableActions,
         }));
-        return msg;
+        return parsed.message;
       }
     },
     [],
@@ -273,16 +318,103 @@ export function useProcessController(): ProcessController {
       // The backend retains ownership until its process waiter emits the
       // classified game-exited event.
     } catch (e) {
+      const msg = formatError(e);
+      // ERR_PROCESS_STALE means the process identity no longer matches —
+      // the backend already detached the stale record.  Treat as idle
+      // rather than stuck in a retry loop.
+      if (msg.includes('ERR_PROCESS_STALE') || msg.includes('stale')) {
+        setState((prev) => ({
+          ...prev,
+          phase: 'idle',
+          pid: null,
+          error: null,
+        }));
+        return;
+      }
       setState((prev) => ({
         ...prev,
         phase: 'running',
-        error: formatError(e),
+        error: msg,
       }));
     }
   }, []);
 
-  const clearError = useCallback(() => {
-    setState((prev) => ({ ...prev, error: null }));
+  const repairAndRetry = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current.instanceId) throw new Error('No instance selected');
+
+    // Prevent concurrent repair actions.
+    if (current.phase === 'launching') return;
+
+    setState((prev) => ({
+      ...prev,
+      phase: 'launching',
+      error: null,
+      recoverableIssue: null,
+      availableActions: [],
+    }));
+
+    try {
+      // Reinstall the loader.
+      await repairInstanceLoader(current.instanceId);
+
+      // Retry direct launch.
+      const newState = await executeLaunch(current.instanceId, true);
+      setState(newState);
+    } catch (e) {
+      const parsed = parseLauncherError(e);
+      setState((prev) => ({
+        ...prev,
+        phase: 'failed',
+        error: parsed.message,
+        recoverableIssue: parsed.recoverableIssue,
+        availableActions: parsed.availableActions,
+      }));
+    }
+  }, []);
+
+  const useDelegatedLaunch = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current.instanceId) throw new Error('No instance selected');
+
+    // Prevent concurrent actions.
+    if (current.phase === 'launching') return;
+
+    setState((prev) => ({
+      ...prev,
+      phase: 'launching',
+      error: null,
+      recoverableIssue: null,
+      availableActions: [],
+    }));
+
+    try {
+      // Use delegated launch (bypasses direct profile adoption).
+      await launchInstance(current.instanceId);
+      setState({
+        phase: 'delegated',
+        instanceId: current.instanceId,
+        pid: null,
+        error: null,
+        healthReport: null,
+        directLaunch: false,
+        exitCode: null,
+        outcome: null,
+        snapshotId: null,
+        exitedAt: null,
+        recoverableIssue: null,
+        availableActions: [],
+      });
+    } catch (e) {
+      const parsed = parseLauncherError(e);
+      setState((prev) => ({
+        ...prev,
+        phase: 'failed',
+        error: parsed.message,
+        recoverableIssue: parsed.recoverableIssue,
+        availableActions: parsed.availableActions,
+      }));
+    }
   }, []);
 
   return {
@@ -293,6 +425,8 @@ export function useProcessController(): ProcessController {
     cancelLaunch,
     kill,
     clearError,
+    repairAndRetry,
+    useDelegatedLaunch,
   };
 }
 
@@ -316,6 +450,8 @@ function launchedState(
     outcome: null,
     snapshotId: null,
     exitedAt: null,
+    recoverableIssue: null,
+    availableActions: [],
   };
 }
 

@@ -1,11 +1,17 @@
 use crate::browse_cache::SharedBrowseCache;
+use crate::error::LauncherResult;
 use crate::install_pipeline::{CancellationToken, ResolvedInstallPlan};
 use crate::msa::LoginFlow;
+use crate::process_identity::{self, ProcessIdentity};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Information about the current directly-launched Minecraft process.
+///
+/// This is the public representation sent to the frontend.  Internal OS-level
+/// identity (start time, executable path) is kept in [`AppState::process_identity`]
+/// and verified before any process-management operation.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RunningProcess {
     pub instance_id: String,
@@ -36,6 +42,16 @@ pub struct AppState {
     /// Tracked directly-launched process, stored so the frontend can recover
     /// running state after navigation or reload.
     pub running_process: Option<RunningProcess>,
+    /// Internal OS-level identity of the tracked process (start time,
+    /// executable path).  This is **not** serialised to the frontend and is
+    /// verified before any process-management operation (kill, state query).
+    ///
+    /// **Backend-restart semantics**: `AppState::new()` starts with no process
+    /// identity, and persisted PIDs from a previous launcher session are never
+    /// adopted.  If the launcher restarts while a game is running, the game
+    /// process is considered detached (non-actionable) — the frontend will
+    /// report phase = 'idle' until the user launches again.
+    pub process_identity: Option<ProcessIdentity>,
     /// A launch that has exclusive ownership but has not spawned Java yet.
     pub launch_reservation: Option<LaunchReservation>,
     /// Sessions for which the user explicitly requested termination.  The exit
@@ -67,6 +83,7 @@ impl AppState {
             login_flow: None,
             browse_cache: crate::browse_cache::new_cache(),
             running_process: None,
+            process_identity: None,
             launch_reservation: None,
             user_cancelled_launches: HashSet::new(),
             launch_session_counter: 0,
@@ -86,3 +103,24 @@ impl Default for AppState {
 
 /// Tauri-managed wrapper around the shared application state.
 pub type LauncherState = Arc<Mutex<AppState>>;
+
+// ---------------------------------------------------------------------------
+// Pure verification helper — callable from any async context without holding
+// the AppState mutex.
+// ---------------------------------------------------------------------------
+
+/// Capture the OS identity for a just‑spawned PID and return it.
+///
+/// On failure the caller should kill the owned child and abort the launch.
+pub fn capture_identity(pid: u32) -> LauncherResult<ProcessIdentity> {
+    process_identity::capture(pid)
+}
+
+/// Verify that the captured identity still matches the live OS process.
+///
+/// This is a pure, synchronous helper intended to be called **outside** the
+/// AppState async mutex.  Pass the [`ProcessIdentity`] you snapshotted from
+/// state and re‑check session freshness after re‑acquiring the lock.
+pub fn verify_identity(identity: &ProcessIdentity) -> LauncherResult<()> {
+    process_identity::verify(identity)
+}

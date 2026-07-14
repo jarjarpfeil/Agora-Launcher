@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JavaInstallation {
@@ -27,12 +27,10 @@ pub fn detect_installed_jres() -> Vec<JavaInstallation> {
                 if let Ok(entries) = std::fs::read_dir(&dir) {
                     for entry in entries.flatten() {
                         let javadir = entry.path().join("bin");
-                        for bin in ["java.exe", "javaw.exe"] {
-                            let path = javadir.join(bin);
-                            if path.is_file() {
-                                if let Some(inst) = check_java_at(&path) {
-                                    results.push(inst);
-                                }
+                        let path = javadir.join("java.exe");
+                        if path.is_file() {
+                            if let Some(inst) = check_java_at(&path) {
+                                results.push(inst);
                             }
                         }
                     }
@@ -89,23 +87,36 @@ pub fn detect_installed_jres() -> Vec<JavaInstallation> {
     // PATH scan (all platforms)
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            for bin in ["java", "javaw"] {
-                let path = dir.join(bin);
-                if path.is_file() {
-                    if let Some(inst) = check_java_at(&path) {
-                        results.push(inst);
-                    }
+            #[cfg(target_os = "windows")]
+            let path = dir.join("java.exe");
+            #[cfg(not(target_os = "windows"))]
+            let path = dir.join("java");
+            if path.is_file() {
+                if let Some(inst) = check_java_at(&path) {
+                    results.push(inst);
                 }
             }
         }
     }
 
+    results.sort_by(|left, right| {
+        left.version
+            .cmp(&right.version)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    results.dedup_by(|left, right| left.path == right.path);
     results
 }
 
-fn check_java_at(path: &PathBuf) -> Option<JavaInstallation> {
-    let cloned = path.clone();
-    let path_for_result = path.clone();
+/// Probe a specific Java executable and return its parsed version metadata.
+/// The probe is bounded to five seconds so callers can validate an explicit
+/// user override without trusting stale discovery results.
+pub fn inspect_java(path: &Path) -> Option<JavaInstallation> {
+    if !path.is_file() {
+        return None;
+    }
+    let cloned = path.to_path_buf();
+    let path_for_result = path.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = std::process::Command::new(&cloned).arg("-version").output();
@@ -121,6 +132,10 @@ fn check_java_at(path: &PathBuf) -> Option<JavaInstallation> {
         version: major,
         version_string: version_str.to_string(),
     })
+}
+
+fn check_java_at(path: &PathBuf) -> Option<JavaInstallation> {
+    inspect_java(path)
 }
 
 fn parse_version_string(stderr: &str) -> Option<&str> {

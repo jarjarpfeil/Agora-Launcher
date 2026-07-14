@@ -480,25 +480,13 @@ pub async fn launch_instance_direct(
                 message: e.to_string(),
             })?;
 
-        let mc_version = match row.loader.as_str() {
-            "fabric" => format!(
-                "fabric-loader-{}-{}",
-                row.loader_version, row.minecraft_version
-            ),
-            "quilt" => format!(
-                "quilt-loader-{}-{}",
-                row.loader_version, row.minecraft_version
-            ),
-            "neoforge" => format!("neoforge-{}", row.loader_version),
-            "forge" => format!("forge-{}-{}", row.minecraft_version, row.loader_version),
-            _ => format!(
-                "{}-{}-{}",
-                row.loader, row.loader_version, row.minecraft_version
-            ),
-        };
-
-        let java_paths = agora_core::java::detect_installed_jres();
-        let java_path: PathBuf = {
+        let java_paths = tokio::task::spawn_blocking(agora_core::java::detect_installed_jres)
+            .await
+            .map_err(|error| LauncherError::Generic {
+                code: "ERR_JAVA_DETECTION".into(),
+                message: format!("Java detection task failed: {error}"),
+            })?;
+        let java_override: Option<PathBuf> = {
             let conn2 = db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
                 code: "ERR_DB".into(),
                 message: e.to_string(),
@@ -511,134 +499,102 @@ pub async fn launch_instance_direct(
                 .and_then(|v| v.as_str().map(|s| s.to_string()));
             drop(conn2);
             if let Some(p) = user_override {
-                PathBuf::from(p)
-            } else if let Some(inst) = java_paths.first() {
-                inst.path.clone()
+                Some(PathBuf::from(p))
             } else {
-                return Err(LauncherError::Generic {
-                    code: "ERR_NO_JAVA".into(),
-                    message:
-                        "No Java installation found. Install Java 17+ or set the path in Settings."
-                            .into(),
-                });
+                None
             }
         };
+        let client = reqwest::Client::new();
+        let db_path = paths::local_state_db_path(&app).map_err(|error| LauncherError::Generic {
+            code: "ERR_DB_PATH".into(),
+            message: error.to_string(),
+        })?;
 
-        let heap_mb = row.jvm_memory_mb.max(1024);
+        // Build network policy from local_state.db settings.
+        let network_policy = {
+            let policy_conn =
+                db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
+                    code: "ERR_DB".into(),
+                    message: e.to_string(),
+                })?;
+            agora_core::network::NetworkPolicy::from_db(&policy_conn)
+        };
+
+        // Check MicrosoftAuthentication policy before touching MSA.
+        network_policy.check(agora_core::network::NetworkCategory::MicrosoftAuthentication)?;
+
+        let mut credentials =
+            agora_core::msa::load_credentials()?.ok_or(LauncherError::AuthRequired)?;
+        if credentials.needs_refresh() {
+            credentials = agora_core::msa::refresh_credentials(&client, &credentials, &db_path)
+                .await
+                .map_err(|error| LauncherError::Generic {
+                    code: "ERR_AUTH_REFRESH_FAILED".into(),
+                    message: format!("Minecraft account refresh failed: {error}"),
+                })?;
+        }
+        if credentials.is_expired() {
+            return Err(LauncherError::AuthExpired);
+        }
+
+        let app_data = paths::app_data_dir(&app).map_err(|error| LauncherError::Generic {
+            code: "ERR_APP_DATA".into(),
+            message: error.to_string(),
+        })?;
+        let loader = if matches!(row.loader.as_str(), "" | "vanilla") {
+            None
+        } else {
+            Some(agora_core::launch::LoaderInfo {
+                loader_type: row.loader.clone(),
+                version: row.loader_version.clone(),
+                version_url: String::new(),
+            })
+        };
+        let resolved =
+            agora_core::launch_planner::resolve(agora_core::launch_planner::ResolveRequest {
+                instance_id: sanitized.clone(),
+                base_version_id: row.minecraft_version.clone(),
+                loader,
+                game_dir: instance_dir.clone(),
+                assets_dir: app_data.join("assets"),
+                cache_dir: app_data.join("launch_cache"),
+                java_override,
+                java_candidates: java_paths,
+                network_policy,
+                minecraft_dir: paths::minecraft_dir(),
+                receipts_root: Some(
+                    app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
+                ),
+            })
+            .await?;
+        let selected_java_major = resolved.java.major_version;
+        let materialized = agora_core::launch_planner::materialize(resolved).await?;
         let gc = agora_core::gc::compute_gc(
-            java_paths.first().map(|j| j.version).unwrap_or(21),
-            heap_mb,
+            selected_java_major,
+            row.jvm_memory_mb.max(1024),
             &row.jvm_custom_args,
             None,
         );
-
-        let assets_dir = instance_dir
-            .parent()
-            .unwrap_or(&instance_dir)
-            .join("assets");
-
-        let (username, access_token, uuid, user_type) =
-            if let Ok(Some(creds)) = agora_core::msa::load_credentials() {
-                (
-                    creds.username,
-                    creds.access_token,
-                    creds.uuid,
-                    "msa".to_string(),
-                )
-            } else {
-                (
-                    "Player".to_string(),
-                    "0".to_string(),
-                    "00000000-0000-0000-0000-000000000000".to_string(),
-                    "mojang".to_string(),
-                )
-            };
-
-        let opts = agora_core::launch::LaunchOptions {
-            java_path: java_path.clone(),
-            mc_version,
-            game_dir: instance_dir.clone(),
-            assets_dir,
-            username,
-            access_token,
-            uuid,
-            user_type,
-            jvm_args: gc.jvm_args,
-            mc_args_extra: vec![],
-            loader: None,
+        let user_jvm_args = agora_core::launch_planner::parse_argument_string(&gc.jvm_args)?;
+        let identity = agora_core::launch_planner::LaunchIdentity {
+            username: credentials.username,
+            access_token: credentials.access_token,
+            uuid: credentials.uuid,
+            user_type: "msa".into(),
+            client_id: String::new(),
+            xuid: String::new(),
+            user_properties: "{}".into(),
         };
-
-        let client = reqwest::Client::new();
-        let manifest = agora_core::launch::fetch_version_manifest(&client).await?;
-
-        let version_ref = manifest
-            .versions
-            .iter()
-            .find(|v| v.id == opts.mc_version)
-            .ok_or(LauncherError::VersionNotFound)?;
-
-        let version_info =
-            agora_core::launch::fetch_version_info(&client, &version_ref.url).await?;
-
-        let cache_dir = dirs::data_local_dir()
-            .ok_or_else(|| LauncherError::Generic {
-                code: "ERR_NO_DATA_DIR".into(),
-                message: "Could not determine local data directory.".into(),
-            })?
-            .join("agora")
-            .join("lib_cache");
-
-        let filtered = agora_core::launch::filter_libraries(&version_info.libraries);
-
-        let natives_subdir = match std::env::consts::OS {
-            "windows" => "natives/windows",
-            "macos" => "natives/osx",
-            _ => "natives/linux",
-        };
-        let natives_dir = instance_dir.join(natives_subdir);
-        std::fs::create_dir_all(&natives_dir).map_err(|e| LauncherError::Generic {
-            code: "ERR_NATIVES_DIR".into(),
-            message: format!("Failed to create natives directory: {e}"),
-        })?;
-
-        for lib in &filtered {
-            if let Some(downloads) = &lib.downloads {
-                if let Some(artifact) = &downloads.artifact {
-                    let cache_path = cache_dir.join(&artifact.path);
-                    download_lib(
-                        &client,
-                        &artifact.url,
-                        &cache_path,
-                        artifact.sha1.as_deref(),
-                    )
-                    .await?;
-                }
-            }
-        }
-
-        let sep = if cfg!(target_os = "windows") {
-            ";"
-        } else {
-            ":"
-        };
-        let rel_cp = agora_core::launch::build_classpath(&version_info.libraries);
-        let abs_cp = if rel_cp.is_empty() {
-            String::new()
-        } else {
-            rel_cp
-                .split(sep)
-                .map(|p| {
-                    if p.is_empty() {
-                        p.to_string()
-                    } else {
-                        cache_dir.join(p).to_string_lossy().to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(sep)
-        };
-
-        let full_args = agora_core::launch::build_launch_command(&opts, &version_info, &abs_cp);
+        let features = agora_core::launch_planner::LaunchFeatures::default();
+        let prepared = agora_core::launch_planner::build_command(
+            agora_core::launch_planner::BuildCommandRequest {
+                plan: &materialized,
+                identity: &identity,
+                features: &features,
+                user_jvm_args: &user_jvm_args,
+                extra_game_args: &[],
+            },
+        )?;
 
         // Pre-launch snapshot — the exact archive promoted after a genuine success.
         let snapshot_label = format!("pre-launch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
@@ -657,24 +613,49 @@ pub async fn launch_instance_direct(
         })?;
 
         let launched_at = std::time::SystemTime::now();
-        let mut child = tokio::process::Command::new(&opts.java_path)
-            .args(&full_args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .current_dir(&opts.game_dir)
-            .spawn()
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_LAUNCH_SPAWN".into(),
-                message: e.to_string(),
-            })?;
+        let mut child = match agora_core::launch_planner::spawn(&prepared) {
+            Ok(child) => child,
+            Err(error) => {
+                let retention_dir = instance_dir.clone();
+                let _ = tokio::task::spawn_blocking(move || run_retention(&retention_dir)).await;
+                return Err(error);
+            }
+        };
+        let pid = child.id().ok_or_else(|| LauncherError::Generic {
+            code: "ERR_NO_PID".into(),
+            message: "Spawned process has no PID.".into(),
+        })?;
 
-        let pid = child.id().unwrap_or(0);
+        // Capture OS-level process identity immediately after spawn.  If this
+        // fails the process may have already died or the OS cannot provide
+        // identity info — kill the owned child and abort the launch.
+        let pid_for_identity = pid;
+        let proc_identity = {
+            tokio::task::spawn_blocking(move || {
+                agora_core::process_identity::capture(pid_for_identity)
+            })
+            .await
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_IDENTITY_CAPTURE_TASK".into(),
+                message: format!("Identity capture task failed: {e}"),
+            })?? as agora_core::process_identity::ProcessIdentity
+        };
+
+        // Update history only after Java was successfully spawned.
+        let conn = db::local_state_connection(&app).map_err(|error| LauncherError::Generic {
+            code: "ERR_DB".into(),
+            message: error.to_string(),
+        })?;
+        db::touch_last_launched(&conn, &sanitized, &chrono::Utc::now().to_rfc3339())
+            .map_err(|_| LauncherError::LocalStateFailed)?;
+        drop(conn);
 
         // Record launch start time for LKG promotion classification.
         let launch_start = std::time::Instant::now();
 
-        // Store the running process in backend state so the frontend can recover
-        // running state after navigation or reload.
+        // Store the running process + identity in backend state so the frontend
+        // can recover running state after navigation or reload, and the backend
+        // can verify the process before operating on it.
         {
             let mut s = state.lock().await;
             if s.launch_reservation.as_ref().map(|r| r.session_id) != Some(launch_session_id) {
@@ -691,20 +672,30 @@ pub async fn launch_instance_direct(
                 pid,
                 session_id: launch_session_id,
             });
+            s.process_identity = Some(proc_identity);
             s.launch_reservation = None;
         }
 
         let inst_id = sanitized.clone();
 
+        // Clone the access token for log sanitization. It is consumed by the
+        // stdout/stderr reader tasks and does NOT persist in any running-process
+        // state after the tasks end.
+        let access_token_for_sanitizer = identity.access_token.clone();
+
         let captured_log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let app1 = app.clone();
         let s1 = sanitized.clone();
         let stdout_log = captured_log.clone();
+        let stdout_token = access_token_for_sanitizer.clone();
         let stdout_task = child.stdout.take().map(|stdout| {
             tokio::spawn(async move {
                 let mut reader = tokio::io::BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let sanitized = agora_core::log_sanitizer::sanitize_log(&line);
+                    let sanitized = agora_core::log_sanitizer::sanitize_log_with_secrets(
+                        &line,
+                        &[&stdout_token],
+                    );
                     append_bounded_launch_log(&stdout_log, &sanitized);
                     let _ = app1.emit(
                         "game-log",
@@ -721,11 +712,15 @@ pub async fn launch_instance_direct(
         let app2 = app.clone();
         let s2 = sanitized.clone();
         let stderr_log = captured_log.clone();
+        let stderr_token = access_token_for_sanitizer.clone();
         let stderr_task = child.stderr.take().map(|stderr| {
             tokio::spawn(async move {
                 let mut reader = tokio::io::BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let sanitized = agora_core::log_sanitizer::sanitize_log(&line);
+                    let sanitized = agora_core::log_sanitizer::sanitize_log_with_secrets(
+                        &line,
+                        &[&stderr_token],
+                    );
                     append_bounded_launch_log(&stderr_log, &sanitized);
                     let _ = app2.emit(
                         "game-log",
@@ -805,6 +800,7 @@ pub async fn launch_instance_direct(
                 let mut s = state_on_exit.lock().await;
                 if s.running_process.as_ref().map(|rp| rp.session_id) == Some(launch_session_id) {
                     s.running_process = None;
+                    s.process_identity = None;
                 }
             }
             let _ = app3.emit(
@@ -1038,82 +1034,57 @@ fn read_delegated_log_tail(
 }
 
 /// Query the currently tracked direct-launch process, if any.
+///
+/// **Identity verification**: snapshots the identity from state, **drops the
+/// lock**, verifies the process identity against the live OS (fail‑closed),
+/// then returns `None` and clears the stale record if verification fails.
 /// Returns `None` if no direct launch is active or the process has exited.
 #[tauri::command]
 pub async fn query_launch_state(
     state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Option<agora_core::state::RunningProcess>> {
-    let s = state.lock().await;
-    Ok(s.running_process.clone())
-}
+    // Phase 1 — snapshot identity under the lock, drop it.
+    let snapshot = {
+        let s = state.lock().await;
+        let rp = s.running_process.clone();
+        let identity = s.process_identity.clone();
+        (rp, identity)
+    };
 
-async fn download_lib(
-    client: &reqwest::Client,
-    url: &str,
-    cache_path: &Path,
-    expected_sha1: Option<&str>,
-) -> LauncherResult<PathBuf> {
-    if cache_path.is_file() {
-        if let Some(sha1) = expected_sha1 {
-            if let Ok(data) = std::fs::read(cache_path) {
-                use sha1::Digest;
-                let actual = hex::encode(sha1::Sha1::digest(&data));
-                if actual == sha1 {
-                    return Ok(cache_path.to_path_buf());
-                }
+    let (running, identity) = snapshot;
+    let running = match running {
+        Some(rp) => rp,
+        None => return Ok(None),
+    };
+
+    // Phase 2 — verify identity OUTSIDE the lock.
+    if let Some(ref identity) = identity {
+        if let Err(_stale) = agora_core::state::verify_identity(identity) {
+            // Process is stale — clear the matching record only.
+            let mut s = state.lock().await;
+            if s.running_process.as_ref().map(|rp| rp.session_id) == Some(running.session_id) {
+                s.running_process = None;
+                s.process_identity = None;
             }
-        } else {
-            return Ok(cache_path.to_path_buf());
+            return Ok(None);
         }
     }
 
-    if let Some(parent) = cache_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| LauncherError::Generic {
-            code: "ERR_CACHE_CREATE_DIR".into(),
-            message: format!("Failed to create cache directory {}: {e}", parent.display()),
-        })?;
-    }
-
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
-    if !resp.status().is_success() {
-        return Err(LauncherError::Generic {
-            code: "ERR_DOWNLOAD_HTTP".into(),
-            message: format!("Download {url} returned HTTP {}", resp.status()),
-        });
-    }
-    let data = resp
-        .bytes()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?
-        .to_vec();
-
-    if let Some(sha1) = expected_sha1 {
-        use sha1::Digest;
-        let actual = hex::encode(sha1::Sha1::digest(&data));
-        if actual != sha1 {
-            return Err(LauncherError::HashMismatch);
-        }
-    }
-
-    std::fs::write(cache_path, &data).map_err(|e| LauncherError::Generic {
-        code: "ERR_CACHE_WRITE".into(),
-        message: format!("Failed to write cache file {}: {e}", cache_path.display()),
-    })?;
-
-    Ok(cache_path.to_path_buf())
+    Ok(Some(running))
 }
 
 /// Kill the backend-owned direct-launch process, if any.
-/// This verifies that `pid` matches the tracked process before terminating.
+///
+/// **Identity verification**: snapshots the tracked session and identity from
+/// state, **drops the lock**, verifies the process identity against the live OS
+/// (fail‑closed), then re‑acquires the lock and confirms the same session is
+/// still current before signalling.  This prevents holding the async state
+/// mutex across blocking process‑table inspection.
 #[tauri::command]
 pub async fn kill_process(state: tauri::State<'_, LauncherState>, pid: u32) -> LauncherResult<()> {
-    // Guard: only kill the process that Agora owns.
-    let session_id = {
-        let mut s = state.lock().await;
+    // Phase 1 — snapshot session & identity under the lock, then drop it.
+    let snapshot = {
+        let s = state.lock().await;
         let owned = s.running_process.as_ref().map(|rp| (rp.pid, rp.session_id));
         let Some((owned_pid, session_id)) = owned else {
             return Err(LauncherError::Generic {
@@ -1127,8 +1098,40 @@ pub async fn kill_process(state: tauri::State<'_, LauncherState>, pid: u32) -> L
                 message: format!("PID {pid} is not owned by Agora (owned pid: {owned_pid})"),
             });
         }
-        // Mark cancellation before signaling so the exit waiter cannot race
-        // ahead and classify an app-requested stop as a crash. On signal
+        (s.process_identity.clone(), session_id)
+    };
+
+    let (identity_for_verify, session_id) = snapshot;
+
+    // Phase 2 — verify identity OUTSIDE the lock.  Uses the snapshot.
+    if let Some(ref identity) = identity_for_verify {
+        if let Err(stale_err) = agora_core::state::verify_identity(identity) {
+            // Process is stale — detach the matching record and return
+            // ERR_PROCESS_STALE.  Never signal a stale process.
+            let mut s = state.lock().await;
+            if s.running_process.as_ref().map(|rp| rp.session_id) == Some(session_id) {
+                s.running_process = None;
+                s.process_identity = None;
+            }
+            return Err(stale_err);
+        }
+    }
+    // If identity_for_verify is None (legacy / no identity captured), proceed
+    // with the kill — backward compatibility with sessions started before
+    // identity capture was introduced.
+
+    // Phase 3 — re‑acquire lock and verify the same session is still current.
+    let session_id = {
+        let mut s = state.lock().await;
+        let owned_session = s.running_process.as_ref().map(|rp| rp.session_id);
+        if owned_session != Some(session_id) {
+            return Err(LauncherError::Generic {
+                code: "ERR_SESSION_CHANGED".into(),
+                message: "The tracked process changed while identity was being verified.".into(),
+            });
+        }
+        // Mark cancellation before signalling so the exit waiter cannot race
+        // ahead and classify an app-requested stop as a crash.  On signal
         // failure this marker is removed and process ownership is retained.
         s.user_cancelled_launches.insert(session_id);
         session_id
@@ -1209,6 +1212,19 @@ pub async fn list_loader_versions(
     mc_version: String,
 ) -> LauncherResult<Vec<LoaderVersionSummary>> {
     Ok(instances::list_loader_versions(&loader, &mc_version))
+}
+
+/// Force-reinstall the loader for an instance (repair command).
+///
+/// Downloads the curated installer again, backs up the existing profile,
+/// runs the installer, validates the result, and generates a fresh receipt.
+#[tauri::command]
+pub async fn repair_instance_loader(
+    app: tauri::AppHandle,
+    _state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+) -> LauncherResult<agora_core::installed_profile::InstallReceiptSummary> {
+    instances::repair_instance_loader(&app, &instance_id).await
 }
 
 /// Distinct loader names present in the embedded loader manifests.

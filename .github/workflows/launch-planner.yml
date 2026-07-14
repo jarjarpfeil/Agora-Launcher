@@ -1,0 +1,114 @@
+# Cross-platform CI for the shared launch planner (agora-core) and desktop
+# settings default assertion.
+#
+# Runs the narrow deterministic launch-planner integration tests plus core
+# unit tests on Windows, macOS, and Linux without any live network dependency
+# (all test fixtures are synthetic). Also builds the agora CLI binary as a
+# dependent-compile check.
+#
+# A cross-platform Python script asserts that the desktop UI's launch_mode
+# default remains "delegation" — the fundamental security invariant that Agora
+# delegates JVM execution to the official Mojang launcher rather than spawning
+# Java directly.
+#
+# Reuses the same Rust toolchain and cache actions as release-desktop.yml.
+# Does NOT require Tauri system libraries (libwebkit2gtk, etc.) because only
+# agora-core and agora-cli are compiled, not the Tauri desktop app.
+
+name: Launch Planner CI
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "crates/agora-core/**"
+      - "desktop/src/lib/useTypedSettings.ts"
+      - ".github/workflows/launch-planner.yml"
+  pull_request:
+    paths:
+      - "crates/agora-core/**"
+      - "desktop/src/lib/useTypedSettings.ts"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/agora-core -> target
+            crates/agora -> target
+
+      # Compile-only check: build agora-core without running tests.
+      # This catches compilation errors early and primes the cache.
+      - name: Build agora-core
+        run: cargo build -p agora-core
+
+      # Narrow deterministic launch-planner integration tests.
+      # These construct fully materialized synthetic plans on disk and
+      # exercise validate, build_command, spawn/classification with a
+      # fake Java, argument parsing, fixture deserialization, and paths
+      # with spaces/Unicode — all without contacting remote servers.
+      - name: Launch-planner integration tests
+        run: cargo test -p agora-core --test launch_planner_integration
+
+      # agora-core unit tests (module-level tests in launch_planner, network,
+      # java, etc.). These exercise argument parsing, native extraction,
+      # atomic writes, Java selection, and URL classification.
+      - name: Core unit tests
+        run: cargo test -p agora-core --lib
+
+      # Build the agora CLI as a dependent-compile check: any breaking
+      # change to agora-core's public API surfaces here.
+      - name: Build agora CLI (dependent-compile check)
+        run: cargo build -p agora-cli
+
+      # Tauri's Linux/macOS system dependencies are covered by the desktop
+      # release workflow. A Windows compile here catches shared-core API drift
+      # in the desktop command integration without duplicating that setup.
+      - name: Check desktop Rust integration
+        if: matrix.os == 'windows-latest'
+        run: cargo check -p agora-desktop
+
+      # Cross-platform assertion: the desktop settings object must default
+      # launchMode to "delegation", not "direct". Python is available on all
+      # CI matrix OSes.
+      - name: Assert launch_mode defaults to delegation in desktop settings
+        shell: python{0}
+        run: |
+          import json, re
+          with open("desktop/src/lib/useTypedSettings.ts", encoding="utf-8") as f:
+              content = f.read()
+          # Find the launchMode enumDef — the third positional argument is the default.
+          m = re.search(
+              r"launchMode\s*:\s*enumDef\(\s*['\"]launch_mode['\"]\s*,\s*(\[[^\]]+\])\s*,\s*([^)\s]+)",
+              content,
+          )
+          assert m, "Could not find launchMode enumDef in useTypedSettings.ts"
+          default_val = m.group(2).strip().strip("'\"")
+          assert default_val == "delegation", (
+              f"launchMode default is '{default_val}', expected 'delegation'"
+          )
+          # Also verify that 'direct' is still present in the allowed values.
+          allowed = m.group(1)
+          assert "'direct'" in allowed or '"direct"' in allowed, (
+              "Allowed launch_mode values must include 'direct'"
+          )
+          print("OK: launchMode defaults to 'delegation'")

@@ -785,21 +785,35 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
             let text = std::fs::read_to_string(&manifest_path)?;
             let manifest: agora_core::models::InstanceManifest = serde_json::from_str(&text)?;
 
-            let creds = agora_core::msa::load_credentials()?;
-            let (username, uuid, access_token) = match creds {
-                Some(c) if !c.is_expired() => {
-                    println!("Authenticated as {}", c.username);
-                    (c.username, c.uuid, c.access_token)
-                }
-                Some(_) => {
-                    eprintln!("Credentials expired. Run 'agora auth login' to re-authenticate.");
-                    std::process::exit(1);
-                }
-                None => {
-                    eprintln!("Not authenticated. Run 'agora auth login' first.");
-                    std::process::exit(1);
-                }
+            let db_path = data_dir.join("local_state.db");
+
+            // Build network policy from local_state.db settings.
+            let network_policy = {
+                let conn = agora_core::db::local_state_connection(&db_path)?;
+                agora_core::network::NetworkPolicy::from_db(&conn)
             };
+
+            // Check MicrosoftAuthentication policy before touching MSA.
+            network_policy
+                .check(agora_core::network::NetworkCategory::MicrosoftAuthentication)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            let mut credentials = agora_core::msa::load_credentials()?.ok_or_else(|| {
+                anyhow::anyhow!("Not authenticated. Run 'agora auth login' first.")
+            })?;
+            if credentials.needs_refresh() {
+                credentials = agora_core::msa::refresh_credentials(client, &credentials, &db_path)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("Minecraft account refresh failed: {error}")
+                    })?;
+            }
+            if credentials.is_expired() {
+                anyhow::bail!("Credentials expired. Run 'agora auth login' to re-authenticate.");
+            }
+            if !json {
+                println!("Authenticated as {}", credentials.username);
+            }
 
             let reg_path = data_dir.join("registry.db");
             let reg_opt = if reg_path.exists() {
@@ -816,29 +830,57 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 std::process::exit(2);
             }
 
-            let java_home = find_java()?;
-            let mc_dir = agora_core::paths::minecraft_dir()
-                .ok_or_else(|| anyhow::anyhow!("Could not determine Minecraft directory"))?;
-
-            let loader = agora_core::launch::LoaderInfo {
-                loader_type: manifest.loader.clone(),
-                version: manifest.loader_version.clone(),
-                version_url: String::new(),
+            let java_candidates =
+                tokio::task::spawn_blocking(agora_core::java::detect_installed_jres).await?;
+            let loader = if matches!(manifest.loader.as_str(), "" | "vanilla") {
+                None
+            } else {
+                Some(agora_core::launch::LoaderInfo {
+                    loader_type: manifest.loader.clone(),
+                    version: manifest.loader_version.clone(),
+                    version_url: String::new(),
+                })
             };
-
-            let opts = agora_core::launch::LaunchOptions {
-                java_path: java_home,
-                mc_version: manifest.minecraft_version.clone(),
-                game_dir: instance_dir.clone(),
-                assets_dir: mc_dir.join("assets"),
-                username,
-                access_token,
-                uuid,
+            let resolved =
+                agora_core::launch_planner::resolve(agora_core::launch_planner::ResolveRequest {
+                    instance_id: instance.clone(),
+                    base_version_id: manifest.minecraft_version.clone(),
+                    loader,
+                    game_dir: instance_dir.clone(),
+                    assets_dir: data_dir.join("assets"),
+                    cache_dir: data_dir.join("launch_cache"),
+                    java_override: None,
+                    java_candidates,
+                    network_policy,
+                    minecraft_dir: agora_core::paths::minecraft_dir(),
+                    receipts_root: Some(
+                        data_dir.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
+                    ),
+                })
+                .await?;
+            let materialized = agora_core::launch_planner::materialize(resolved).await?;
+            // Clone access_token before moving it into LaunchIdentity, so it
+            // is still available for runtime log sanitization.
+            let access_token = credentials.access_token.clone();
+            let identity = agora_core::launch_planner::LaunchIdentity {
+                username: credentials.username,
+                access_token: credentials.access_token,
+                uuid: credentials.uuid,
                 user_type: "msa".into(),
-                jvm_args: String::new(),
-                mc_args_extra: Vec::new(),
-                loader: Some(loader),
+                client_id: String::new(),
+                xuid: String::new(),
+                user_properties: "{}".into(),
             };
+            let features = agora_core::launch_planner::LaunchFeatures::default();
+            let prepared = agora_core::launch_planner::build_command(
+                agora_core::launch_planner::BuildCommandRequest {
+                    plan: &materialized,
+                    identity: &identity,
+                    features: &features,
+                    user_jvm_args: &[],
+                    extra_game_args: &[],
+                },
+            )?;
 
             let snapshot_label = format!(
                 "pre-launch-cli-{}",
@@ -869,11 +911,22 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                     instance
                 );
             }
-            let (spawned, outcome) = agora_core::launch::spawn_java_and_wait(&opts).await?;
+            let child = agora_core::launch_planner::spawn(&prepared)?;
+            let pid = child
+                .id()
+                .ok_or_else(|| anyhow::anyhow!("Spawned process has no PID."))?;
+            // Redact the access token before crash triage so it does not persist
+            // in the captured buffer or diagnostic signatures.
+            let outcome = agora_core::launch_planner::wait_and_classify(
+                child,
+                &instance_dir,
+                &[&access_token],
+            )
+            .await?;
             agora_core::lkg::record_launch_outcome(
                 &instance_dir,
                 Some(&snapshot_id),
-                &format!("cli-{}", spawned.pid),
+                &format!("cli-{pid}"),
                 outcome.clone(),
             )
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -881,7 +934,7 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 println!(
                     "{}",
                     serde_json::json!({
-                        "pid": spawned.pid,
+                        "pid": pid,
                         "outcome": outcome,
                         "snapshot_id": snapshot_id,
                     })
@@ -907,7 +960,8 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                 }
                 let (code, state) = extract_auth_redirect(input)?;
                 let credentials =
-                    agora_core::msa::finish_login(client, &code, &flow, Some(&state), &db_path).await?;
+                    agora_core::msa::finish_login(client, &code, &flow, Some(&state), &db_path)
+                        .await?;
                 if json {
                     println!(
                         "{}",
@@ -1021,43 +1075,6 @@ fn extract_auth_redirect(input: &str) -> anyhow::Result<(String, String)> {
     let state =
         state.ok_or_else(|| anyhow::anyhow!("Redirect URL did not include an OAuth state."))?;
     Ok((code, state))
-}
-
-fn find_java() -> anyhow::Result<PathBuf> {
-    #[cfg(windows)]
-    {
-        let candidates = vec![
-            PathBuf::from(r"C:\Program Files\Java\jdk-21\bin\java.exe"),
-            PathBuf::from(r"C:\Program Files\Java\jdk-17\bin\java.exe"),
-            PathBuf::from(r"C:\Program Files\Eclipse Adoptium\jdk-21\bin\java.exe"),
-            PathBuf::from(r"C:\Program Files\Eclipse Adoptium\jdk-17\bin\java.exe"),
-        ];
-        for c in &candidates {
-            if c.exists() {
-                return Ok(c.clone());
-            }
-        }
-        if let Ok(paths) = std::env::var("PATH") {
-            for dir in std::env::split_paths(&paths) {
-                let candidate = dir.join("java.exe");
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        if let Ok(paths) = std::env::var("PATH") {
-            for dir in std::env::split_paths(&paths) {
-                let candidate = dir.join("java");
-                if candidate.exists() {
-                    return Ok(candidate);
-                }
-            }
-        }
-    }
-    anyhow::bail!("Could not find Java. Install JDK 17+ and ensure java is on your PATH.");
 }
 
 #[cfg(test)]

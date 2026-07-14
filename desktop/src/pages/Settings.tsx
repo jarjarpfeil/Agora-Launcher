@@ -1050,6 +1050,9 @@ export function Settings() {
             <p className="text-xs text-muted-foreground">
               <strong>On:</strong> Agora launches Minecraft directly — shows game console output in-app and gives you more control. Requires a Microsoft Account sign-in above for full online play.
             </p>
+            <p className="text-xs text-muted-foreground">
+              Mojang Metadata, Mojang Content, and Modloader Metadata &amp; Content are <strong>enabled by default</strong> under <strong>Privacy → Launch</strong>. Once files are cached, installed instances can launch with those categories disabled.
+            </p>
             {ts.statuses['launch_mode']?.status === 'error' && (
               <p className="text-xs text-destructive">{ts.statuses['launch_mode']?.error}</p>
             )}

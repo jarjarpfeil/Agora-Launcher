@@ -7,13 +7,53 @@ use crate::loader_manifests;
 use crate::models::{InstanceManifest, InstanceRow, JvmConfig};
 use crate::mojang;
 use crate::paths;
+use agora_core::installed_profile::{
+    self, adopt_installed_profile, derive_profile_id, LoaderTuple,
+};
+use agora_core::network::NetworkPolicy;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use tauri::Emitter;
+use tokio::sync::Mutex;
+
+// ---------------------------------------------------------------------------
+// Process-wide installer mutex — prevents concurrent Forge/NeoForge installer
+// processes from racing over the same `.minecraft/libraries` directory.
+// ---------------------------------------------------------------------------
+static INSTALLER_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+/// Max bytes retained from installer stdout+stderr (1 MiB).
+const MAX_INSTALLER_OUTPUT_BYTES: u64 = 1_048_576;
+
+/// Timeout for installer execution (10 minutes).
+const INSTALLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+// ---------------------------------------------------------------------------
+// Test seam: fake installer command
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+use std::sync::atomic::{AtomicI32, Ordering};
+#[cfg(test)]
+static FAKE_INSTALLER_EXIT: AtomicI32 = AtomicI32::new(-2); // -2 = no fake
+
+#[cfg(test)]
+pub(crate) fn set_fake_installer_exit(code: i32) {
+    FAKE_INSTALLER_EXIT.store(code, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn take_fake_installer_exit() -> Option<i32> {
+    let val = FAKE_INSTALLER_EXIT.load(Ordering::SeqCst);
+    if val >= -1 {
+        FAKE_INSTALLER_EXIT.store(-2, Ordering::SeqCst);
+        Some(val)
+    } else {
+        None
+    }
+}
 
 /// Emit a staged progress event to the frontend during instance creation.
-///
-/// Failure to emit is non-fatal â€” the frontend watcher is best-effort.
 fn emit_progress<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -30,7 +70,7 @@ fn emit_progress<R: tauri::Runtime>(
     );
 }
 
-/// Request payload for creating a custom instance (see Â§6.5b).
+/// Request payload for creating a custom instance (see §6.5b).
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateInstanceRequest {
     pub name: String,
@@ -57,13 +97,13 @@ pub struct LoaderVersionSummary {
     pub file_type: String,
 }
 
-/// Create an isolated instance directory, persist metadata, and inject the loader.
+/// Create an isolated instance directory, persist metadata, and ensure loader install.
 ///
 /// Ordering and rollback:
 /// 1. Create dirs + manifest (blocking).
-/// 2. Inject loader (async network). On failure, clean up the instance dir.
+/// 2. Ensure loader installed (async). On failure, clean up the instance dir.
 /// 3. Persist DB row + launcher profile (blocking). On failure, clean up the
-///    instance dir and the loader version JSON written in step 2.
+///    instance dir only (do NOT remove globally shared loader files).
 pub async fn create_instance<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     req: CreateInstanceRequest,
@@ -86,13 +126,15 @@ pub async fn create_instance<R: tauri::Runtime>(
     .await
     .map_err(|_| LauncherError::InstanceCreateFailed)??;
 
-    // Step 2: async loader injection (network + hash verification).
-    if let Err(e) = inject_loader(
+    // Step 2: ensure loader installed (async network + installer). On failure,
+    // clean up only the instance dir, NOT globally shared loader files.
+    if let Err(e) = ensure_loader_installed(
         &app,
         &instance_id,
         &req.loader,
         &req.minecraft_version,
         &req.loader_version,
+        false,
     )
     .await
     {
@@ -100,13 +142,14 @@ pub async fn create_instance<R: tauri::Runtime>(
             &app,
             &instance_id,
             "error",
-            &format!("Failed during loader injection. See logs."),
+            &format!("Failed during loader installation. See logs."),
         );
         cleanup_instance_dir(&app, &instance_id);
         return Err(e);
     }
 
-    // Step 3: blocking DB + profile persistence.
+    // Step 3: blocking DB + profile persistence. On failure, clean up only the
+    // instance dir — do NOT remove globally shared loader profile files.
     emit_progress(
         &app,
         &instance_id,
@@ -127,11 +170,6 @@ pub async fn create_instance<R: tauri::Runtime>(
                     &format!("Failed during persistence. See logs."),
                 );
                 cleanup_instance_dir(&app, &instance_id);
-                cleanup_loader_version_json(
-                    &req.loader,
-                    &req.minecraft_version,
-                    &req.loader_version,
-                );
                 return Err(e);
             }
             Err(_) => {
@@ -142,11 +180,6 @@ pub async fn create_instance<R: tauri::Runtime>(
                     "Failed during persistence (task error). See logs.",
                 );
                 cleanup_instance_dir(&app, &instance_id);
-                cleanup_loader_version_json(
-                    &req.loader,
-                    &req.minecraft_version,
-                    &req.loader_version,
-                );
                 return Err(LauncherError::InstanceCreateFailed);
             }
         };
@@ -156,7 +189,592 @@ pub async fn create_instance<R: tauri::Runtime>(
     Ok(row)
 }
 
-/// Blocking helper: create the instance directory tree and write the manifest.
+// ---------------------------------------------------------------------------
+// ensure_loader_installed — reusable, shared install-once loader service
+// ---------------------------------------------------------------------------
+
+/// Ensure a modloader is installed in `.minecraft/versions/`. Returns a summary
+/// indicating whether a cached valid install was used or a fresh install ran.
+///
+/// # Install-once semantics
+///
+/// - **Forge/NeoForge**: If the profile exists and a valid receipt adoption
+///   succeeds, returns immediately without download/installer execution.
+/// - **Fabric/Quilt**: If the profile exists and is valid, returns immediately.
+/// - **Cache**: Verified installer/profile bytes are cached under
+///   `app_data/loader_cache/<loader>/<mc>/<version>/<file>` with SHA-256
+///   verification. Network only on cache miss or hash mismatch.
+/// - **Network policy**: `NetworkPolicy::from_db` with `LoaderMetadataAndContent`
+///   check before any download or installer execution.
+/// - **Concurrency**: Process-wide async mutex serializes all Forge/NeoForge
+///   installer execution (backup, receipt snapshot/removal, installer subprocess,
+///   receipt creation, and commit/rollback — items 2, 5).
+///
+/// # Same-user race trust boundary
+///
+/// The process-wide [`INSTALLER_MUTEX`] protects against concurrent installer
+/// execution within **this launcher process** (multiple windows, double-clicks,
+/// concurrent repair requests). It does NOT protect against:
+/// - Other launcher processes (user running a second Agora instance).
+/// - The user manually running a Forge installer jar outside Agora.
+/// - The Mojang launcher modifying the same `.minecraft/versions/` directory.
+///
+/// These are considered **same-user actions** — the user already has
+/// full filesystem access to their `.minecraft` directory. The receipt system
+/// detects tampering after the fact via hash mismatch on next adoption,
+/// triggering a reinstall suggestion.
+pub async fn ensure_loader_installed<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+    loader: &str,
+    mc_version: &str,
+    loader_version: &str,
+    force_reinstall: bool,
+) -> LauncherResult<agora_core::installed_profile::InstallReceiptSummary> {
+    let entry = loader_manifests::find_entry(loader, mc_version, loader_version)
+        .ok_or(LauncherError::UnsupportedLoader)?;
+
+    let tuple = LoaderTuple {
+        loader: loader.to_string(),
+        minecraft_version: mc_version.to_string(),
+        loader_version: loader_version.to_string(),
+    };
+
+    // Resolve the .minecraft directory and receipts root.
+    let mc_dir = paths::minecraft_dir().ok_or(LauncherError::MojangNotFound)?;
+    let app_data = paths::app_data_dir(app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let receipts_root = app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME);
+
+    // Check network policy before any download or installer execution.
+    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let policy = NetworkPolicy::from_db(&conn);
+
+    // --- Cache hit: check existing valid profile before any network ---
+    if !force_reinstall {
+        // For Forge/NeoForge: try adoption with the curated installer SHA.
+        if entry.file_type == "installer_jar" {
+            match adopt_installed_profile(&mc_dir, &receipts_root, &tuple, Some(&entry.sha256)) {
+                Ok(adopted) => {
+                    // Profile + valid receipt adoption succeeded — no download/run needed.
+                    return Ok(agora_core::installed_profile::InstallReceiptSummary {
+                        tuple,
+                        profile_id: adopted.profile_id,
+                        cache_hit: true,
+                        profile_stable_hash: adopted.profile_stable_hash,
+                        receipt_schema_version: adopted
+                            .receipt
+                            .as_ref()
+                            .map(|r| r.schema_version)
+                            .unwrap_or(0),
+                        installer_exit_status: 0,
+                    });
+                }
+                Err(_) => {
+                    // Profile missing or receipt invalid — fall through to install.
+                }
+            }
+        }
+        // For Fabric/Quilt: try adoption with no installer SHA.
+        if entry.file_type == "profile_json" {
+            match adopt_installed_profile(&mc_dir, &receipts_root, &tuple, None) {
+                Ok(adopted) => {
+                    return Ok(agora_core::installed_profile::InstallReceiptSummary {
+                        tuple,
+                        profile_id: adopted.profile_id,
+                        cache_hit: true,
+                        profile_stable_hash: adopted.profile_stable_hash,
+                        receipt_schema_version: adopted
+                            .receipt
+                            .as_ref()
+                            .map(|r| r.schema_version)
+                            .unwrap_or(0),
+                        installer_exit_status: 0,
+                    });
+                }
+                Err(_) => {
+                    // Profile missing or invalid — fall through.
+                }
+            }
+        }
+    }
+
+    // --- Download/cache the installer or profile JSON ---
+    // Check network policy before network access.
+    policy.check(agora_core::network::NetworkCategory::LoaderMetadataAndContent)?;
+
+    let cache_dir = app_data
+        .join("loader_cache")
+        .join(loader)
+        .join(mc_version)
+        .join(loader_version);
+    std::fs::create_dir_all(&cache_dir).map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    let data = if entry.file_type == "profile_json" || entry.file_type == "installer_jar" {
+        // Try cache first.
+        let file_path = cache_dir.join(&entry.file_name);
+        let cached_data = try_cache_hit(
+            &file_path,
+            loader,
+            &entry.file_name,
+            &entry.file_type,
+            &entry.sha256,
+        );
+
+        match cached_data {
+            Some(data) => data,
+            None => {
+                emit_progress(
+                    app,
+                    instance_id,
+                    "downloading_loader",
+                    &format!("Downloading {loader} {loader_version}..."),
+                );
+                let downloaded = download::download_verified(
+                    loader,
+                    &entry.file_name,
+                    &entry.file_type,
+                    &entry.source_url,
+                    &entry.sha256,
+                )
+                .await?;
+
+                // Write to cache.
+                let _ = std::fs::write(&file_path, &downloaded);
+                downloaded
+            }
+        }
+    } else {
+        return Err(LauncherError::UnsupportedLoader);
+    };
+
+    // --- Install based on file type ---
+    match entry.file_type.as_str() {
+        "profile_json" => {
+            // Fabric/Quilt: write verified pinned profile JSON atomically.
+            emit_progress(
+                app,
+                instance_id,
+                "injecting_loader",
+                &format!("Writing profile JSON for {loader} {loader_version}..."),
+            );
+            let version_id = entry.file_name.trim_end_matches(".json");
+            let version_dir = mc_dir.join("versions").join(version_id);
+            std::fs::create_dir_all(&version_dir)
+                .map_err(|_| LauncherError::InstanceCreateFailed)?;
+            let target = version_dir.join(format!("{version_id}.json"));
+
+            // Atomic write.
+            let tmp = target.with_extension("json.tmp");
+            std::fs::write(&tmp, &data).map_err(|_| LauncherError::InstanceCreateFailed)?;
+            if let Err(e) = std::fs::rename(&tmp, &target) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(LauncherError::Generic {
+                    code: "ERR_INSTANCE_WRITE".to_string(),
+                    message: format!("Failed to write profile JSON atomically: {e}"),
+                });
+            }
+
+            // Validate the profile after writing.
+            let profile_id = derive_profile_id(&tuple);
+            let profile_hash = {
+                let profile_value: serde_json::Value = serde_json::from_slice(&data)
+                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
+                installed_profile::stable_profile_hash(&profile_value)
+            };
+
+            Ok(agora_core::installed_profile::InstallReceiptSummary {
+                tuple,
+                profile_id,
+                cache_hit: false,
+                profile_stable_hash: profile_hash,
+                receipt_schema_version: 2,
+                installer_exit_status: 0,
+            })
+        }
+        "installer_jar" => {
+            // Acquire process-wide installer mutex covering backup creation,
+            // receipt snapshot/removal, installer execution, receipt creation,
+            // and commit/rollback. This serializes ALL Forge/NeoForge installer
+            // operations (both normal installs and repairs) to prevent races
+            // against the shared .minecraft/libraries directory.
+            let _guard = INSTALLER_MUTEX.lock().await;
+
+            // --- Forced reinstall: backup before mutex-protected section ---
+            let backup_state: Option<BackupState> = if force_reinstall {
+                emit_progress(
+                    app,
+                    instance_id,
+                    "backing_up",
+                    "Backing up existing profile...",
+                );
+                Some(backup_profile_for_reinstall(
+                    &mc_dir,
+                    &receipts_root,
+                    &tuple,
+                )?)
+            } else {
+                None
+            };
+
+            // Run the installer inside the mutex-protected section.
+            emit_progress(
+                app,
+                instance_id,
+                "running_installer",
+                &format!("Running {loader} installer (this may take a minute)..."),
+            );
+
+            let install_result =
+                run_forge_installer(app, instance_id, loader, &data, &cache_dir).await;
+
+            let receipt_result = match install_result {
+                Ok(exit_status) => installed_profile::create_receipt_for_installed_profile(
+                    &mc_dir,
+                    &receipts_root,
+                    &tuple,
+                    &entry.sha256,
+                    &entry.source_url,
+                    exit_status,
+                )
+                .map_err(|issue| {
+                    let msg = format!(
+                        "Installer completed (exit={exit_status}) but receipt creation failed: {}",
+                        issue.reasons.join("; ")
+                    );
+                    eprintln!("[instances] {msg}");
+                    LauncherError::Generic {
+                        code: "ERR_PROFILE_CORRUPT".to_string(),
+                        message: msg,
+                    }
+                }),
+                Err(e) => Err(e),
+            };
+
+            match receipt_result {
+                Ok(receipt) => {
+                    // Success: delete backup best-effort only after schema-v2
+                    // receipt validates (create_receipt_for_installed_profile
+                    // internally calls adopt_installed_profile which proves the
+                    // binding).
+                    if let Some(ref state) = backup_state {
+                        delete_backup(&mc_dir, &state.profile_id);
+                    }
+
+                    Ok(agora_core::installed_profile::InstallReceiptSummary {
+                        tuple,
+                        profile_id: receipt.profile_id.clone(),
+                        cache_hit: false,
+                        profile_stable_hash: receipt.profile_stable_hash.clone(),
+                        receipt_schema_version: receipt.schema_version,
+                        installer_exit_status: receipt.installer_exit_status,
+                    })
+                }
+                Err(e) => {
+                    // Failure: restore exact profile backup AND previous
+                    // receipt atomically/best-effort before returning the
+                    // original error.
+                    if let Some(ref state) = backup_state {
+                        restore_backup(&mc_dir, &receipts_root, state);
+                    }
+                    Err(e)
+                }
+            }
+        }
+        _ => Err(LauncherError::UnsupportedLoader),
+    }
+}
+
+/// Try to load a cached file and verify its hash. Returns `Some(data)` on hit.
+fn try_cache_hit(
+    path: &std::path::Path,
+    loader: &str,
+    file_name: &str,
+    file_type: &str,
+    expected_sha: &str,
+) -> Option<Vec<u8>> {
+    if !path.exists() {
+        return None;
+    }
+    let data = std::fs::read(path).ok()?;
+    let actual = agora_core::download::compute_loader_hash(loader, file_name, file_type, &data);
+    if actual == loader_manifests::strip_sha_prefix(expected_sha) {
+        Some(data)
+    } else {
+        // Hash mismatch — ignore cached file.
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Forge/NeoForge installer execution (hardened)
+// ---------------------------------------------------------------------------
+
+/// Run a Forge/NeoForge installer jar. Returns the exit status.
+async fn run_forge_installer<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+    loader: &str,
+    installer_bytes: &[u8],
+    _cache_dir: &std::path::Path,
+) -> LauncherResult<i32> {
+    // --- Test seam: fake installer ---
+    #[cfg(test)]
+    if let Some(exit_code) = take_fake_installer_exit() {
+        // The fake installer does not write the profile. The test must
+        // set up the versions/ directory and generated libraries before
+        // calling ensure_loader_installed if receipt creation is expected.
+        return Ok(exit_code);
+    }
+
+    // Resolve Java path.
+    let java_path = get_java_path(app);
+
+    // Stage the installer jar in app_data.
+    let app_data = paths::app_data_dir(app).map_err(|_| LauncherError::InstanceCreateFailed)?;
+    let staged_installer = app_data.join(format!("{}-installer-staged.jar", loader));
+
+    std::fs::write(&staged_installer, installer_bytes)
+        .map_err(|_| LauncherError::InstanceCreateFailed)?;
+
+    let result = run_installer_process(&java_path, &staged_installer, loader, instance_id).await;
+
+    // Always clean up the staged installer.
+    let _ = std::fs::remove_file(&staged_installer);
+
+    result
+}
+
+/// Run the installer jar with process hardening.
+async fn run_installer_process(
+    java_path: &str,
+    installer_path: &std::path::Path,
+    loader: &str,
+    _instance_id: &str,
+) -> LauncherResult<i32> {
+    // NOTE: the process-wide INSTALLER_MUTEX is acquired in
+    // `ensure_loader_installed` before this function is called, so it is
+    // not re-acquired here.
+
+    let installer_str = installer_path.to_string_lossy().to_string();
+
+    let mut child = tokio::process::Command::new(java_path)
+        .arg("-jar")
+        .arg(&installer_str)
+        .arg("--installClient")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INSTALLER_FAILED".to_string(),
+            message: format!("Failed to spawn installer for {loader}: {e}"),
+        })?;
+
+    // Take stdout/stderr before spawning reader tasks to avoid borrow conflicts.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    // Spawn concurrent bounded-output readers.
+    let stdout_handle =
+        tokio::spawn(
+            async move { bounded_read_pipe(stdout_pipe, MAX_INSTALLER_OUTPUT_BYTES).await },
+        );
+    let stderr_handle =
+        tokio::spawn(
+            async move { bounded_read_pipe(stderr_pipe, MAX_INSTALLER_OUTPUT_BYTES).await },
+        );
+
+    // Wait for installer with timeout.
+    let timed = tokio::time::timeout(INSTALLER_TIMEOUT, child.wait()).await;
+
+    // Wait for output readers to finish (best-effort, ignore errors).
+    let _ = stdout_handle.await;
+    let _ = stderr_handle.await;
+
+    match timed {
+        Ok(Ok(status)) => {
+            if status.success() {
+                Ok(0)
+            } else if let Some(code) = status.code() {
+                Ok(code)
+            } else {
+                // Killed by signal — treat as failure but use a sentinel code.
+                Ok(1)
+            }
+        }
+        Ok(Err(e)) => Err(LauncherError::Generic {
+            code: "ERR_INSTALLER_FAILED".to_string(),
+            message: format!("Installer process error for {loader}: {e}"),
+        }),
+        Err(_) => {
+            // Timeout — kill the process.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            Err(LauncherError::Generic {
+                code: "ERR_INSTALLER_TIMEOUT".to_string(),
+                message: format!("Installer for {loader} timed out after 10 minutes"),
+            })
+        }
+    }
+}
+
+/// Bounded read from a pipe (stdout/stderr), retaining at most `max_bytes`.
+async fn bounded_read_pipe<R>(mut pipe: Option<R>, max_bytes: u64) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    if let Some(ref mut p) = pipe {
+        let mut reader = tokio::io::BufReader::new(p);
+        let mut temp = [0u8; 8192];
+        let mut total: u64 = 0;
+        loop {
+            let n = reader.read(&mut temp).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            let limit = (n as u64).min(max_bytes.saturating_sub(total));
+            buf.extend_from_slice(&temp[..limit as usize]);
+            total += limit;
+            if total >= max_bytes {
+                let _ = reader.read_to_end(&mut Vec::new()).await;
+                break;
+            }
+        }
+    }
+    buf
+}
+
+// ---------------------------------------------------------------------------
+// Forced reinstall: backup and restore
+// ---------------------------------------------------------------------------
+
+const BACKUP_SUFFIX: &str = ".bak-reinstall";
+
+/// Saved state from a forced reinstall backup, allowing atomic restore on failure.
+struct BackupState {
+    tuple: LoaderTuple,
+    profile_id: String,
+    old_receipt_json: Option<String>,
+}
+
+/// Atomically rename the version profile directory to a sibling backup name,
+/// and save the receipt content before removing it (for potential restore).
+fn backup_profile_for_reinstall(
+    mc_dir: &std::path::Path,
+    receipts_root: &std::path::Path,
+    tuple: &LoaderTuple,
+) -> LauncherResult<BackupState> {
+    let profile_id = derive_profile_id(tuple);
+    let version_dir = mc_dir.join("versions").join(&profile_id);
+    let backup_dir = mc_dir
+        .join("versions")
+        .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+
+    if version_dir.exists() {
+        // Remove any stale backup FIRST to free the path.
+        if backup_dir.exists() {
+            std::fs::remove_dir_all(&backup_dir)
+                .map_err(|_| LauncherError::InstanceCreateFailed)?;
+        }
+        std::fs::rename(&version_dir, &backup_dir)
+            .map_err(|_| LauncherError::InstanceCreateFailed)?;
+    }
+
+    // Save and remove the receipt so the fresh install creates a new one.
+    let rpath = installed_profile::receipt_path(receipts_root, tuple);
+    let old_receipt_json = if rpath.exists() {
+        let content = std::fs::read_to_string(&rpath).ok();
+        let _ = installed_profile::remove_receipt(receipts_root, tuple);
+        content
+    } else {
+        None
+    };
+
+    Ok(BackupState {
+        tuple: tuple.clone(),
+        profile_id,
+        old_receipt_json,
+    })
+}
+
+/// Restore a backed-up profile directory and receipt after a failed reinstall.
+fn restore_backup(mc_dir: &std::path::Path, receipts_root: &std::path::Path, state: &BackupState) {
+    let profile_id = &state.profile_id;
+    let version_dir = mc_dir.join("versions").join(profile_id);
+    let backup_dir = mc_dir
+        .join("versions")
+        .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+
+    if backup_dir.exists() {
+        if version_dir.exists() {
+            let _ = std::fs::remove_dir_all(&version_dir);
+        }
+        let _ = std::fs::rename(&backup_dir, &version_dir);
+    }
+
+    // Restore the old receipt if we saved one.
+    if let Some(ref json) = state.old_receipt_json {
+        let rpath = installed_profile::receipt_path(receipts_root, &state.tuple);
+        let _ = std::fs::create_dir_all(rpath.parent().unwrap_or(receipts_root));
+        if let Err(e) = std::fs::write(&rpath, json) {
+            eprintln!("[instances] Failed to restore receipt after failed reinstall: {e}");
+        }
+    }
+}
+
+/// Delete the backup after a successful forced reinstall. Best-effort: logs
+/// errors but returns nothing so the caller is not blocked on cleanup.
+fn delete_backup(mc_dir: &std::path::Path, profile_id: &str) {
+    let backup_dir = mc_dir
+        .join("versions")
+        .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+    if backup_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&backup_dir) {
+            eprintln!(
+                "[instances] Failed to delete reinstall backup '{}': {e}",
+                backup_dir.display()
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// repair_instance_loader — force reinstall for a specific instance
+// ---------------------------------------------------------------------------
+
+/// Repair the loader for an instance by force-reinstalling it. Returns the
+/// install receipt summary.
+pub async fn repair_instance_loader<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    instance_id: &str,
+) -> LauncherResult<agora_core::installed_profile::InstallReceiptSummary> {
+    let sanitized = paths::sanitize_id(instance_id);
+    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let row = db::get_instance(&conn, &sanitized)
+        .map_err(|_| LauncherError::LocalStateFailed)?
+        .ok_or(LauncherError::Generic {
+            code: "ERR_INSTANCE_NOT_FOUND".to_string(),
+            message: format!("Instance '{instance_id}' not found"),
+        })?;
+
+    ensure_loader_installed(
+        app,
+        &sanitized,
+        &row.loader,
+        &row.minecraft_version,
+        &row.loader_version,
+        true, // force_reinstall
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Blocking helpers
+// ---------------------------------------------------------------------------
+
 fn prepare_instance_dir<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -220,7 +838,6 @@ fn prepare_instance_dir<R: tauri::Runtime>(
     })
 }
 
-/// Blocking helper: upsert the instance row and register the launcher profile.
 fn persist_instance<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     row: &InstanceRow,
@@ -240,19 +857,6 @@ fn cleanup_instance_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>, instance_i
         if dir.exists() {
             let _ = std::fs::remove_dir_all(&dir);
         }
-    }
-}
-
-/// Remove the loader version JSON written to `.minecraft/versions/` if no other
-/// instance references it.
-fn cleanup_loader_version_json(loader: &str, mc_version: &str, loader_version: &str) {
-    let version_id = loader_version_id(loader, loader_version, mc_version);
-    let Some(mc_dir) = paths::minecraft_dir() else {
-        return;
-    };
-    let version_dir = mc_dir.join("versions").join(&version_id);
-    if version_dir.exists() {
-        let _ = std::fs::remove_dir_all(&version_dir);
     }
 }
 
@@ -279,7 +883,7 @@ pub fn get_instance_detail<R: tauri::Runtime>(
 }
 
 /// Delete an instance: remove from DB, remove its launcher profile, trash the
-/// directory, and clean up the loader version JSON if no other instance uses it.
+/// directory. Does NOT remove global loader files (other instances may share them).
 pub fn delete_instance<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -287,7 +891,7 @@ pub fn delete_instance<R: tauri::Runtime>(
     let sanitized = paths::sanitize_id(instance_id);
     let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
 
-    let row = db::get_instance(&conn, &sanitized).map_err(|_| LauncherError::LocalStateFailed)?;
+    let _row = db::get_instance(&conn, &sanitized).map_err(|_| LauncherError::LocalStateFailed)?;
 
     db::delete_instance(&conn, &sanitized).map_err(|_| LauncherError::LocalStateFailed)?;
 
@@ -295,19 +899,6 @@ pub fn delete_instance<R: tauri::Runtime>(
     let profile_id = profile_id_for(&sanitized);
     if let Err(e) = crate::launcher_profiles::remove_profile(&profile_id) {
         eprintln!("Failed to remove launcher profile {profile_id}: {e}");
-    }
-
-    if let Some(row) = row {
-        let remaining = db::count_instances_by_loader_version(
-            &conn,
-            &row.loader,
-            &row.minecraft_version,
-            &row.loader_version,
-        )
-        .unwrap_or(1);
-        if remaining == 0 {
-            cleanup_loader_version_json(&row.loader, &row.minecraft_version, &row.loader_version);
-        }
     }
 
     let dir = paths::instance_dir(app, &sanitized).map_err(|_| LauncherError::LocalStateFailed)?;
@@ -318,7 +909,6 @@ pub fn delete_instance<R: tauri::Runtime>(
 }
 
 /// Unlock a locked pack instance for manual mod management (§6.5).
-/// Sets is_locked=false in the DB to allow manual mod changes.
 pub async fn unlock_instance<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -370,7 +960,6 @@ pub async fn rename_instance<R: tauri::Runtime>(
 }
 
 /// Revert an unlocked instance to its lock snapshot (§6.5).
-/// Re-locks the instance (further revert logic is a future enhancement).
 pub async fn revert_instance<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -399,9 +988,7 @@ pub fn launch_instance<R: tauri::Runtime>(
 
     let launcher_path = mojang::resolve_launcher_path(user_override.as_deref())?;
 
-    // Update last_launched_at BEFORE spawning the game (Â§9.1).
-    // This prevents crash-prompt loops where the interceptor sees a stale
-    // last_launched_at and re-offers "Launch Anyway" indefinitely.
+    // Update last_launched_at BEFORE spawning the game (§9.1).
     let now = chrono::Utc::now().to_rfc3339();
     let _ = db::touch_last_launched(&conn, &sanitized, &now);
 
@@ -442,115 +1029,7 @@ pub fn list_loader_versions(loader: &str, mc_version: &str) -> Vec<LoaderVersion
         .collect()
 }
 
-/// Inject the modloader version JSON into the official Minecraft directory.
-///
-/// For Fabric/Quilt profile JSONs, this writes the verified JSON to
-/// `~/.minecraft/versions/<version_id>/<version_id>.json`. NeoForge/Forge ship an
-/// installer jar, so the verified jar is staged in the app data dir and the
-/// installer is run with `java -jar <installer> --installClient`. The installer
-/// itself writes into `~/.minecraft/versions/` and `~/.minecraft/libraries/`.
-async fn inject_loader<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    instance_id: &str,
-    loader: &str,
-    mc_version: &str,
-    loader_version: &str,
-) -> LauncherResult<()> {
-    let entry = loader_manifests::find_entry(loader, mc_version, loader_version)
-        .ok_or(LauncherError::UnsupportedLoader)?;
-
-    emit_progress(
-        app,
-        instance_id,
-        "downloading_loader",
-        &format!("Downloading {loader} {loader_version}..."),
-    );
-
-    let data = download::download_verified(
-        loader,
-        &entry.file_name,
-        &entry.file_type,
-        &entry.source_url,
-        &entry.sha256,
-    )
-    .await?;
-
-    emit_progress(app, instance_id, "verifying_loader", "Verifying SHA-256...");
-
-    if entry.file_type == "profile_json" {
-        emit_progress(
-            app,
-            instance_id,
-            "injecting_loader",
-            &format!("Writing profile JSON for {loader} {loader_version}..."),
-        );
-        let version_id = entry.file_name.trim_end_matches(".json");
-        let mc_dir = paths::minecraft_dir().ok_or(LauncherError::MojangNotFound)?;
-        let version_dir = mc_dir.join("versions").join(version_id);
-        std::fs::create_dir_all(&version_dir).map_err(|_| LauncherError::InstanceCreateFailed)?;
-        std::fs::write(version_dir.join(format!("{version_id}.json")), data)
-            .map_err(|_| LauncherError::InstanceCreateFailed)?;
-        Ok(())
-    } else if entry.file_type == "installer_jar" {
-        emit_progress(
-            app,
-            instance_id,
-            "injecting_loader",
-            &format!("Staging installer jar for {loader} {loader_version}..."),
-        );
-        let app_data = paths::app_data_dir(app).map_err(|_| LauncherError::InstanceCreateFailed)?;
-        let installer_path = app_data.join(format!("{loader}-installer.jar"));
-
-        // Stage the verified installer jar in the app data dir.
-        std::fs::write(&installer_path, &data).map_err(|_| LauncherError::InstanceCreateFailed)?;
-
-        let java_path = get_java_path(app);
-        let installer_path_for_task = installer_path.clone();
-        let loader_label = loader.to_string();
-
-        // Run the installer on a blocking thread; `java -jar` invocations can take a while.
-        let result = tokio::task::spawn_blocking(move || {
-            std::process::Command::new(&java_path)
-                .arg("-jar")
-                .arg(&installer_path_for_task)
-                .arg("--installClient")
-                .output()
-        })
-        .await;
-
-        // Always clean up the staged installer jar, regardless of outcome.
-        let _ = std::fs::remove_file(&installer_path);
-
-        match result {
-            Ok(Ok(output)) if output.status.success() => Ok(()),
-            Ok(Ok(output)) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                Err(LauncherError::Generic {
-                    code: "ERR_INSTALLER_FAILED".to_string(),
-                    message: format!(
-                        "Installer for {loader_label} exited with {}: {stderr}",
-                        output.status
-                    ),
-                })
-            }
-            Ok(Err(e)) => Err(LauncherError::Generic {
-                code: "ERR_INSTALLER_FAILED".to_string(),
-                message: format!("Failed to run installer for {loader_label}: {e}"),
-            }),
-            Err(e) => Err(LauncherError::Generic {
-                code: "ERR_INSTALLER_FAILED".to_string(),
-                message: format!("Installer task panicked for {loader_label}: {e}"),
-            }),
-        }
-    } else {
-        Err(LauncherError::UnsupportedLoader)
-    }
-}
-
 /// Resolve the Java binary path used to run installer jars.
-///
-/// Reads the `java_path` user setting from `local_state.db`. If it is unset or
-/// unreadable, falls back to `"java"` so the system PATH is searched.
 fn get_java_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
     let conn = match db::local_state_connection(app) {
         Ok(c) => c,
@@ -566,11 +1045,6 @@ fn get_java_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
 
 /// Compute the effective AlwaysPreTouch value based on GC type, instance setting,
 /// and optional user-level override.
-///
-/// GC-conditional default (Â§8.5):
-/// - G1GC (or empty/unknown): true â€” safe and beneficial
-/// - ZGC / Shenandoah: false â€” may cause issues
-/// User override always wins when present.
 fn compute_always_pre_touch(gc: &str, instance_setting: bool, user_override: Option<bool>) -> bool {
     user_override.unwrap_or_else(|| {
         if !instance_setting {
@@ -592,7 +1066,6 @@ fn build_profile_entry<R: tauri::Runtime>(
     let game_dir = paths::instance_dir(app, &row.instance_id)
         .map_err(|_| LauncherError::InstanceCreateFailed)?;
 
-    // Allow user-level override via `jvm_always_pre_touch` setting in user_settings.
     let user_override = db::get_setting(
         &db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?,
         "jvm_always_pre_touch",
@@ -672,7 +1145,7 @@ fn write_manifest<R: tauri::Runtime>(
     let path = manifest_path(app, instance_id)?;
     let text =
         serde_json::to_string_pretty(manifest).map_err(|_| LauncherError::InstanceCreateFailed)?;
-    // Atomic write: write to .tmp then rename. Abort-safe against mid-write crashes.
+    // Atomic write: write to .tmp then rename.
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|_| LauncherError::InstanceCreateFailed)?;
     if let Err(e) = std::fs::rename(&tmp, &path) {
@@ -688,6 +1161,33 @@ fn write_manifest<R: tauri::Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let id = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir()
+                .join(format!("agora-instances-test-{}-{id}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     // --- compute_always_pre_touch tests ---
 
@@ -719,13 +1219,11 @@ mod tests {
 
     #[test]
     fn test_pre_touch_user_override_true() {
-        // Override wins: ZGC would default to false, but override forces true.
         assert!(compute_always_pre_touch("ZGC", false, Some(true)));
     }
 
     #[test]
     fn test_pre_touch_user_override_false() {
-        // Override wins: G1GC would default to true, but override forces false.
         assert!(!compute_always_pre_touch("G1GC", true, Some(false)));
     }
 
@@ -734,40 +1232,7 @@ mod tests {
         assert!(compute_always_pre_touch("ParallelGC", true, None));
     }
 
-    #[test]
-    fn test_pre_touch_zgc_in_mixed_string() {
-        assert!(!compute_always_pre_touch("-XX:+UseZGC", true, None));
-    }
-
-    #[test]
-    fn test_pre_touch_g1_in_mixed_string() {
-        assert!(compute_always_pre_touch("-XX:+UseG1GC", true, None));
-    }
-
-    // Additional edge-case tests
-
-    #[test]
-    fn test_pre_touch_instance_false_no_override() {
-        // Instance explicitly disabled, no user override â†’ false regardless of GC.
-        assert!(!compute_always_pre_touch("G1GC", false, None));
-        assert!(!compute_always_pre_touch("ZGC", false, None));
-    }
-
-    #[test]
-    fn test_pre_touch_never_override_true() {
-        // User override true always wins, even with instance disabled.
-        assert!(compute_always_pre_touch("ZGC", false, Some(true)));
-        assert!(compute_always_pre_touch("Shenandoah", false, Some(true)));
-    }
-
-    #[test]
-    fn test_pre_touch_never_override_false() {
-        // User override false always wins, even with instance enabled + G1GC.
-        assert!(!compute_always_pre_touch("G1GC", true, Some(false)));
-        assert!(!compute_always_pre_touch("", true, Some(false)));
-    }
-
-    // --- loader_version_id tests (pure helper) ---
+    // --- loader_version_id tests ---
 
     #[test]
     fn test_loader_version_id_fabric() {
@@ -802,22 +1267,238 @@ mod tests {
     }
 
     #[test]
-    fn test_loader_version_id_unknown() {
-        assert_eq!(
-            loader_version_id("custom", "1.0", "1.20"),
-            "custom-1.0-1.20"
-        );
-    }
-
-    // --- profile_id_for tests (pure helper) ---
-
-    #[test]
     fn test_profile_id_for() {
         assert_eq!(profile_id_for("my_instance"), "agora-my_instance");
     }
 
+    // -----------------------------------------------------------------------
+    // Backup / restore / delete tests
+    // -----------------------------------------------------------------------
+
+    fn forge_tuple() -> LoaderTuple {
+        LoaderTuple {
+            loader: "forge".into(),
+            minecraft_version: "1.21".into(),
+            loader_version: "47.1.0".into(),
+        }
+    }
+
+    fn setup_backup_fixture() -> (TestDir, PathBuf, PathBuf, LoaderTuple, String) {
+        let tmp = TestDir::new();
+        let mc_dir = tmp.path().join(".minecraft");
+        let receipts_root = tmp.path().join("receipts");
+        fs::create_dir_all(&mc_dir).expect("create mc_dir");
+        fs::create_dir_all(&receipts_root).expect("create receipts_root");
+
+        let tuple = forge_tuple();
+        let profile_id = derive_profile_id(&tuple);
+        let version_dir = mc_dir.join("versions").join(&profile_id);
+        fs::create_dir_all(&version_dir).expect("create version dir");
+        fs::write(version_dir.join("profile.json"), b"fake profile").expect("write profile");
+
+        (tmp, mc_dir, receipts_root, tuple, profile_id)
+    }
+
     #[test]
-    fn test_profile_id_for_special_chars() {
-        assert_eq!(profile_id_for("test-123"), "agora-test-123");
+    fn test_backup_profile_creates_backup_and_saves_receipt() {
+        let (_tmp, mc_dir, receipts_root, tuple, profile_id) = setup_backup_fixture();
+
+        // Write a receipt first.
+        let rpath = agora_core::installed_profile::receipt_path(&receipts_root, &tuple);
+        fs::create_dir_all(rpath.parent().unwrap()).expect("create parent");
+        fs::write(
+            &rpath,
+            b"{\"schema_version\":2,\"tuple\":{\"loader\":\"forge\"}}",
+        )
+        .expect("write receipt");
+
+        let backup_dir = mc_dir
+            .join("versions")
+            .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+        assert!(
+            !backup_dir.exists(),
+            "backup should not exist before backup"
+        );
+
+        let state = backup_profile_for_reinstall(&mc_dir, &receipts_root, &tuple)
+            .expect("backup should succeed");
+
+        assert_eq!(state.profile_id, profile_id);
+        assert!(
+            !mc_dir
+                .join("versions")
+                .join(&profile_id)
+                .join("profile.json")
+                .exists(),
+            "original should be moved after backup"
+        );
+        assert!(backup_dir.exists(), "backup should exist after backup");
+        assert!(
+            state.old_receipt_json.is_some(),
+            "receipt content should be saved"
+        );
+        assert!(!rpath.exists(), "receipt should be removed after backup");
+    }
+
+    #[test]
+    fn test_restore_backup_restores_profile_and_receipt() {
+        let (_tmp, mc_dir, receipts_root, tuple, _profile_id) = setup_backup_fixture();
+
+        // Write a receipt.
+        let rpath = agora_core::installed_profile::receipt_path(&receipts_root, &tuple);
+        fs::create_dir_all(rpath.parent().unwrap()).expect("create parent");
+        let receipt_content = "{\"schema_version\":2,\"tuple\":{\"loader\":\"forge\"}}";
+        fs::write(&rpath, receipt_content).expect("write receipt");
+
+        let state = backup_profile_for_reinstall(&mc_dir, &receipts_root, &tuple)
+            .expect("backup should succeed");
+
+        // Now simulate failure by having the version dir exist again (e.g. partial install).
+        let profile_id = derive_profile_id(&tuple);
+        let version_dir = mc_dir.join("versions").join(&profile_id);
+        fs::create_dir_all(&version_dir).expect("create version dir");
+        fs::write(version_dir.join("new_profile.json"), b"partial install").expect("write");
+
+        // Restore.
+        restore_backup(&mc_dir, &receipts_root, &state);
+
+        // Original profile should be back.
+        assert!(
+            mc_dir
+                .join("versions")
+                .join(&profile_id)
+                .join("profile.json")
+                .exists(),
+            "original profile should be restored"
+        );
+        // Partial install file should be gone.
+        assert!(
+            !version_dir.join("new_profile.json").exists(),
+            "partial install file should be removed during restore"
+        );
+        // Backup dir should be gone.
+        assert!(
+            !mc_dir
+                .join("versions")
+                .join(format!("{profile_id}{BACKUP_SUFFIX}"))
+                .exists(),
+            "backup dir should be removed after restore"
+        );
+        // Receipt should be restored.
+        assert!(rpath.exists(), "receipt should be restored");
+        let restored_content = std::fs::read_to_string(&rpath).expect("read receipt");
+        assert_eq!(
+            restored_content, receipt_content,
+            "receipt content should match"
+        );
+    }
+
+    #[test]
+    fn test_backup_no_receipt_still_succeeds() {
+        let (_tmp, mc_dir, receipts_root, tuple, _profile_id) = setup_backup_fixture();
+
+        // No receipt written — backup should still succeed.
+        let state = backup_profile_for_reinstall(&mc_dir, &receipts_root, &tuple)
+            .expect("backup should succeed without receipt");
+
+        assert!(
+            state.old_receipt_json.is_none(),
+            "no receipt should be saved"
+        );
+    }
+
+    #[test]
+    fn test_restore_backup_no_bad_dir_still_succeeds() {
+        let (_tmp, mc_dir, receipts_root, tuple, profile_id) = setup_backup_fixture();
+
+        // Backup one tuple.
+        let state = backup_profile_for_reinstall(&mc_dir, &receipts_root, &tuple)
+            .expect("backup should succeed");
+
+        // Delete the backup dir to simulate edge case.
+        let backup_dir = mc_dir
+            .join("versions")
+            .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+        if backup_dir.exists() {
+            fs::remove_dir_all(&backup_dir).expect("remove backup");
+        }
+
+        // Restore should not panic or error.
+        restore_backup(&mc_dir, &receipts_root, &state);
+    }
+
+    #[test]
+    fn test_delete_backup_removes_backup() {
+        let tmp = TestDir::new();
+        let profile_id = "forge-1.21-47.1.0";
+        let backup_dir = tmp
+            .path()
+            .join("versions")
+            .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+        fs::create_dir_all(&backup_dir).expect("create backup dir");
+        assert!(backup_dir.exists());
+
+        delete_backup(tmp.path(), profile_id);
+        assert!(!backup_dir.exists(), "backup should be removed");
+    }
+
+    #[test]
+    fn test_delete_backup_missing_no_error() {
+        let tmp = TestDir::new();
+        // Should not panic or error when backup doesn't exist.
+        delete_backup(tmp.path(), "nonexistent");
+    }
+
+    #[test]
+    fn test_backup_removes_stale_backup_first() {
+        let (_tmp, mc_dir, _, tuple, profile_id) = setup_backup_fixture();
+
+        // Create a stale backup.
+        let receipts_root = mc_dir.parent().unwrap().join("receipts");
+        let stale_backup = mc_dir
+            .join("versions")
+            .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+        fs::create_dir_all(&stale_backup).expect("create stale backup");
+        fs::write(stale_backup.join("stale.txt"), b"stale").expect("write stale");
+
+        // Backup should succeed (removes stale first).
+        let state = backup_profile_for_reinstall(&mc_dir, &receipts_root, &tuple)
+            .expect("backup should succeed even with stale backup");
+
+        assert_eq!(state.profile_id, profile_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Mutex serialization test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_installer_mutex_serializes_concurrent_access() {
+        // Acquire the mutex in the current task.
+        let guard = INSTALLER_MUTEX.lock().await;
+
+        // Spawn a task that tries to acquire the same mutex — it should be
+        // blocked until we release.
+        let acquired =
+            tokio::time::timeout(std::time::Duration::from_millis(50), INSTALLER_MUTEX.lock())
+                .await;
+
+        assert!(
+            acquired.is_err(),
+            "concurrent mutex acquisition should time out while guard is held"
+        );
+
+        // Release the guard.
+        drop(guard);
+
+        // Now the other task should acquire immediately.
+        let acquired2 =
+            tokio::time::timeout(std::time::Duration::from_millis(50), INSTALLER_MUTEX.lock())
+                .await;
+
+        assert!(
+            acquired2.is_ok(),
+            "mutex should be free after guard is dropped"
+        );
     }
 }

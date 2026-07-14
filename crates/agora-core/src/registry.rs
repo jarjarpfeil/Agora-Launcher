@@ -981,7 +981,6 @@ pub fn get_known_conflicts(conn: &Connection) -> LauncherResult<Vec<KnownConflic
 mod tests {
     use super::*;
     use crate::db::registry_connection;
-    use std::fs;
     use tempfile::TempDir;
 
     fn temp_registry_db() -> TempDir {

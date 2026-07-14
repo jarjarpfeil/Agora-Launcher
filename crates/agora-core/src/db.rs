@@ -34,8 +34,10 @@ pub fn init_local_state_db(db_path: &std::path::PathBuf) -> anyhow::Result<()> {
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     run_migrations(&conn)?;
 
-    // Network feature toggles are stored as JSON strings ("true"/"false")
-    // because is_network_enabled reads them with .as_str().
+    // Network feature toggles may be stored as JSON strings ("true"/"false")
+    // or JSON booleans (true/false); is_network_enabled and
+    // is_fail_closed_enabled accept both representations.
+    // Pre-existing keys default to enabled for backward compatibility.
     for key in [
         "network_modrinth_enabled",
         "network_modrinth_cdn_enabled",
@@ -43,6 +45,20 @@ pub fn init_local_state_db(db_path: &std::path::PathBuf) -> anyhow::Result<()> {
         "network_github_oauth_enabled",
         "network_msa_enabled",
         "network_adoptium_enabled",
+    ] {
+        if get_setting(&conn, key).ok().flatten().is_none() {
+            set_setting(&conn, key, &serde_json::Value::String("true".to_string()))?;
+        }
+    }
+
+    // Launch-network toggles for Mojang metadata, Mojang content, and modloader
+    // are first-party enabled: they default to "true" so that a fresh or upgraded DB
+    // allows network access. Cached files continue to work when disabled; the user
+    // must explicitly disable the category to block downloads.
+    for key in [
+        "network_mojang_metadata_enabled",
+        "network_mojang_content_enabled",
+        "network_loader_enabled",
     ] {
         if get_setting(&conn, key).ok().flatten().is_none() {
             set_setting(&conn, key, &serde_json::Value::String("true".to_string()))?;
@@ -221,13 +237,26 @@ pub fn get_setting(conn: &Connection, key: &str) -> anyhow::Result<Option<serde_
 /// `false` if explicitly disabled.
 /// Setting keys: `network_modrinth_enabled`, `network_modrinth_cdn_enabled`,
 /// `network_registry_sync_enabled`, `network_github_oauth_enabled`,
-/// `network_msa_enabled`, `network_adoptium_enabled`.
+/// `network_msa_enabled`, `network_adoptium_enabled`,
+/// `network_mojang_metadata_enabled`, `network_mojang_content_enabled`,
+/// `network_loader_enabled`.
 pub fn is_network_enabled(conn: &Connection, key: &str) -> bool {
     get_setting(conn, key)
         .ok()
         .flatten()
-        .and_then(|v| v.as_str().map(|s| s == "true"))
+        .map(|v| is_value_enabled(&v))
         .unwrap_or(true)
+}
+
+/// Parse a stored setting value as a boolean, accepting both JSON booleans
+/// and legacy JSON strings `"true"` / `"false"`. Returns `true` for unknown
+/// or unexpected shapes (aligned with the fail-open default).
+fn is_value_enabled(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::String(s) => s == "true",
+        _ => true,
+    }
 }
 
 /// Upsert a JSON-encoded setting into user_settings.
@@ -720,6 +749,39 @@ mod tests {
     }
 
     #[test]
+    fn test_new_launch_network_keys_default_to_true() {
+        let (conn, _path) = test_db();
+        for key in [
+            "network_mojang_metadata_enabled",
+            "network_mojang_content_enabled",
+            "network_loader_enabled",
+        ] {
+            let val = get_setting(&conn, key).unwrap();
+            assert_eq!(
+                val,
+                Some(serde_json::json!("true")),
+                "{key} should default to true"
+            );
+        }
+        // Verify pre-existing network keys still default to true.
+        for key in [
+            "network_modrinth_enabled",
+            "network_modrinth_cdn_enabled",
+            "network_registry_sync_enabled",
+            "network_github_oauth_enabled",
+            "network_msa_enabled",
+            "network_adoptium_enabled",
+        ] {
+            let val = get_setting(&conn, key).unwrap();
+            assert_eq!(
+                val,
+                Some(serde_json::json!("true")),
+                "{key} should default to true"
+            );
+        }
+    }
+
+    #[test]
     fn test_optional_integrations_default_to_disabled() {
         let (conn, _path) = test_db();
         for key in ["modrinth_enabled", "ai_chat_enabled", "ai_mcp_enabled"] {
@@ -737,6 +799,68 @@ mod tests {
         set_setting(&conn, "key", &serde_json::json!("v2")).unwrap();
         let val = get_setting(&conn, "key").unwrap();
         assert_eq!(val, Some(serde_json::json!("v2")));
+    }
+
+    // ---- is_network_enabled: both JSON booleans and legacy strings ----
+
+    #[test]
+    fn test_is_network_enabled_missing_default_true() {
+        let (conn, _path) = test_db();
+        // A key that was never set should default to enabled (fail-open).
+        assert!(is_network_enabled(&conn, "nonexistent_network_key"));
+    }
+
+    #[test]
+    fn test_is_network_enabled_json_bool_true() {
+        let (conn, _path) = test_db();
+        set_setting(&conn, "test_key", &serde_json::Value::Bool(true)).unwrap();
+        assert!(is_network_enabled(&conn, "test_key"));
+    }
+
+    #[test]
+    fn test_is_network_enabled_json_bool_false() {
+        let (conn, _path) = test_db();
+        set_setting(&conn, "test_key", &serde_json::Value::Bool(false)).unwrap();
+        assert!(!is_network_enabled(&conn, "test_key"));
+    }
+
+    #[test]
+    fn test_is_network_enabled_string_true() {
+        let (conn, _path) = test_db();
+        set_setting(&conn, "test_key", &serde_json::Value::String("true".into())).unwrap();
+        assert!(is_network_enabled(&conn, "test_key"));
+    }
+
+    #[test]
+    fn test_is_network_enabled_string_false() {
+        let (conn, _path) = test_db();
+        set_setting(
+            &conn,
+            "test_key",
+            &serde_json::Value::String("false".into()),
+        )
+        .unwrap();
+        assert!(!is_network_enabled(&conn, "test_key"));
+    }
+
+    #[test]
+    fn test_is_network_enabled_roundtrip_bool() {
+        let (conn, _path) = test_db();
+        // Write as boolean, read back
+        set_setting(&conn, "rt_key", &serde_json::Value::Bool(false)).unwrap();
+        assert!(!is_network_enabled(&conn, "rt_key"));
+        set_setting(&conn, "rt_key", &serde_json::Value::Bool(true)).unwrap();
+        assert!(is_network_enabled(&conn, "rt_key"));
+    }
+
+    #[test]
+    fn test_is_network_enabled_roundtrip_string() {
+        let (conn, _path) = test_db();
+        // Write as string, read back
+        set_setting(&conn, "rt_key", &serde_json::Value::String("false".into())).unwrap();
+        assert!(!is_network_enabled(&conn, "rt_key"));
+        set_setting(&conn, "rt_key", &serde_json::Value::String("true".into())).unwrap();
+        assert!(is_network_enabled(&conn, "rt_key"));
     }
 
     // ---- record_co_crash ----
