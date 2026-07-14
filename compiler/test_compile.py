@@ -110,12 +110,12 @@ class TestGetRegistryRepo(unittest.TestCase):
         os.environ["GITHUB_REPOSITORY"] = "gh/test"
         self.assertEqual(_compile._get_registry_repo(), "gh/test")
 
-    def test_default(self):
-        """When both env vars are unset, the default is returned."""
+    def test_missing_configuration_fails_closed(self):
+        """When both env vars are unset, compilation fails clearly."""
         os.environ.pop("AGORA_REGISTRY_REPO", None)
         os.environ.pop("GITHUB_REPOSITORY", None)
-        result = _compile._get_registry_repo()
-        self.assertIn("Agora-Minecraft-Mod-Loader", result)
+        with self.assertRaisesRegex(RuntimeError, "AGORA_REGISTRY_REPO"):
+            _compile._get_registry_repo()
 
     def test_priority_agora_over_github(self):
         """AGORA_REGISTRY_REPO wins over GITHUB_REPOSITORY when both are set."""

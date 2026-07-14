@@ -63,7 +63,7 @@ const MICROSOFT_CLIENT_ID: &str = "00000000402b5328";
 const AUTH_REPLY_URL: &str = "https://login.live.com/oauth20_desktop.srf";
 const REQUESTED_SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL";
 const TITLE_ID: &str = "1794566092";
-const USER_AGENT: &str = "Agora Launcher (https://github.com/Kilo-Org/agora)";
+const USER_AGENT: &str = "Agora Launcher";
 
 // Endpoints
 const DEVICE_AUTH_URL: &str = "https://device.auth.xboxlive.com/device/authenticate";

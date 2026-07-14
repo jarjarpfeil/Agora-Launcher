@@ -239,7 +239,7 @@ These are loaded at runtime by the Python compiler (NOT read by the Tauri Rust b
 | `ED25519_PRIVATE_KEY` | CI-only Ed25519 key used to sign `registry.db` | ✅ Secret |
 | `GITHUB_TOKEN` | Standard GitHub token used by the compiler for issue-form / reaction / GraphQL calls | ✅ Secret |
 | `DISCORD_WEBHOOK_URL` | Optional. Discord webhook for curator alerts on velocity circuit-breakers / coordinated-attack detection. When unset, Discord notifications are silently skipped (audit-trail + admin-alert GitHub issue still fire) | Optional |
-| `AGORA_REGISTRY_REPO` | Optional override for the governance repo (`owner/repo`). Defaults to the `DEFAULT_REGISTRY_OWNER`/`DEFAULT_REGISTRY_REPO` constants in `compiler/compile.py` (currently `jarjarpfeil/Agora-Minecraft-Mod-Loader`), falling back to the GitHub Actions `GITHUB_REPOSITORY` env var when running in CI | ❌ Public |
+| `AGORA_REGISTRY_REPO` | Registry and governance repository in `owner/repo` form. Falls back to GitHub Actions' `GITHUB_REPOSITORY` in compiler jobs; launcher builds must pass it explicitly. | ❌ Public |
 
 `AGORA_OAUTH_CLIENT_ID` and `AGORA_REGISTRY_PUBKEY` are intentionally NOT loaded from `.env` -- they are read by the Tauri Rust build at compile time via `option_env!()`. See "Environment variables for the Tauri build" below.
 

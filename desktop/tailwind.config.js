@@ -10,6 +10,11 @@ export default {
   theme: {
     extend: {
       colors: {
+        midnight: "hsl(var(--midnight))",
+        aegean: "hsl(var(--aegean))",
+        "sea-blue": "hsl(var(--sea-blue))",
+        "civic-gold": "hsl(var(--civic-gold))",
+        stone: "hsl(var(--stone))",
         brand: {
           50: '#f4f7fb',
           100: '#e8eff6',

@@ -128,17 +128,17 @@ _load_dotenv(REPO_ROOT / ".env")
 # the AGORA_REGISTRY_REPO env var ("owner/repo" form). In GitHub Actions,
 # GITHUB_REPOSITORY is auto-set to "owner/repo" and used as fallback.
 GITHUB_API_BASE = "https://api.github.com"
-DEFAULT_REGISTRY_OWNER = "jarjarpfeil"
-DEFAULT_REGISTRY_REPO = "Agora-Minecraft-Mod-Loader"
-
-
 def _get_registry_repo() -> str:
     """Return the 'owner/repo' string for the registry/governance repo."""
-    return (
+    repo = (
         os.environ.get("AGORA_REGISTRY_REPO")
         or os.environ.get("GITHUB_REPOSITORY")
-        or f"{DEFAULT_REGISTRY_OWNER}/{DEFAULT_REGISTRY_REPO}"
     )
+    if not repo:
+        raise RuntimeError(
+            "AGORA_REGISTRY_REPO or GITHUB_REPOSITORY must be set to owner/repository"
+        )
+    return repo
 GITHUB_REACTION_UPVOTES = {"+1"}
 GITHUB_REACTION_DOWNVOTES = {"-1"}
 
@@ -165,7 +165,7 @@ MOD_ID_FIELD_RE = re.compile(
 #     is the hard requirement).
 #   - Admin-alert issue: file a high-priority confidential issue in the
 #     governance repo (private repos are out of scope; we file as a
-#     confidential issue on agora-mc/agora-mc itself).
+#     confidential issue on the configured registry repository itself).
 #
 # When `net_score < -10` organically (no spike), step 5 mandates the same
 # under_review flip + triage poll creation, but WITHOUT reaction-deletion
@@ -780,7 +780,7 @@ def _apply_trust_velocity_pass(
         accepted_up = 0
         accepted_down = 0
         gov_full = _get_registry_repo()
-        gov_org = gov_full.split("/")[0] or DEFAULT_REGISTRY_OWNER
+        gov_org = gov_full.split("/")[0]
         interaction_counts = _user_interaction_counts(by_mod, token=token, org=gov_org, cache=trust_interaction_cache)
         for r in m.reactions:
             if r.is_upvote is None:

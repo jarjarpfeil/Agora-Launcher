@@ -1,5 +1,10 @@
-export const GITHUB_REPO_URL =
-  process.env.NEXT_PUBLIC_GITHUB_REPO_URL || 'https://github.com/jarjarpfeil/Agora-Minecraft-Mod-Loader';
+const repositorySlug = process.env.NEXT_PUBLIC_GITHUB_REPOSITORY || process.env.GITHUB_REPOSITORY;
+
+if (!repositorySlug) {
+  throw new Error('NEXT_PUBLIC_GITHUB_REPOSITORY or GITHUB_REPOSITORY must be configured');
+}
+
+export const GITHUB_REPO_URL = `https://github.com/${repositorySlug}`;
 
 export const GITHUB_RELEASES_URL = `${GITHUB_REPO_URL}/releases`;
 
@@ -8,4 +13,4 @@ export const GITHUB_RELEASES_URL = `${GITHUB_REPO_URL}/releases`;
 // the desktop installer. Consumers should fetch this list and select a `v*`
 // desktop release instead.
 export const GITHUB_API_RELEASES_URL =
-  `https://api.github.com/repos/${GITHUB_REPO_URL.replace('https://github.com/', '')}/releases?per_page=100`;
+  `https://api.github.com/repos/${repositorySlug}/releases?per_page=100`;

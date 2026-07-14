@@ -54,6 +54,8 @@ jobs:
       - name: Build
         working-directory: web
         run: npm run build
+        env:
+          NEXT_PUBLIC_GITHUB_REPOSITORY: ${{ github.repository }}
 
       - name: Upload static site
         uses: actions/upload-artifact@v4

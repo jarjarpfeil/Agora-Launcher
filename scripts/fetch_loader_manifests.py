@@ -437,7 +437,7 @@ def _fetch_bytes(url: str) -> bytes:
     headers = {
         "User-Agent": (
             "AgoraLoaderManifestBot/1.0 "
-            "(https://github.com/agora-mc/agora-mc)"
+            "(repository configured by AGORA_REGISTRY_REPO)"
         ),
     }
     req = urllib.request.Request(url, headers=headers)

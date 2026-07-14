@@ -1,5 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { List, LayoutGrid } from 'lucide-react';
+import { Leaf, List, LayoutGrid } from 'lucide-react';
 import {
   browseSearch,
   browseLoadMore,
@@ -23,6 +23,7 @@ import {
 } from '../lib/tauri';
 import { useRegistryState } from '../lib/useRegistryState';
 import { RegistryStatusView } from '../components/registry-status-view';
+import { agoraRepositoryUrl } from '../lib/brandConfig';
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -601,7 +602,7 @@ function BrowseContent({
 
       <section className="rounded-xl border border-border bg-card p-4">
         <div className="flex items-start gap-3">
-          <span aria-hidden className="text-xl mt-0.5">🌱</span>
+          <Leaf aria-hidden className="mt-0.5 h-5 w-5 text-sea-blue" />
           <div className="flex-1">
             <p className="text-sm font-semibold text-foreground">
               Help grow the community registry
@@ -612,14 +613,16 @@ function BrowseContent({
               alternative hosting options like GitHub Releases rather than
               centralized platforms. Every contribution counts.
             </p>
-            <a
-              href="https://github.com/jarjarpfeil/Agora-Minecraft-Mod-Loader"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 inline-block text-xs font-medium text-primary hover:underline"
-            >
-              Contribute on GitHub ↗
-            </a>
+            {agoraRepositoryUrl && (
+              <a
+                href={agoraRepositoryUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="mt-2 inline-block text-xs font-medium text-primary hover:underline"
+              >
+                Contribute on GitHub ↗
+              </a>
+            )}
           </div>
         </div>
       </section>

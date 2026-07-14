@@ -17,19 +17,21 @@ import { CrashInvestigator } from './components/CrashInvestigator';
 import { ToastContainer } from './components/Toast';
 import { useDestination, type Destination, type Tab } from './lib/useDestination';
 import { useProcessController } from './lib/useProcessController';
+import { BrandMark } from './components/BrandMark';
+import { Bot, Boxes, Compass, HomeIcon, Landmark, SettingsIcon } from 'lucide-react';
 
-const BASE_TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: 'home', label: 'Home', icon: '\u{1F3E0}' },
-  { id: 'browse', label: 'Browse', icon: '\u{1F50D}' },
-  { id: 'instances', label: 'My Instances', icon: '\u{1F4E6}' },
-  { id: 'governance', label: 'Community Governance', icon: '\u{1F5F3}\u{FE0F}' },
-  { id: 'settings', label: 'Settings', icon: '\u{2699}\u{FE0F}' },
+const BASE_TABS = [
+  { id: 'home' as Tab, label: 'Home', icon: HomeIcon },
+  { id: 'browse' as Tab, label: 'Browse', icon: Compass },
+  { id: 'instances' as Tab, label: 'My Instances', icon: Boxes },
+  { id: 'governance' as Tab, label: 'Community Governance', icon: Landmark },
+  { id: 'settings' as Tab, label: 'Settings', icon: SettingsIcon },
 ];
 
-const AI_TAB: { id: Tab; label: string; icon: string } = {
-  id: 'ai',
+const AI_TAB = {
+  id: 'ai' as Tab,
   label: 'AI Assistant',
-  icon: '\u{1F916}',
+  icon: Bot,
 };
 
 /**
@@ -54,8 +56,8 @@ function BrandedSplash() {
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-background">
       <div className="text-center">
-        <h1 className="text-3xl font-bold text-foreground">Agora</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Loading…</p>
+        <BrandMark className="justify-center" />
+        <p className="mt-4 text-sm text-muted-foreground">Preparing your library…</p>
         <div className="mt-4 flex justify-center">
           <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
         </div>

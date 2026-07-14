@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// The GitHub repository hosting registry release assets (`owner/repo`).
 const REGISTRY_REPO: &str = match option_env!("AGORA_REGISTRY_REPO") {
     Some(v) => v,
-    None => "jarjarpfeil/Agora-Minecraft-Mod-Loader",
+    None => "",
 };
 
 /// Ed25519 public key (hex) for verifying registry.db signatures.
@@ -69,6 +69,12 @@ pub async fn check_and_download_update(
     force: bool,
     github_token: Option<String>,
 ) -> LauncherResult<RegistryStatus> {
+    if REGISTRY_REPO.is_empty() {
+        return Err(LauncherError::Generic {
+            code: "ERR_REGISTRY_REPO_NOT_CONFIGURED".into(),
+            message: "Registry repository is not configured in this build. Set AGORA_REGISTRY_REPO to owner/repository when building Agora Launcher.".into(),
+        });
+    }
     let conn =
         db::local_state_connection(local_state_path).map_err(|e| LauncherError::Generic {
             code: "ERR_DB".into(),

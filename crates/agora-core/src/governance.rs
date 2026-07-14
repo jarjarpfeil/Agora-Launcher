@@ -13,10 +13,10 @@ use serde::Serialize;
 
 /// The governance repo (where mod review issues, triage discussions, and
 /// reactions live) IS the registry repo itself. Configurable at build time
-/// via AGORA_REGISTRY_REPO; defaults to the real repo.
+/// via AGORA_REGISTRY_REPO. An empty value disables repository-backed actions.
 pub const AGORA_GOVERNANCE_REPO: &str = match option_env!("AGORA_REGISTRY_REPO") {
     Some(v) => v,
-    None => "jarjarpfeil/Agora-Minecraft-Mod-Loader",
+    None => "",
 };
 
 /// Admin-alerts repo is where curator flag issues are filed. Configurable at
