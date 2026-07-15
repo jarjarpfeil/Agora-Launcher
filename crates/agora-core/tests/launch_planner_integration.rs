@@ -1381,8 +1381,9 @@ fn prepare_offline_fixtures(
     let version_sha1 = sha1_hex(&version_json_bytes);
 
     let meta_dir = cache_dir.join("metadata");
-    let versions_dir = meta_dir.join("versions");
+    let versions_dir = cache_dir.join("versions").join("1.21");
     std::fs::create_dir_all(&versions_dir).unwrap();
+    std::fs::create_dir_all(&meta_dir).unwrap();
     std::fs::write(versions_dir.join("1.21.json"), &version_json_bytes).unwrap();
 
     // -- Version manifest (fresh) --------------------------------------------
@@ -1475,8 +1476,9 @@ fn write_manifest_cache(
     let v_sha1 = sha1_hex(version_json);
 
     let meta_dir = cache_dir.join("metadata");
-    let versions_dir = meta_dir.join("versions");
+    let versions_dir = cache_dir.join("versions").join("1.21");
     std::fs::create_dir_all(&versions_dir).unwrap();
+    std::fs::create_dir_all(&meta_dir).unwrap();
     std::fs::write(versions_dir.join("1.21.json"), version_json).unwrap();
 
     let manifest = launch::MojangVersionManifest {
@@ -1667,11 +1669,12 @@ async fn materialize_denied_when_client_jar_cache_miss_and_content_disabled() {
 }
 
 // ---------------------------------------------------------------------------
-// Goal: Stale manifest - use valid stale cache when online metadata disabled
+// Goal: Valid version cache wins even when the manifest is stale and network
+// metadata is disabled.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn stale_manifest_succeeds_offline_when_metadata_disabled() {
+async fn cached_version_succeeds_offline_when_manifest_stale() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cache_dir = tmp.path().join("cache");
     std::fs::create_dir_all(&cache_dir).unwrap();
@@ -1680,21 +1683,21 @@ async fn stale_manifest_succeeds_offline_when_metadata_disabled() {
     write_manifest_cache(&cache_dir, Some(past));
 
     let request = disabled_resolve_request(&tmp);
-    // write_manifest_cache writes to the same cache_dir, so the manifest
-    // and version JSON are present but the manifest is stale.
+    // The version JSON is authoritative for this cache hit; no manifest
+    // refresh or network access is needed.
     let resolved = launch_planner::resolve(request)
         .await
-        .expect("resolve should fall back to stale manifest when metadata is disabled");
+        .expect("resolve should use cached version metadata offline");
     assert_eq!(resolved.base_version_id, "1.21");
 }
 
 // ---------------------------------------------------------------------------
-// Goal: Stale manifest - use valid stale cache when refresh fails with
-//       transport error (unreachable client)
+// Goal: A valid version cache avoids a manifest refresh even when transport
+// would otherwise be unavailable.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn stale_manifest_falls_back_on_transport_error() {
+async fn cached_version_avoids_manifest_refresh_transport() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cache_dir = tmp.path().join("cache");
     std::fs::create_dir_all(&cache_dir).unwrap();

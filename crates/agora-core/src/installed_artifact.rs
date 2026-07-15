@@ -242,7 +242,7 @@ fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, ProfileIssue> {
 // Hash utilities
 // ---------------------------------------------------------------------------
 
-fn sha1_hex(data: &[u8]) -> String {
+pub fn sha1_hex(data: &[u8]) -> String {
     let mut hasher = Sha1::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
@@ -728,21 +728,21 @@ fn sync_virtual_asset(
     Ok(())
 }
 
-// Reference to AssetIndexDoc for sync_virtual_asset
+// Reference to AssetIndexDoc for sync_virtual_asset and adopted materialization.
 #[derive(serde::Deserialize)]
-struct AssetIndexDoc {
-    objects: BTreeMap<String, AssetObj>,
+pub(crate) struct AssetIndexDoc {
+    pub(crate) objects: BTreeMap<String, AssetObj>,
     #[serde(default)]
-    virtual_: bool,
+    pub(crate) virtual_: bool,
     #[serde(default, rename = "map_to_resources")]
-    map_to_resources: bool,
+    pub(crate) map_to_resources: bool,
 }
 
-// Reference to AssetObj for sync_virtual_asset
+// Reference to AssetObj for sync_virtual_asset and adopted materialization.
 #[derive(serde::Deserialize)]
-struct AssetObj {
-    hash: String,
-    size: i64,
+pub(crate) struct AssetObj {
+    pub(crate) hash: String,
+    pub(crate) size: i64,
 }
 
 /// Try to adopt a logging configuration file from the installed source.

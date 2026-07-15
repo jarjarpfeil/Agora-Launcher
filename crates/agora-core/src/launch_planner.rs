@@ -32,7 +32,7 @@
 use crate::download;
 use crate::error::{LauncherError, LauncherResult};
 use crate::java::{self, JavaInstallation};
-use crate::launch::{self, LoaderInfo, MojangVersionManifest, VersionInfo};
+use crate::launch::{self, LoaderInfo, VersionInfo};
 use crate::loader_manifests;
 use crate::network::{self, NetworkCategory, NetworkPolicy};
 use sha1::{Digest, Sha1};
@@ -76,7 +76,7 @@ pub(super) struct LaunchHttpClients {
 }
 
 impl LaunchHttpClients {
-    fn new() -> LauncherResult<Self> {
+    pub(crate) fn new() -> LauncherResult<Self> {
         Ok(Self {
             mojang_metadata: Self::build_client(NetworkCategory::MojangMetadata)?,
             mojang_content: Self::build_client(NetworkCategory::MojangContent)?,
@@ -106,7 +106,7 @@ impl LaunchHttpClients {
             })
     }
 
-    fn for_category(&self, category: NetworkCategory) -> &reqwest::Client {
+    pub(crate) fn for_category(&self, category: NetworkCategory) -> &reqwest::Client {
         match category {
             NetworkCategory::MojangMetadata => &self.mojang_metadata,
             NetworkCategory::MojangContent => &self.mojang_content,
@@ -381,10 +381,11 @@ struct AssetObject {
 /// a denied cache miss returns the category-specific error immediately
 /// without opening any socket.
 pub async fn resolve(request: ResolveRequest) -> LauncherResult<ResolvedLaunchPlan> {
-    // Stage 2: Forge/NeoForge resolve via adopted profile BEFORE Mojang manifest.
-    // This avoids any Mojang network fetch for the forge/neoforge path.
+    // All non-vanilla loaders resolve via installed-profile adoption.
+    // Vanilla alone uses the Mojang metadata network path.
     if let Some(ref loader) = request.loader {
-        if matches!(loader.loader_type.as_str(), "forge" | "neoforge") {
+        let lt = loader.loader_type.as_str();
+        if matches!(lt, "forge" | "neoforge" | "fabric" | "quilt") {
             let (minecraft_dir, receipts_root) = match (
                 &request.minecraft_dir,
                 &request.receipts_root,
@@ -394,13 +395,13 @@ pub async fn resolve(request: ResolveRequest) -> LauncherResult<ResolvedLaunchPl
                     return Err(LauncherError::ProfileMissing(
                         crate::installed_profile::ProfileIssue::missing(
                             None,
-                            "Forge/NeoForge resolve requires minecraft_dir and receipts_root for profile adoption",
+                            format!("{loader_type} resolve requires minecraft_dir and receipts_root for profile adoption",
+                                loader_type = loader.loader_type),
                         ),
                     ));
                 }
             };
 
-            // Find curated manifest entry (exact tuple, no direct-launch flag)
             let entry = loader_manifests::find_entry(
                 &loader.loader_type,
                 &request.base_version_id,
@@ -431,7 +432,6 @@ pub async fn resolve(request: ResolveRequest) -> LauncherResult<ResolvedLaunchPl
                 err
             })?;
 
-            // Java selection, version id
             let version = &adopted.merged_version;
             let required_major = version
                 .java_version
@@ -468,68 +468,15 @@ pub async fn resolve(request: ResolveRequest) -> LauncherResult<ResolvedLaunchPl
         }
     }
 
-    // Vanilla / Fabric / Quilt path: fetch Mojang manifest as before.
-    let clients = LaunchHttpClients::new()?;
-    let policy = &request.network_policy;
-    let metadata_dir = request.cache_dir.join("metadata");
-    let manifest_path = metadata_dir.join("version_manifest_v2.json");
-    let manifest: MojangVersionManifest = load_json_cache_first(
-        clients.for_category(NetworkCategory::MojangMetadata),
-        VERSION_MANIFEST_URL,
-        &manifest_path,
-        None,
-        policy,
-        NetworkCategory::MojangMetadata,
+    // Vanilla / no-loader path uses the same base metadata bootstrap as
+    // instance creation and loader installation. This keeps one authoritative
+    // cache at `<minecraft-runtime>/versions/<id>/<id>.json`.
+    let version = crate::minecraft_metadata::ensure_base_version_metadata(
+        &request.cache_dir,
+        &request.base_version_id,
+        &request.network_policy,
     )
     .await?;
-
-    let version_ref = manifest
-        .versions
-        .iter()
-        .find(|version| version.id == request.base_version_id)
-        .ok_or(LauncherError::GameVersionNotFound)?;
-    let base_path = metadata_dir
-        .join("versions")
-        .join(format!("{}.json", request.base_version_id));
-    let base: VersionInfo = load_json_cache_first(
-        clients.for_category(NetworkCategory::MojangMetadata),
-        &version_ref.url,
-        &base_path,
-        version_ref.sha1.as_deref(),
-        policy,
-        NetworkCategory::MojangMetadata,
-    )
-    .await?;
-
-    let (version, adopted_profile) = match request.loader.as_ref() {
-        None => (base, None),
-        Some(loader) if loader.loader_type == "vanilla" || loader.loader_type.is_empty() => {
-            (base, None)
-        }
-        Some(loader) if matches!(loader.loader_type.as_str(), "fabric" | "quilt") => {
-            let v = resolve_json_loader(
-                clients.for_category(NetworkCategory::LoaderMetadataAndContent),
-                loader,
-                &request.base_version_id,
-                &metadata_dir,
-                &base,
-                policy,
-            )
-            .await?;
-            (v, None)
-        }
-        // forge/neoforge is handled above; this arm is a safety net for any
-        // loader_type value that slipped past the early-return check.
-        Some(loader) if matches!(loader.loader_type.as_str(), "forge" | "neoforge") => {
-            return Err(LauncherError::Generic {
-                code: "ERR_LOADER_NO_ADOPTION_PATH".into(),
-                message: "Forge/NeoForge must be resolved via the adoption path but reached the \
-                          Mojang manifest branch"
-                    .into(),
-            });
-        }
-        Some(_) => return Err(LauncherError::UnsupportedLoader),
-    };
 
     let required_major = version
         .java_version
@@ -561,7 +508,7 @@ pub async fn resolve(request: ResolveRequest) -> LauncherResult<ResolvedLaunchPl
         assets_dir: request.assets_dir,
         cache_dir: request.cache_dir,
         network_policy: request.network_policy,
-        adopted_profile,
+        adopted_profile: None,
     })
 }
 
@@ -593,11 +540,13 @@ pub async fn materialize(
             resolved,
             adopted_profile,
             network_policy,
+            &clients,
             &libraries_dir,
             &versions_dir,
             &logging_dir,
             &natives_dir,
-        );
+        )
+        .await;
     }
 
     let policy = &network_policy;
@@ -792,19 +741,33 @@ pub async fn materialize(
 /// Every artifact is cache-first, then installed-source, then (for non-adopted
 /// paths) network. For adopted profiles, missing installed source for a
 /// required artifact returns an error rather than silently downloading.
-fn materialize_adopted_profile(
+async fn materialize_adopted_profile(
     resolved: ResolvedLaunchPlan,
     adopted_profile: crate::installed_profile::AdoptedProfile,
     policy: NetworkPolicy,
+    clients: &LaunchHttpClients,
     libraries_dir: &Path,
     versions_dir: &Path,
     logging_dir: &Path,
     natives_dir: &Path,
 ) -> LauncherResult<MaterializedLaunchPlan> {
-    // Build the installed artifact source from the minecraft_dir stored during adoption.
     let source = crate::installed_artifact::InstalledArtifactSource::new(
         adopted_profile.minecraft_dir.clone(),
     );
+
+    // Generated paths: adoption-only from receipt, no network fallback.
+    let generated_paths: std::collections::HashSet<String> = adopted_profile
+        .receipt
+        .as_ref()
+        .map(|r| r.generated_artifact_sha256.keys().cloned().collect())
+        .unwrap_or_default();
+
+    // Curated pins: downloadable with exact SHA-256 from the pinned loader manifest.
+    let curated_pins: std::collections::BTreeMap<String, String> = adopted_profile
+        .receipt
+        .as_ref()
+        .map(|r| r.curated_artifact_sha256.clone())
+        .unwrap_or_default();
 
     // Client JAR
     let client_download = resolved
@@ -823,7 +786,6 @@ fn materialize_adopted_profile(
         .join(&resolved.base_version_id)
         .join(format!("{}.jar", resolved.base_version_id));
 
-    // Try cache first, then installed source
     let client_sha1 = client_download.sha1.as_deref();
     let client_size = client_download.size;
 
@@ -841,19 +803,19 @@ fn materialize_adopted_profile(
 
     match client_result {
         crate::installed_artifact::ArtifactAdoptResult::CacheHit
-        | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {
-            // Successfully adopted from cache or installed source
-        }
+        | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
         crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
-            return Err(LauncherError::Generic {
-                code: "ERR_ADOPTED_CLIENT_JAR_MISSING".into(),
-                message: format!(
-                    "Client JAR for {} is not available in cache or installed source at {}. \
-                     Use the Mojang launcher to download the game files first.",
-                    resolved.base_version_id,
-                    source.client_jar(&resolved.base_version_id).display()
-                ),
-            });
+            // Network fallback for the client JAR.
+            download_sha1_atomic(
+                clients.for_category(NetworkCategory::MojangContent),
+                &client_download.url,
+                &client_path,
+                client_sha1,
+                client_size,
+                &policy,
+                NetworkCategory::MojangContent,
+            )
+            .await?;
         }
     }
 
@@ -867,21 +829,6 @@ fn materialize_adopted_profile(
     let mut classpath = Vec::new();
     let mut native_archives = Vec::new();
 
-    // Build a set of promoted library paths from the receipt's generated_artifact_sha256
-    // for fast lookup during library iteration
-    let generated_paths: std::collections::HashSet<String> = adopted_profile
-        .receipt
-        .as_ref()
-        .map(|r| {
-            r.generated_artifact_sha256
-                .keys()
-                .chain(r.curated_artifact_sha256.keys())
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Reference to the installed source for library adoption
     let src = &source;
 
     for library in resolved
@@ -895,92 +842,111 @@ fn materialize_adopted_profile(
             let lib_category =
                 network::classify_url(&artifact.url).unwrap_or(NetworkCategory::MojangContent);
 
-            // Check if this is a "promoted" (generated) library path
-            let is_generated = generated_paths.contains(&artifact.path);
-
-            if is_generated {
-                // Trusted generated artifact: use receipt hash verification
-                if let Some(ref receipt) = adopted_profile.receipt {
-                    let result = crate::installed_artifact::adopt_trusted_unhashed_library(
-                        src,
-                        &path,
-                        &artifact.path,
-                        receipt,
-                    )
-                    .map_err(|issue| {
-                        let err: LauncherError = issue.into();
-                        err
-                    })?;
-
-                    match result {
-                        crate::installed_artifact::ArtifactAdoptResult::CacheHit => {}
-                        crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
-                        crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
-                            return Err(LauncherError::Generic {
-                                code: "ERR_ADOPTED_GENERATED_LIB_MISSING".into(),
-                                message: format!(
-                                    "Generated library '{}' not available in installed source",
-                                    artifact.path
-                                ),
-                            });
-                        }
-                    }
-                } else {
-                    // No receipt — should not happen for adopted profiles
-                    return Err(LauncherError::ProfileMissing(
-                        crate::installed_profile::ProfileIssue::missing(
-                            None,
-                            format!(
-                                "No receipt available for generated library '{}'",
+            if generated_paths.contains(&artifact.path) {
+                // Generated artifact: adoption-only via receipt SHA-256.
+                let receipt = adopted_profile.receipt.as_ref().ok_or_else(|| {
+                    LauncherError::ProfileMissing(crate::installed_profile::ProfileIssue::missing(
+                        None,
+                        format!(
+                            "No receipt available for generated library '{}'",
+                            artifact.path
+                        ),
+                    ))
+                })?;
+                let result = crate::installed_artifact::adopt_trusted_unhashed_library(
+                    src,
+                    &path,
+                    &artifact.path,
+                    receipt,
+                )
+                .map_err(|issue| {
+                    let err: LauncherError = issue.into();
+                    err
+                })?;
+                match result {
+                    crate::installed_artifact::ArtifactAdoptResult::CacheHit
+                    | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
+                    crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
+                        return Err(LauncherError::Generic {
+                            code: "ERR_ADOPTED_GENERATED_LIB_MISSING".into(),
+                            message: format!(
+                                "Generated library '{}' not available in installed source",
                                 artifact.path
                             ),
-                        ),
-                    ));
+                        });
+                    }
                 }
-            } else {
-                // Normal (non-generated) library: try installed source first
+            } else if let Some(pin) = curated_pins.get(&artifact.path) {
+                // Curated pinned library: try installed source first, then network with SHA-256.
                 let result = crate::installed_artifact::adopt_library_artifact(
                     src,
                     &path,
                     &artifact.path,
                     artifact.sha1.as_deref(),
-                    None, // No SHA-256 at this level
+                    Some(pin),
                     artifact.size,
                 )
                 .map_err(|issue| {
                     let err: LauncherError = issue.into();
                     err
                 })?;
-
                 match result {
                     crate::installed_artifact::ArtifactAdoptResult::CacheHit
-                    | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {
-                        // Successfully adopted from cache or installed source
-                    }
+                    | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
                     crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
-                        // Fall back to network for normal libraries (unlike generated ones)
-                        if lib_category == NetworkCategory::LoaderMetadataAndContent {
-                            // For loader libs without installed source, we can't easily
-                            // download without a pin. Since we're in adopted profile mode
-                            // and the user should have the files installed, error out.
-                            return Err(LauncherError::Generic {
-                                code: "ERR_ADOPTED_LIBRARY_MISSING".into(),
-                                message: format!(
-                                    "Loader library '{}' not available in cache or installed source. \
-                                     Use the Mojang launcher to install this version first.",
-                                    artifact.path
-                                ),
-                            });
+                        // Network download with SHA-256 pin verification.
+                        policy.check(NetworkCategory::LoaderMetadataAndContent)?;
+                        let bytes = download_verified_inner(
+                            clients.for_category(NetworkCategory::LoaderMetadataAndContent),
+                            &artifact.url,
+                            NetworkCategory::LoaderMetadataAndContent,
+                        )
+                        .await?;
+                        let actual = download::sha256_hex(&bytes);
+                        if actual != *pin {
+                            return Err(LauncherError::HashMismatch);
                         }
-                        // For Mojang libraries, error too (they should be in the installed source)
-                        return Err(LauncherError::Generic {
-                            code: "ERR_ADOPTED_LIBRARY_MISSING".into(),
-                            message: format!(
-                                "Minecraft library '{}' not available in cache or installed source. \
-                                 Use the Mojang launcher to install this version first.",
-                                artifact.path
-                            ),
-                        });
+                        atomic_write(&path, &bytes)?;
+                    }
+                }
+            } else {
+                // Ordinary artifact: cache -> installed source -> network.
+                let result = crate::installed_artifact::adopt_library_artifact(
+                    src,
+                    &path,
+                    &artifact.path,
+                    artifact.sha1.as_deref(),
+                    None,
+                    artifact.size,
+                )
+                .map_err(|issue| {
+                    let err: LauncherError = issue.into();
+                    err
+                })?;
+                match result {
+                    crate::installed_artifact::ArtifactAdoptResult::CacheHit
+                    | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
+                    crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
+                        if lib_category == NetworkCategory::LoaderMetadataAndContent {
+                            download_library_with_pin(
+                                clients.for_category(NetworkCategory::LoaderMetadataAndContent),
+                                &artifact,
+                                &path,
+                                &policy,
+                            )
+                            .await?;
+                        } else {
+                            download_sha1_atomic(
+                                clients.for_category(lib_category),
+                                &artifact.url,
+                                &path,
+                                artifact.sha1.as_deref(),
+                                artifact.size,
+                                &policy,
+                                lib_category,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
@@ -1002,7 +968,6 @@ fn materialize_adopted_profile(
 
         if let Some(artifact) = resolve_native_artifact(library)? {
             let path = libraries_dir.join(&artifact.path);
-            // Try installed source first for natives
             let result = crate::installed_artifact::adopt_library_artifact(
                 src,
                 &path,
@@ -1015,26 +980,38 @@ fn materialize_adopted_profile(
                 let err: LauncherError = issue.into();
                 err
             })?;
-
             match result {
                 crate::installed_artifact::ArtifactAdoptResult::CacheHit
                 | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
                 crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
-                    return Err(LauncherError::Generic {
-                        code: "ERR_ADOPTED_NATIVE_MISSING".into(),
-                        message: format!(
-                            "Native library '{}' not available in cache or installed source.",
-                            artifact.path
-                        ),
-                    });
+                    let lib_category = network::classify_url(&artifact.url)
+                        .unwrap_or(NetworkCategory::MojangContent);
+                    if lib_category == NetworkCategory::LoaderMetadataAndContent {
+                        download_library_with_pin(
+                            clients.for_category(NetworkCategory::LoaderMetadataAndContent),
+                            &artifact,
+                            &path,
+                            &policy,
+                        )
+                        .await?;
+                    } else {
+                        download_sha1_atomic(
+                            clients.for_category(lib_category),
+                            &artifact.url,
+                            &path,
+                            artifact.sha1.as_deref(),
+                            artifact.size,
+                            &policy,
+                            lib_category,
+                        )
+                        .await?;
+                    }
                 }
             }
-
             native_archives.push((path, library.extract.clone()));
         }
     }
 
-    // Minecraft expects client.jar after libraries on the classpath.
     classpath.push(client_jar.clone());
     extract_natives_atomically(&native_archives, natives_dir)?;
 
@@ -1072,25 +1049,98 @@ fn materialize_adopted_profile(
         crate::installed_artifact::ArtifactAdoptResult::CacheHit
         | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => {}
         crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
-            return Err(LauncherError::Generic {
-                code: "ERR_ADOPTED_ASSET_INDEX_MISSING".into(),
-                message: format!(
-                    "Asset index '{}' not available in cache or installed source.",
-                    asset_index.id
-                ),
-            });
+            download_sha1_atomic(
+                clients.for_category(NetworkCategory::MojangMetadata),
+                &asset_index.url,
+                &asset_index_path,
+                asset_index.sha1.as_deref(),
+                asset_index.size,
+                &policy,
+                NetworkCategory::MojangMetadata,
+            )
+            .await?;
         }
     }
 
-    // Asset objects (using installed source, no network)
-    crate::installed_artifact::adopt_asset_objects(
-        src,
-        &resolved.assets_dir,
-        &asset_index_path,
-        &policy,
-    )?;
+    // Asset objects: cache -> installed source -> network for each hash.
+    {
+        let index_bytes = std::fs::read(&asset_index_path).map_err(|e| LauncherError::Generic {
+            code: "ERR_ASSET_INDEX_READ".into(),
+            message: format!("Failed to read {}: {e}", asset_index_path.display()),
+        })?;
+        let index: crate::installed_artifact::AssetIndexDoc = serde_json::from_slice(&index_bytes)
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_ASSET_INDEX_PARSE".into(),
+                message: format!("Failed to parse {}: {e}", asset_index_path.display()),
+            })?;
+        for (logical_name, object) in &index.objects {
+            if object.hash.len() < 2
+                || !object.hash.bytes().all(|b| b.is_ascii_hexdigit())
+                || object.size < 0
+            {
+                return Err(LauncherError::Generic {
+                    code: "ERR_ASSET_OBJECT_INVALID".into(),
+                    message: format!("Asset index contains invalid object {logical_name}."),
+                });
+            }
 
-    // Logging config
+            let object_path = resolved
+                .assets_dir
+                .join("objects")
+                .join(&object.hash[..2])
+                .join(&object.hash);
+
+            // Cache hit check
+            if object_path.is_file() {
+                if let Ok(data) = std::fs::read(&object_path) {
+                    if crate::installed_artifact::sha1_hex(&data) == object.hash
+                        && data.len() as i64 == object.size
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            // Installed source
+            let installed_path = src.asset_object(&object.hash);
+            if installed_path.is_file() {
+                use crate::installed_artifact::{is_regular_file, verify_sha1, verify_size};
+                if is_regular_file(&installed_path).is_ok()
+                    && verify_sha1(&installed_path, &object.hash).is_ok()
+                    && verify_size(&installed_path, object.size).is_ok()
+                {
+                    crate::installed_artifact::hardlink_or_copy(&installed_path, &object_path)
+                        .map_err(|e| LauncherError::Generic {
+                            code: "ERR_ASSET_MATERIALIZE".into(),
+                            message: format!(
+                                "Failed to materialize asset {}: {e}",
+                                object_path.display()
+                            ),
+                        })?;
+                    continue;
+                }
+            }
+
+            // Network fallback
+            let url = format!(
+                "https://resources.download.minecraft.net/{}/{}",
+                &object.hash[..2],
+                object.hash
+            );
+            download_sha1_atomic(
+                clients.for_category(NetworkCategory::MojangContent),
+                &url,
+                &object_path,
+                Some(&object.hash),
+                Some(object.size),
+                &policy,
+                NetworkCategory::MojangContent,
+            )
+            .await?;
+        }
+    }
+
+    // Logging config: cache -> installed source -> network fallback.
     let logging_config_path = if let Some(logging) = resolved
         .version
         .logging
@@ -1115,8 +1165,18 @@ fn materialize_adopted_profile(
             crate::installed_artifact::ArtifactAdoptResult::CacheHit
             | crate::installed_artifact::ArtifactAdoptResult::Materialized { .. } => Some(path),
             crate::installed_artifact::ArtifactAdoptResult::SourceMissing => {
-                // Logging config is optional — skip if not available
-                None
+                // Network fallback
+                download_sha1_atomic(
+                    clients.for_category(NetworkCategory::MojangContent),
+                    &logging.url,
+                    &path,
+                    logging.sha1.as_deref(),
+                    logging.size,
+                    &policy,
+                    NetworkCategory::MojangContent,
+                )
+                .await?;
+                Some(path)
             }
         }
     } else {
@@ -2346,105 +2406,6 @@ fn rule_matches(rule: &launch::LibraryRule, features: &BTreeMap<String, bool>) -
             .iter()
             .all(|(name, expected)| features.get(name).copied().unwrap_or(false) == *expected)
     })
-}
-
-async fn resolve_json_loader(
-    loader_client: &reqwest::Client,
-    loader: &LoaderInfo,
-    base_version_id: &str,
-    metadata_dir: &Path,
-    base: &VersionInfo,
-    policy: &NetworkPolicy,
-) -> LauncherResult<VersionInfo> {
-    let entry = loader_manifests::find_entry(&loader.loader_type, base_version_id, &loader.version)
-        .ok_or(LauncherError::LoaderProfileNotFound)?;
-    if entry.file_type != "profile_json" {
-        return Err(LauncherError::LoaderProfileNotFound);
-    }
-
-    let profile_path = metadata_dir
-        .join("loaders")
-        .join(&loader.loader_type)
-        .join(base_version_id)
-        .join(&entry.file_name);
-    let bytes = load_loader_profile_cache_first(
-        loader_client,
-        &loader.loader_type,
-        entry,
-        &profile_path,
-        policy,
-    )
-    .await?;
-    let partial: VersionInfo =
-        serde_json::from_slice(&bytes).map_err(|error| LauncherError::Generic {
-            code: "ERR_LOADER_PROFILE_PARSE".into(),
-            message: format!("Failed to parse pinned loader profile: {error}"),
-        })?;
-    Ok(launch::merge_forge_version(&partial, base))
-}
-
-async fn load_loader_profile_cache_first(
-    loader_client: &reqwest::Client,
-    loader_type: &str,
-    entry: &loader_manifests::LoaderEntry,
-    cache_path: &Path,
-    policy: &NetworkPolicy,
-) -> LauncherResult<Vec<u8>> {
-    if let Ok(bytes) = std::fs::read(cache_path) {
-        let actual =
-            download::compute_loader_hash(loader_type, &entry.file_name, &entry.file_type, &bytes);
-        if actual == loader_manifests::strip_sha_prefix(&entry.sha256) {
-            return Ok(bytes);
-        }
-    }
-
-    // Cache miss: check loader policy before opening a socket.
-    policy.check(NetworkCategory::LoaderMetadataAndContent)?;
-    let bytes = download_loader_verified(loader_client, loader_type, entry).await?;
-    atomic_write(cache_path, &bytes)?;
-    Ok(bytes)
-}
-
-/// Planner-specific verified loader-profile download using the redirect-safe
-/// [`LaunchHttpClients`] loader client. Preserves stable-JSON SHA-256
-/// verification and cache behavior.
-async fn download_loader_verified(
-    client: &reqwest::Client,
-    loader: &str,
-    entry: &loader_manifests::LoaderEntry,
-) -> LauncherResult<Vec<u8>> {
-    loader_manifests::ensure_allowed_domain(&entry.source_url)?;
-    let response = client
-        .get(&entry.source_url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
-    // Defense-in-depth: post-response final URL check.
-    let final_url = response.url().as_str();
-    let parsed = reqwest::Url::parse(final_url).map_err(|_| LauncherError::UntrustedSource)?;
-    if !redirect_target_is_safe(&parsed, NetworkCategory::LoaderMetadataAndContent) {
-        return Err(LauncherError::UntrustedSource);
-    }
-    if !response.status().is_success() {
-        return Err(LauncherError::Generic {
-            code: "ERR_DOWNLOAD_HTTP".into(),
-            message: format!(
-                "Download {} returned HTTP {}",
-                entry.source_url,
-                response.status()
-            ),
-        });
-    }
-    let data = response
-        .bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|_| LauncherError::NetworkOffline)?;
-    let actual = download::compute_loader_hash(loader, &entry.file_name, &entry.file_type, &data);
-    if actual != loader_manifests::strip_sha_prefix(&entry.sha256) {
-        return Err(LauncherError::HashMismatch);
-    }
-    Ok(data)
 }
 
 /// Check whether a cached metadata file is fresh enough to use without network.
@@ -4073,6 +4034,263 @@ mod tests {
         assert!(
             matches!(&err, LauncherError::ProfileMissing(_)),
             "expected ProfileMissing, got {err:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fabric resolve via installed-profile adoption
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn adopt_fabric_1_20_1_0_19_0_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (minecraft_dir, receipts_root) = make_adopt_fixture(&tmp);
+        let mc_version = "1.20.1";
+        let loader_version = "0.19.0";
+        let profile_id = format!("fabric-loader-{loader_version}-{mc_version}");
+        let profile_path = minecraft_dir
+            .join("versions")
+            .join(&profile_id)
+            .join(format!("{profile_id}.json"));
+        let base_path = minecraft_dir
+            .join("versions")
+            .join(mc_version)
+            .join(format!("{mc_version}.json"));
+        let profile = serde_json::json!({
+            "id": profile_id,
+            "inheritsFrom": mc_version,
+            "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+            "type": "release",
+            "libraries": [
+                {
+                    "name": "net.fabricmc:fabric-loader:0.19.0",
+                    "downloads": {
+                        "artifact": {
+                            "path": "net/fabricmc/fabric-loader/0.19.0/fabric-loader-0.19.0.jar",
+                            "url": "https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.0/fabric-loader-0.19.0.jar",
+                            "sha1": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        }
+                    }
+                }
+            ],
+            "arguments": { "jvm": [], "game": [] }
+        });
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+        write_base_version_json(&base_path, mc_version);
+
+        let entry = loader_manifests::find_entry("fabric", mc_version, loader_version)
+            .expect("fabric 1.20.1/0.19.0 must be in manifest");
+
+        let tuple = crate::installed_profile::LoaderTuple {
+            loader: "fabric".into(),
+            minecraft_version: mc_version.into(),
+            loader_version: loader_version.into(),
+        };
+        write_forge_receipt(&receipts_root, &minecraft_dir, &tuple, &entry.sha256);
+
+        let resolved = resolve(ResolveRequest {
+            instance_id: "adopt-fabric-test".into(),
+            base_version_id: mc_version.into(),
+            loader: Some(LoaderInfo {
+                loader_type: "fabric".into(),
+                version: loader_version.into(),
+                version_url: String::new(),
+            }),
+            game_dir: tmp.path().join("game"),
+            assets_dir: tmp.path().join("assets"),
+            cache_dir: tmp.path().join("cache"),
+            java_override: None,
+            java_candidates: make_java_candidate(),
+            network_policy: NetworkPolicy::all_disabled(),
+            allow_incompatible_java_override: false,
+            minecraft_dir: Some(minecraft_dir),
+            receipts_root: Some(receipts_root),
+        })
+        .await
+        .expect("Fabric adoption should succeed without network");
+
+        assert!(
+            resolved.adopted_profile.is_some(),
+            "adopted_profile must be Some for Fabric"
+        );
+        assert!(
+            resolved.adopted_profile.as_ref().unwrap().receipt.is_some(),
+            "Fabric adopted profile must have a receipt"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Quilt resolve via installed-profile adoption
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn adopt_quilt_1_20_loader_succeeds() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (minecraft_dir, receipts_root) = make_adopt_fixture(&tmp);
+        let mc_version = "1.20";
+        let loader_version = "0.30.0-beta.8";
+        let profile_id = format!("quilt-loader-{loader_version}-{mc_version}");
+        let profile_path = minecraft_dir
+            .join("versions")
+            .join(&profile_id)
+            .join(format!("{profile_id}.json"));
+        let base_path = minecraft_dir
+            .join("versions")
+            .join(mc_version)
+            .join(format!("{mc_version}.json"));
+        let profile = serde_json::json!({
+            "id": profile_id,
+            "inheritsFrom": mc_version,
+            "mainClass": "org.quiltmc.loader.impl.launch.knot.KnotClient",
+            "type": "release",
+            "libraries": [
+                {
+                    "name": "org.quiltmc:quilt-loader:0.30.0-beta.8",
+                    "downloads": {
+                        "artifact": {
+                            "path": "org/quiltmc/quilt-loader/0.30.0-beta.8/quilt-loader-0.30.0-beta.8.jar",
+                            "url": "https://maven.quiltmc.org/repository/release/org/quiltmc/quilt-loader/0.30.0-beta.8/quilt-loader-0.30.0-beta.8.jar",
+                            "sha1": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        }
+                    }
+                }
+            ],
+            "arguments": { "jvm": [], "game": [] }
+        });
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+        write_base_version_json(&base_path, mc_version);
+
+        let entry = loader_manifests::find_entry("quilt", mc_version, loader_version)
+            .expect("quilt 1.20/0.30.0-beta.8 must be in manifest");
+
+        let tuple = crate::installed_profile::LoaderTuple {
+            loader: "quilt".into(),
+            minecraft_version: mc_version.into(),
+            loader_version: loader_version.into(),
+        };
+        write_forge_receipt(&receipts_root, &minecraft_dir, &tuple, &entry.sha256);
+
+        let resolved = resolve(ResolveRequest {
+            instance_id: "adopt-quilt-test".into(),
+            base_version_id: mc_version.into(),
+            loader: Some(LoaderInfo {
+                loader_type: "quilt".into(),
+                version: loader_version.into(),
+                version_url: String::new(),
+            }),
+            game_dir: tmp.path().join("game"),
+            assets_dir: tmp.path().join("assets"),
+            cache_dir: tmp.path().join("cache"),
+            java_override: None,
+            java_candidates: make_java_candidate(),
+            network_policy: NetworkPolicy::all_disabled(),
+            allow_incompatible_java_override: false,
+            minecraft_dir: Some(minecraft_dir),
+            receipts_root: Some(receipts_root),
+        })
+        .await
+        .expect("Quilt adoption should succeed without network");
+
+        assert!(
+            resolved.adopted_profile.is_some(),
+            "adopted_profile must be Some for Quilt"
+        );
+        assert!(
+            resolved.adopted_profile.as_ref().unwrap().receipt.is_some(),
+            "Quilt adopted profile must have a receipt"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fabric adoption rejects missing minecraft_dir
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn adopt_fabric_no_minecraft_dir_returns_err() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let err = resolve(ResolveRequest {
+            instance_id: "fabric-no-adoption-path".into(),
+            base_version_id: "1.21".into(),
+            loader: Some(LoaderInfo {
+                loader_type: "fabric".into(),
+                version: "0.16.0".into(),
+                version_url: String::new(),
+            }),
+            game_dir: tmp.path().join("game"),
+            assets_dir: tmp.path().join("assets"),
+            cache_dir: tmp.path().join("cache"),
+            java_override: None,
+            java_candidates: make_java_candidate(),
+            network_policy: NetworkPolicy::all_disabled(),
+            allow_incompatible_java_override: false,
+            minecraft_dir: None,
+            receipts_root: None,
+        })
+        .await
+        .expect_err("Fabric without adoption paths should error");
+
+        assert!(
+            matches!(&err, LauncherError::ProfileMissing(_)),
+            "expected ProfileMissing, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn adopt_fabric_no_receipt_unsupported_returns_err() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (minecraft_dir, receipts_root) = make_adopt_fixture(&tmp);
+        let mc_version = "1.20.1";
+        let loader_version = "0.19.0";
+        let profile_id = format!("fabric-loader-{loader_version}-{mc_version}");
+        let profile_path = minecraft_dir
+            .join("versions")
+            .join(&profile_id)
+            .join(format!("{profile_id}.json"));
+        let base_path = minecraft_dir
+            .join("versions")
+            .join(mc_version)
+            .join(format!("{mc_version}.json"));
+        let profile = serde_json::json!({
+            "id": profile_id,
+            "inheritsFrom": mc_version,
+            "mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient",
+            "type": "release",
+            "libraries": [],
+            "arguments": { "jvm": [], "game": [] }
+        });
+        std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+        std::fs::write(&profile_path, serde_json::to_vec_pretty(&profile).unwrap()).unwrap();
+        write_base_version_json(&base_path, mc_version);
+
+        // Provide a loader version that exists in the manifest to avoid
+        // "ERR_LOADER_PROFILE_NOT_FOUND" — we want the receipt-missing error.
+        let err = resolve(ResolveRequest {
+            instance_id: "fabric-no-receipt".into(),
+            base_version_id: mc_version.into(),
+            loader: Some(LoaderInfo {
+                loader_type: "fabric".into(),
+                version: loader_version.into(),
+                version_url: String::new(),
+            }),
+            game_dir: tmp.path().join("game"),
+            assets_dir: tmp.path().join("assets"),
+            cache_dir: tmp.path().join("cache"),
+            java_override: None,
+            java_candidates: make_java_candidate(),
+            network_policy: NetworkPolicy::all_disabled(),
+            allow_incompatible_java_override: false,
+            minecraft_dir: Some(minecraft_dir),
+            receipts_root: Some(receipts_root),
+        })
+        .await
+        .expect_err("Fabric without receipt should produce unsupported error");
+
+        assert!(
+            matches!(&err, LauncherError::ProfileUnsupportedMetadata(_)),
+            "expected ProfileUnsupportedMetadata, got {err:?}"
         );
     }
 }

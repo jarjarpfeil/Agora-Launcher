@@ -401,86 +401,13 @@ pub fn detect_installed_jres() -> Vec<JavaInstallation> {
 ///
 /// Returns installations tagged [`JavaSource::Managed`].
 pub fn detect_managed_jres(runtimes_root: &Path) -> Vec<JavaInstallation> {
-    use crate::runtime_manager::RuntimeReceipt;
-
-    let mut results = Vec::new();
-    let vendor_dir = runtimes_root.join("temurin");
-    if !vendor_dir.is_dir() {
-        return results;
-    }
-
-    let major_dirs = match std::fs::read_dir(&vendor_dir) {
-        Ok(d) => d,
-        Err(_) => return results,
-    };
-
-    for major_entry in major_dirs.flatten() {
-        if !major_entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let version_dir = major_entry.path();
-        let version_dirs = match std::fs::read_dir(&version_dir) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-        for ve in version_dirs.flatten() {
-            if !ve.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            // ve is the version directory (e.g. "21.0.11+10").
-            // The platform directory (e.g. "linux-x64") is one level deeper.
-            let plat_dirs = match std::fs::read_dir(ve.path()) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-            for pe in plat_dirs.flatten() {
-                if !pe.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    continue;
-                }
-                // Reject symlinked platform directories to prevent escape.
-                if let Ok(meta) = pe.metadata() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        if meta.file_type().is_symlink() {
-                            continue;
-                        }
-                    }
-                    #[cfg(windows)]
-                    {
-                        use std::os::windows::fs::MetadataExt;
-                        if meta.file_attributes() & 0x400 != 0 {
-                            continue;
-                        }
-                    }
-                }
-                let plat_dir = pe.path();
-                let receipt_path = plat_dir.join("receipt.json");
-                if !receipt_path.is_file() {
-                    continue;
-                }
-                // Read and validate receipt
-                let receipt = match RuntimeReceipt::read_from(&receipt_path) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                // Validate the java binary exists
-                let java_path = plat_dir.join(&receipt.java_relative_path);
-                if !java_path.is_file() {
-                    continue;
-                }
-                results.push(JavaInstallation {
-                    path: java_path,
-                    version: receipt.major,
-                    version_string: receipt.full_version.clone(),
-                    source: JavaSource::Managed,
-                    arch: Some(receipt.arch.clone()),
-                });
-            }
-        }
-    }
-
-    results
+    crate::runtime_manager::list_managed_runtimes(runtimes_root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|runtime| {
+            crate::runtime_manager::validate_managed_runtime(&runtime, runtime.receipt.major).ok()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -822,8 +749,65 @@ mod tests {
         assert!(source_priority(&JavaSource::Mojang) < source_priority(&JavaSource::System));
     }
 
-    // --- detect_managed_jres / detect_mojang_jres are integration-level
-    // and tested more thoroughly via runtime_manager tests. ---
+    fn mock_managed_java(path: &Path) -> Option<JavaInstallation> {
+        Some(JavaInstallation {
+            path: path.to_path_buf(),
+            version: 21,
+            version_string: "21.0.2".into(),
+            source: JavaSource::Managed,
+            arch: Some(crate::runtime_catalog::normalize_arch(std::env::consts::ARCH)?.to_string()),
+        })
+    }
+
+    #[test]
+    fn test_detect_managed_jres_rejects_tampered_java() {
+        use sha2::Digest;
+
+        let _guard = set_mock_inspect(Some(mock_managed_java));
+        let tmp = tempfile::tempdir().unwrap();
+        let os = crate::runtime_catalog::normalize_os(std::env::consts::OS).unwrap();
+        let arch = crate::runtime_catalog::normalize_arch(std::env::consts::ARCH).unwrap();
+        let platform_dir = tmp
+            .path()
+            .join("temurin")
+            .join("21")
+            .join("21.0.2+13")
+            .join(format!("{os}-{arch}"));
+        let java_relative = if cfg!(windows) {
+            PathBuf::from("bin/java.exe")
+        } else {
+            PathBuf::from("bin/java")
+        };
+        let java_path = platform_dir.join(&java_relative);
+        std::fs::create_dir_all(java_path.parent().unwrap()).unwrap();
+        std::fs::write(&java_path, b"original java").unwrap();
+        let java_sha256 = hex::encode(sha2::Sha256::digest(b"original java"));
+
+        let receipt = crate::runtime_manager::RuntimeReceipt {
+            schema_version: crate::runtime_manager::RECEIPT_SCHEMA_VERSION,
+            vendor: "eclipse-temurin".into(),
+            major: 21,
+            full_version: "21.0.2+13".into(),
+            os: os.into(),
+            arch: arch.into(),
+            archive_sha256: "a".repeat(64),
+            archive_size: 1,
+            source_url: "https://api.adoptium.net/test".into(),
+            java_relative_path: java_relative.to_string_lossy().into_owned(),
+            installed_at: chrono::Utc::now(),
+            last_used_at: None,
+            successful_use_at: None,
+            java_sha256: Some(java_sha256),
+        };
+        receipt
+            .write_to(&platform_dir.join("receipt.json"))
+            .unwrap();
+
+        assert_eq!(detect_managed_jres(tmp.path()).len(), 1);
+
+        std::fs::write(&java_path, b"tampered java").unwrap();
+        assert!(detect_managed_jres(tmp.path()).is_empty());
+    }
 
     // --- JavaRequirement tests ---
 

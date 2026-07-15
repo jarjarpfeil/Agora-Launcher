@@ -20,6 +20,7 @@ use crate::registry::{
 use crate::state::LauncherState;
 use crate::version_cache::{self, ModVersionPage, SharedVersionCache};
 use agora_core::browse_cache::{self, BrowseFilters, BrowsePage};
+use agora_core::minecraft_runtime;
 use agora_core::modrinth::{ModrinthSearchParams, ModrinthSort};
 use agora_core::pack_install;
 use std::collections::BTreeSet;
@@ -574,6 +575,8 @@ pub async fn launch_instance_direct(
             code: "ERR_APP_DATA".into(),
             message: error.to_string(),
         })?;
+        let minecraft_runtime_root = app_data.join("minecraft-runtime");
+        let runtime_layout = minecraft_runtime::ensure_runtime_layout(&minecraft_runtime_root)?;
         let loader = if matches!(row.loader.as_str(), "" | "vanilla") {
             None
         } else {
@@ -591,13 +594,13 @@ pub async fn launch_instance_direct(
                 base_version_id: row.minecraft_version.clone(),
                 loader,
                 game_dir: instance_dir.clone(),
-                assets_dir: app_data.join("assets"),
-                cache_dir: app_data.join("launch_cache"),
+                assets_dir: runtime_layout.assets.clone(),
+                cache_dir: runtime_layout.root.clone(),
                 java_override,
                 java_candidates: java_candidates.clone(),
                 network_policy: network_policy.clone(),
                 allow_incompatible_java_override: allow_incompatible,
-                minecraft_dir: paths::minecraft_dir(),
+                minecraft_dir: Some(runtime_layout.root.clone()),
                 receipts_root: Some(
                     app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
                 ),
@@ -745,13 +748,13 @@ pub async fn launch_instance_direct(
                                 })
                             },
                             game_dir: instance_dir.clone(),
-                            assets_dir: app_data.join("assets"),
-                            cache_dir: app_data.join("launch_cache"),
+                            assets_dir: runtime_layout.assets.clone(),
+                            cache_dir: runtime_layout.root.clone(),
                             java_override: None,
                             java_candidates: fresh_candidates,
                             network_policy: network_policy.clone(),
                             allow_incompatible_java_override: false,
-                            minecraft_dir: paths::minecraft_dir(),
+                            minecraft_dir: Some(runtime_layout.root.clone()),
                             receipts_root: Some(
                                 app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
                             ),

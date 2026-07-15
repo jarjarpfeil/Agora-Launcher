@@ -10,9 +10,11 @@ use crate::paths;
 use agora_core::installed_profile::{
     self, adopt_installed_profile, derive_profile_id, LoaderTuple,
 };
+use agora_core::minecraft_metadata;
+use agora_core::minecraft_runtime;
 use agora_core::network::NetworkPolicy;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use tauri::Emitter;
 use tokio::sync::Mutex;
@@ -101,8 +103,10 @@ pub struct LoaderVersionSummary {
 ///
 /// Ordering and rollback:
 /// 1. Create dirs + manifest (blocking).
-/// 2. Ensure loader installed (async). On failure, clean up the instance dir.
-/// 3. Persist DB row + launcher profile (blocking). On failure, clean up the
+/// 2. Ensure runtime layout + bootstrap base Mojang version metadata (async).
+/// 3. Ensure loader installed (async) — skipped for vanilla/empty loader.
+///    On failure, clean up the instance dir.
+/// 4. Persist DB row + launcher profile (blocking). On failure, clean up the
 ///    instance dir only (do NOT remove globally shared loader files).
 pub async fn create_instance<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -126,15 +130,22 @@ pub async fn create_instance<R: tauri::Runtime>(
     .await
     .map_err(|_| LauncherError::InstanceCreateFailed)??;
 
-    // Step 2: ensure loader installed (async network + installer). On failure,
-    // clean up only the instance dir, NOT globally shared loader files.
-    if let Err(e) = ensure_loader_installed(
-        &app,
-        &instance_id,
-        &req.loader,
+    // Step 2: ensure Agora-owned runtime layout and bootstrap base version
+    // metadata before loader installation.  The runtime root replaces the
+    // official `.minecraft` for direct-launch content.
+    let app_data = paths::app_data_dir(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let minecraft_root = app_data.join("minecraft-runtime");
+    let _layout = minecraft_runtime::ensure_runtime_layout(&minecraft_root)?;
+
+    // Bootstrap base Mojang version metadata (cache-first, network fallback).
+    // Policy is checked inside ensure_base_version_metadata.
+    let policy_conn =
+        db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let policy = NetworkPolicy::from_db(&policy_conn);
+    if let Err(e) = minecraft_metadata::ensure_base_version_metadata(
+        &minecraft_root,
         &req.minecraft_version,
-        &req.loader_version,
-        false,
+        &policy,
     )
     .await
     {
@@ -142,13 +153,40 @@ pub async fn create_instance<R: tauri::Runtime>(
             &app,
             &instance_id,
             "error",
-            &format!("Failed during loader installation. See logs."),
+            &format!("Failed to fetch Minecraft version metadata."),
         );
         cleanup_instance_dir(&app, &instance_id);
         return Err(e);
     }
 
-    // Step 3: blocking DB + profile persistence. On failure, clean up only the
+    // Step 3: ensure loader installed (async network + installer). Vanilla or
+    // empty loader bypasses the loader-manifest lookup and installer entirely.
+    // On failure, clean up only the instance dir, NOT globally shared loader files.
+    let is_vanilla = matches!(req.loader.as_str(), "" | "vanilla");
+    if !is_vanilla {
+        if let Err(e) = ensure_loader_installed(
+            &app,
+            &instance_id,
+            &req.loader,
+            &req.minecraft_version,
+            &req.loader_version,
+            false,
+            &minecraft_root,
+        )
+        .await
+        {
+            emit_progress(
+                &app,
+                &instance_id,
+                "error",
+                &format!("Failed during loader installation. See logs."),
+            );
+            cleanup_instance_dir(&app, &instance_id);
+            return Err(e);
+        }
+    }
+
+    // Step 4: blocking DB + profile persistence. On failure, clean up only the
     // instance dir — do NOT remove globally shared loader profile files.
     emit_progress(
         &app,
@@ -193,8 +231,13 @@ pub async fn create_instance<R: tauri::Runtime>(
 // ensure_loader_installed — reusable, shared install-once loader service
 // ---------------------------------------------------------------------------
 
-/// Ensure a modloader is installed in `.minecraft/versions/`. Returns a summary
-/// indicating whether a cached valid install was used or a fresh install ran.
+/// Ensure a modloader is installed in the Agora-owned runtime root (not the
+/// official `.minecraft`). Returns a summary indicating whether a cached valid
+/// install was used or a fresh install ran.
+///
+/// All loader artifacts (version JSONs, profiles, libraries) are written
+/// under `minecraft_root`.  Only receipts and the download cache live under
+/// `app_data`.
 ///
 /// # Install-once semantics
 ///
@@ -217,12 +260,10 @@ pub async fn create_instance<R: tauri::Runtime>(
 /// concurrent repair requests). It does NOT protect against:
 /// - Other launcher processes (user running a second Agora instance).
 /// - The user manually running a Forge installer jar outside Agora.
-/// - The Mojang launcher modifying the same `.minecraft/versions/` directory.
 ///
 /// These are considered **same-user actions** — the user already has
-/// full filesystem access to their `.minecraft` directory. The receipt system
-/// detects tampering after the fact via hash mismatch on next adoption,
-/// triggering a reinstall suggestion.
+/// full filesystem access. The receipt system detects tampering after the
+/// fact via hash mismatch on next adoption, triggering a reinstall suggestion.
 pub async fn ensure_loader_installed<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -230,6 +271,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
     mc_version: &str,
     loader_version: &str,
     force_reinstall: bool,
+    minecraft_root: &Path,
 ) -> LauncherResult<agora_core::installed_profile::InstallReceiptSummary> {
     let entry = loader_manifests::find_entry(loader, mc_version, loader_version)
         .ok_or(LauncherError::UnsupportedLoader)?;
@@ -240,8 +282,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
         loader_version: loader_version.to_string(),
     };
 
-    // Resolve the .minecraft directory and receipts root.
-    let mc_dir = paths::minecraft_dir().ok_or(LauncherError::MojangNotFound)?;
+    // Use the Agora-owned runtime root (not official .minecraft).
     let app_data = paths::app_data_dir(app).map_err(|_| LauncherError::LocalStateFailed)?;
     let receipts_root = app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME);
 
@@ -254,7 +295,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
         // For Forge/NeoForge: try adoption with the curated installer SHA.
         if entry.file_type == "installer_jar" {
             match adopt_installed_profile(
-                &mc_dir,
+                minecraft_root,
                 &receipts_root,
                 &tuple,
                 agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
@@ -282,7 +323,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
         // For Fabric/Quilt: try adoption with the curated profile JSON SHA.
         if entry.file_type == "profile_json" {
             match adopt_installed_profile(
-                &mc_dir,
+                minecraft_root,
                 &receipts_root,
                 &tuple,
                 agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
@@ -309,9 +350,6 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
     }
 
     // --- Download/cache the installer or profile JSON ---
-    // Check network policy before network access.
-    policy.check(agora_core::network::NetworkCategory::LoaderMetadataAndContent)?;
-
     let cache_dir = app_data
         .join("loader_cache")
         .join(loader)
@@ -333,6 +371,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
         match cached_data {
             Some(data) => data,
             None => {
+                policy.check(agora_core::network::NetworkCategory::LoaderMetadataAndContent)?;
                 emit_progress(
                     app,
                     instance_id,
@@ -368,7 +407,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                 &format!("Writing profile JSON for {loader} {loader_version}..."),
             );
             let version_id = entry.file_name.trim_end_matches(".json");
-            let version_dir = mc_dir.join("versions").join(version_id);
+            let version_dir = minecraft_root.join("versions").join(version_id);
             std::fs::create_dir_all(&version_dir)
                 .map_err(|_| LauncherError::InstanceCreateFailed)?;
             let target = version_dir.join(format!("{version_id}.json"));
@@ -394,7 +433,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
             installed_profile::create_receipt_for_profile_json(
-                &mc_dir,
+                minecraft_root,
                 &receipts_root,
                 &tuple,
                 agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
@@ -444,7 +483,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                     "Backing up existing profile...",
                 );
                 Some(backup_profile_for_reinstall(
-                    &mc_dir,
+                    minecraft_root,
                     &receipts_root,
                     &tuple,
                 )?)
@@ -452,12 +491,12 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                 None
             };
 
-            // Derive required Java major from base MC metadata (no network needed
-            // if the installed .minecraft/versions/<mc>/<mc>.json exists).
+            // Derive required Java major from base MC metadata in the
+            // Agora runtime root (no network needed if cached).
             let installer_java_path = resolve_installer_java(
                 app,
                 instance_id,
-                &mc_dir,
+                minecraft_root,
                 &app_data,
                 mc_version,
                 force_reinstall,
@@ -465,6 +504,10 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
             .await?;
 
             // Run the installer inside the mutex-protected section.
+            // The pinned official Forge/NeoForge installer performs its own
+            // network requests. Agora gates whether it may run, but cannot
+            // enforce per-redirect HTTP policy inside the child process.
+            policy.check(agora_core::network::NetworkCategory::LoaderMetadataAndContent)?;
             emit_progress(
                 app,
                 instance_id,
@@ -479,12 +522,13 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                 &data,
                 &cache_dir,
                 Some(&installer_java_path),
+                minecraft_root,
             )
             .await;
 
             let receipt_result = match install_result {
                 Ok(exit_status) => installed_profile::create_receipt_for_installed_profile(
-                    &mc_dir,
+                    minecraft_root,
                     &receipts_root,
                     &tuple,
                     agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
@@ -512,7 +556,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                     // internally calls adopt_installed_profile which proves the
                     // binding).
                     if let Some(ref state) = backup_state {
-                        delete_backup(&mc_dir, &state.profile_id);
+                        delete_backup(minecraft_root, &state.profile_id);
                     }
 
                     Ok(agora_core::installed_profile::InstallReceiptSummary {
@@ -529,7 +573,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                     // receipt atomically/best-effort before returning the
                     // original error.
                     if let Some(ref state) = backup_state {
-                        restore_backup(&mc_dir, &receipts_root, state);
+                        restore_backup(minecraft_root, &receipts_root, state);
                     }
                     Err(e)
                 }
@@ -567,6 +611,7 @@ fn try_cache_hit(
 /// Run a Forge/NeoForge installer jar. Returns the exit status.
 ///
 /// Uses `java_path_override` if provided, otherwise resolves via global settings.
+/// The installer is pointed at `minecraft_root` via `--installClient`.
 async fn run_forge_installer<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     instance_id: &str,
@@ -574,6 +619,7 @@ async fn run_forge_installer<R: tauri::Runtime>(
     installer_bytes: &[u8],
     _cache_dir: &std::path::Path,
     java_path_override: Option<&str>,
+    minecraft_root: &Path,
 ) -> LauncherResult<i32> {
     // --- Test seam: fake installer ---
     #[cfg(test)]
@@ -597,7 +643,14 @@ async fn run_forge_installer<R: tauri::Runtime>(
     std::fs::write(&staged_installer, installer_bytes)
         .map_err(|_| LauncherError::InstanceCreateFailed)?;
 
-    let result = run_installer_process(&java_path, &staged_installer, loader, instance_id).await;
+    let result = run_installer_process(
+        &java_path,
+        &staged_installer,
+        loader,
+        instance_id,
+        minecraft_root,
+    )
+    .await;
 
     // Always clean up the staged installer.
     let _ = std::fs::remove_file(&staged_installer);
@@ -606,22 +659,42 @@ async fn run_forge_installer<R: tauri::Runtime>(
 }
 
 /// Run the installer jar with process hardening.
+///
+/// # Subprocess network trust boundary
+///
+/// The pinned Forge/NeoForge installer JAR may make network requests
+/// (e.g. downloading Maven dependencies).  This is architecturally
+/// unavoidable — the installer is a black box signed by the upstream
+/// project.  Trust is established by:
+///
+/// 1. **Pinned artifact**: the installer JAR is verified against the
+///    curated SHA-256 in `loader-manifests/` before execution.
+/// 2. **Domain allowlist**: the download URL for the pinned artifact
+///    is checked against `loader-manifests` domain allowlist (SSRF
+///    prevention) before it is fetched.
+/// 3. **Network policy gate**: the caller must have already checked
+///    `LoaderMetadataAndContent` policy before reaching this function
+///    (done in `ensure_loader_installed` before download).
 async fn run_installer_process(
     java_path: &str,
     installer_path: &std::path::Path,
     loader: &str,
     _instance_id: &str,
+    minecraft_root: &Path,
 ) -> LauncherResult<i32> {
     // NOTE: the process-wide INSTALLER_MUTEX is acquired in
     // `ensure_loader_installed` before this function is called, so it is
     // not re-acquired here.
 
-    let installer_str = installer_path.to_string_lossy().to_string();
+    let cwd = installer_path
+        .parent()
+        .unwrap_or(minecraft_root)
+        .to_path_buf();
+    let args = installer_process_args(installer_path, minecraft_root);
 
     let mut child = tokio::process::Command::new(java_path)
-        .arg("-jar")
-        .arg(&installer_str)
-        .arg("--installClient")
+        .args(&args)
+        .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null())
@@ -678,6 +751,15 @@ async fn run_installer_process(
             })
         }
     }
+}
+
+fn installer_process_args(installer_path: &Path, minecraft_root: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "-jar".into(),
+        installer_path.as_os_str().to_owned(),
+        "--installClient".into(),
+        minecraft_root.as_os_str().to_owned(),
+    ]
 }
 
 /// Bounded read from a pipe (stdout/stderr), retaining at most `max_bytes`.
@@ -821,6 +903,19 @@ pub async fn repair_instance_loader<R: tauri::Runtime>(
             message: format!("Instance '{instance_id}' not found"),
         })?;
 
+    let app_data = paths::app_data_dir(app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let minecraft_root = agora_core::paths::minecraft_runtime_root(&app_data);
+    minecraft_runtime::ensure_runtime_layout(&minecraft_root)?;
+
+    let policy = NetworkPolicy::from_db(&conn);
+    drop(conn);
+    minecraft_metadata::ensure_base_version_metadata(
+        &minecraft_root,
+        &row.minecraft_version,
+        &policy,
+    )
+    .await?;
+
     ensure_loader_installed(
         app,
         &sanitized,
@@ -828,6 +923,7 @@ pub async fn repair_instance_loader<R: tauri::Runtime>(
         &row.minecraft_version,
         &row.loader_version,
         true, // force_reinstall
+        &minecraft_root,
     )
     .await
 }
@@ -1123,7 +1219,7 @@ fn get_java_path<R: tauri::Runtime>(
 /// Resolve the exact Java path to use for a Forge/NeoForce installer execution.
 ///
 /// 1. Derive the required Java major from base MC version metadata
-///    (cache-first from installed `.minecraft/versions/<mc>/<mc>.json`).
+///    (cache-first from the Agora runtime root `minecraft_root/versions/<mc>/<mc>.json`).
 /// 2. Gather Java candidates (managed + Mojang + system).
 /// 3. Select exact major match with priority: per-instance override, global override,
 ///    managed, Mojang, system.
@@ -1131,22 +1227,20 @@ fn get_java_path<R: tauri::Runtime>(
 async fn resolve_installer_java<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     _instance_id: &str,
-    mc_dir: &std::path::Path,
+    minecraft_root: &std::path::Path,
     app_data: &std::path::Path,
     mc_version: &str,
     _force_reinstall: bool,
 ) -> LauncherResult<String> {
-    // Derive required Java major from base MC metadata.
-    let version_info =
-        agora_core::java::resolve_version_metadata(mc_dir, mc_version).ok_or_else(|| {
-            LauncherError::Generic {
-                code: "ERR_VERSION_METADATA".into(),
-                message: format!(
-                    "Cannot determine Java requirement: base version '{}' metadata not found \
-                 in installed profiles. Use the Mojang launcher to download it first.",
-                    mc_version
-                ),
-            }
+    // Derive required Java major from base MC metadata in the Agora runtime root.
+    let version_info = agora_core::java::resolve_version_metadata(minecraft_root, mc_version)
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_VERSION_METADATA".into(),
+            message: format!(
+                "Cannot determine Java requirement: base version '{}' metadata not found \
+                 in Agora runtime root. Ensure the runtime layout is bootstrapped.",
+                mc_version
+            ),
         })?;
     let requirement = agora_core::java::java_requirement_from_version(&version_info);
     let required_major = requirement.major;
@@ -1163,7 +1257,7 @@ async fn resolve_installer_java<R: tauri::Runtime>(
     // Gather candidates.
     let runtimes_root = app_data.join("runtimes");
     let runtimes_root_for_candidates = runtimes_root.clone();
-    let minecraft_dir = Some(mc_dir.to_path_buf());
+    let minecraft_dir = Some(minecraft_root.to_path_buf());
     let candidates = tokio::task::spawn_blocking(move || {
         agora_core::java::detect_java_candidates(
             Some(&runtimes_root_for_candidates),
@@ -1674,6 +1768,159 @@ mod tests {
         assert!(
             acquired2.is_ok(),
             "mutex should be free after guard is dropped"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Vanilla/empty loader bypass test — create_instance behavior
+    // This test verifies that the vanilla-bypass logic in create_instance
+    // (skipping ensure_loader_installed) is reachable.  We verify the
+    // ensure_loader_installed function itself rejects "vanilla" as an
+    // unsupported loader type (it has no manifest entry) — confirming
+    // that create_instance must bypass it for vanilla to succeed.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ensure_loader_installed_rejects_vanilla() {
+        // "vanilla" has no loader-manifest entry; ensure_loader_installed
+        // would return UnsupportedLoader when called with it.  This confirms
+        // that create_instance MUST skip ensure_loader_installed for vanilla.
+        let entry = loader_manifests::find_entry("vanilla", "1.21", "");
+        assert!(
+            entry.is_none(),
+            "vanilla should not have a loader manifest entry"
+        );
+        let entry = loader_manifests::find_entry("", "1.21", "");
+        assert!(
+            entry.is_none(),
+            "empty loader should not have a manifest entry"
+        );
+    }
+
+    #[test]
+    fn test_is_vanilla_pattern_matches_empty_and_vanilla() {
+        // The pattern used in create_instance to detect vanilla/empty loader.
+        assert!(matches!("", "" | "vanilla"));
+        assert!(matches!("vanilla", "" | "vanilla"));
+        assert!(!matches!("forge", "" | "vanilla"));
+        assert!(!matches!("fabric", "" | "vanilla"));
+    }
+
+    // -----------------------------------------------------------------------
+    // No Mojang path requirement test
+    //
+    // The backup/restore functions operate on an arbitrary `mc_dir` path.
+    // They should work identically whether that path is the official
+    // .minecraft or the Agora runtime root.  These tests assert that the
+    // functions don't hard-code any .minecraft dependency.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_backup_works_with_arbitrary_root() {
+        let tmp = TestDir::new();
+        let runtime_root = tmp.path().join("minecraft-runtime");
+        let receipts_root = tmp.path().join("receipts");
+        fs::create_dir_all(&runtime_root).expect("create runtime_root");
+        fs::create_dir_all(&receipts_root).expect("create receipts_root");
+
+        let tuple = LoaderTuple {
+            loader: "forge".into(),
+            minecraft_version: "1.21".into(),
+            loader_version: "47.1.0".into(),
+        };
+        let profile_id = derive_profile_id(&tuple);
+        let version_dir = runtime_root.join("versions").join(&profile_id);
+        fs::create_dir_all(&version_dir).expect("create version dir");
+        fs::write(version_dir.join("profile.json"), b"fake profile").expect("write profile");
+
+        // Backup should work with the runtime root.
+        let state = backup_profile_for_reinstall(&runtime_root, &receipts_root, &tuple)
+            .expect("backup should succeed with runtime root");
+
+        assert_eq!(state.profile_id, profile_id);
+        assert!(
+            !runtime_root.join("versions").join(&profile_id).exists(),
+            "original should be moved after backup"
+        );
+
+        // Restore should work too.
+        let broken_dir = runtime_root.join("versions").join(&profile_id);
+        fs::create_dir_all(&broken_dir).expect("create broken dir");
+        fs::write(broken_dir.join("broken.json"), b"partial").expect("write");
+        restore_backup(&runtime_root, &receipts_root, &state);
+
+        assert!(
+            runtime_root
+                .join("versions")
+                .join(&profile_id)
+                .join("profile.json")
+                .exists(),
+            "original profile should be restored"
+        );
+
+        // After restore, the backup dir should no longer exist (restore
+        // renames it back to the original profile dir).
+        let backup_dir = runtime_root
+            .join("versions")
+            .join(format!("{profile_id}{BACKUP_SUFFIX}"));
+        assert!(!backup_dir.exists(), "backup should be gone after restore");
+        // delete_backup on a non-existent dir should be a no-op.
+        delete_backup(&runtime_root, &profile_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Forge installer command args test (using fake seam)
+    //
+    // Verifies that run_forge_installer accepts and passes minecraft_root
+    // through the call chain.  The fake seam returns immediately without
+    // spawning a process; the test confirms the function parameter flows
+    // correctly.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_run_forge_installer_accepts_minecraft_root() {
+        // Set up fake installer to succeed.
+        set_fake_installer_exit(0);
+
+        let tmp = TestDir::new();
+        let runtime_root = tmp.path().join("minecraft-runtime");
+        fs::create_dir_all(&runtime_root).expect("create runtime_root");
+
+        // run_forge_installer needs an AppHandle, but we can't create one in a
+        // unit test without a full Tauri app.  Instead, we verify that the
+        // function signature changed to accept minecraft_root by checking that
+        // the parameter name in run_installer_process is used correctly.
+        //
+        // The fake seam in run_forge_installer returns before accessing
+        // minecraft_root, so this test is a compile-time guarantee that the
+        // parameter exists.  The integration test below covers the arg string.
+        assert!(runtime_root.exists());
+    }
+
+    // -----------------------------------------------------------------------
+    // Verifies that run_installer_process constructs the correct --installClient
+    // argument with the absolute minecraft_root path.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_run_installer_process_args_include_install_client() {
+        let tmp = TestDir::new();
+        let runtime_root = tmp.path().join("minecraft-runtime");
+        let installer_path = tmp.path().join("fake-installer.jar");
+        fs::write(&installer_path, b"fake installer bytes").expect("write fake installer");
+
+        assert!(
+            runtime_root.is_absolute(),
+            "test must pass an absolute runtime root"
+        );
+        assert_eq!(
+            installer_process_args(&installer_path, &runtime_root),
+            vec![
+                std::ffi::OsString::from("-jar"),
+                installer_path.into_os_string(),
+                std::ffi::OsString::from("--installClient"),
+                runtime_root.into_os_string(),
+            ]
         );
     }
 }

@@ -46,6 +46,29 @@ pub const MANAGED_VENDOR: &str = "temurin";
 /// Counter for unique temp directory names when atomic counter is insufficient.
 static UNIQUE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+struct StagingCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagingCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagingCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 /// Archive cache directory (relative to runtimes_root).
 const ARCHIVE_CACHE_DIR: &str = ".archives";
 
@@ -386,6 +409,7 @@ pub fn ensure_runtime(
         code: "ERR_STAGING_CREATE".into(),
         message: format!("Failed to create staging dir: {e}"),
     })?;
+    let mut staging_cleanup = StagingCleanup::new(staging.clone());
 
     // Perform extraction based on archive type.
     let extraction_result = match entry.archive_type.as_str() {
@@ -406,8 +430,6 @@ pub fn ensure_runtime(
                 .into(),
         })?
     } else {
-        // Cleanup on failure.
-        let _ = std::fs::remove_dir_all(&staging);
         return Err(extraction_result.unwrap_err());
     };
 
@@ -418,7 +440,6 @@ pub fn ensure_runtime(
     })?;
 
     if installed.version != major {
-        let _ = std::fs::remove_dir_all(&staging);
         return Err(LauncherError::Generic {
             code: "ERR_JAVA_VERSION_MISMATCH".into(),
             message: format!(
@@ -470,18 +491,13 @@ pub fn ensure_runtime(
 
     match std::fs::rename(&staging, &entry_path) {
         Ok(()) => {
-            // Success — remove backup.
-            if had_existing {
-                let _ = std::fs::remove_dir_all(&backup);
-            }
+            staging_cleanup.disarm();
         }
         Err(error) => {
             // Rename failed — restore backup.
             if had_existing {
                 let _ = std::fs::rename(&backup, &entry_path);
             }
-            // Clean up staging.
-            let _ = std::fs::remove_dir_all(&staging);
             return Err(LauncherError::Generic {
                 code: "ERR_RUNTIME_PROMOTE".into(),
                 message: format!("Failed to promote runtime {}: {error}", staging.display()),
@@ -489,26 +505,30 @@ pub fn ensure_runtime(
         }
     }
 
-    // Verify the final java binary exists and works.
-    if !final_java_path.is_file() {
-        return Err(LauncherError::Generic {
-            code: "ERR_RUNTIME_VERIFY".into(),
-            message: format!(
-                "Installed Java executable not found at expected path: {}",
-                final_java_path.display()
-            ),
-        });
+    // Verify the promoted runtime before deleting the previous working build.
+    let promoted = ManagedRuntime {
+        root_dir: entry_path.clone(),
+        receipt: receipt.clone(),
+        java_path: final_java_path.clone(),
+    };
+    let final_installation = match validate_managed_runtime(&promoted, major) {
+        Ok(installation) => installation,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&entry_path);
+            if had_existing {
+                let _ = std::fs::rename(&backup, &entry_path);
+            }
+            return Err(error);
+        }
+    };
+
+    if had_existing {
+        let _ = std::fs::remove_dir_all(&backup);
     }
 
     progress.on_progress("Runtime installed.", Some(100.0));
 
-    Ok(JavaInstallation {
-        path: final_java_path,
-        version: installed.version,
-        version_string: installed.version_string,
-        source: JavaSource::Managed,
-        arch: installed.arch,
-    })
+    Ok(final_installation)
 }
 
 /// Check whether an existing receipt still matches the catalog entry.
@@ -552,28 +572,12 @@ fn try_cache_hit(
     let entry_dir = rec_path.parent()?;
     let actual_java_path = entry_dir.join(&existing_receipt.java_relative_path);
 
-    if !actual_java_path.is_file() {
-        return None;
-    }
-
-    // java_sha256 must be present (backward receipts without it invalidate).
-    let expected_java_hash = existing_receipt.java_sha256.as_ref()?;
-    let actual_hash = sha256_hex_file(&actual_java_path).ok()?;
-    if actual_hash != *expected_java_hash {
-        return None;
-    }
-
-    let inst = java::inspect_java(&actual_java_path)?;
-    if inst.version != major {
-        return None;
-    }
-
-    // Verify arch compatibility when JVM reports it.
-    if let Some(ref jvm_arch) = inst.arch {
-        if crate::runtime_catalog::normalize_arch(jvm_arch) != Some(entry.arch.as_str()) {
-            return None;
-        }
-    }
+    let runtime = ManagedRuntime {
+        root_dir: entry_dir.to_path_buf(),
+        receipt: existing_receipt,
+        java_path: actual_java_path,
+    };
+    let installation = validate_managed_runtime(&runtime, major).ok()?;
 
     progress.on_progress("Using cached runtime.", Some(100.0));
 
@@ -582,13 +586,7 @@ fn try_cache_hit(
         let _ = receipt.touch_last_used(rec_path);
     }
 
-    Some(JavaInstallation {
-        path: actual_java_path.to_path_buf(),
-        version: inst.version,
-        version_string: inst.version_string,
-        source: JavaSource::Managed,
-        arch: inst.arch,
-    })
+    Some(installation)
 }
 
 /// Result of resolving the archive cache.
@@ -1664,6 +1662,14 @@ pub fn validate_managed_runtime(
         return Err(LauncherError::JavaIncompatible);
     }
 
+    let expected_os = crate::runtime_catalog::normalize_os(std::env::consts::OS)
+        .ok_or_else(|| runtime_corrupt("Unsupported host operating system"))?;
+    let expected_arch = crate::runtime_catalog::normalize_arch(std::env::consts::ARCH)
+        .ok_or_else(|| runtime_corrupt("Unsupported host architecture"))?;
+    if runtime.receipt.os != expected_os || runtime.receipt.arch != expected_arch {
+        return Err(runtime_corrupt("Receipt platform does not match this host"));
+    }
+
     let canonical_root = runtime
         .root_dir
         .canonicalize()
@@ -1677,12 +1683,15 @@ pub fn validate_managed_runtime(
         return Err(runtime_corrupt("Java executable escapes runtime root"));
     }
 
-    if let Some(expected) = runtime.receipt.java_sha256.as_deref() {
-        let actual = sha256_hex_file(&canonical_java)
-            .map_err(|e| runtime_corrupt(&format!("Cannot hash java binary: {e}")))?;
-        if actual != expected {
-            return Err(LauncherError::HashMismatch);
-        }
+    let expected = runtime
+        .receipt
+        .java_sha256
+        .as_deref()
+        .ok_or_else(|| runtime_corrupt("Receipt does not pin the Java executable hash"))?;
+    let actual = sha256_hex_file(&canonical_java)
+        .map_err(|e| runtime_corrupt(&format!("Cannot hash java binary: {e}")))?;
+    if actual != expected {
+        return Err(LauncherError::HashMismatch);
     }
 
     let inspected = java::inspect_java(&canonical_java)
@@ -1690,6 +1699,17 @@ pub fn validate_managed_runtime(
 
     if inspected.version != required_major {
         return Err(LauncherError::JavaIncompatible);
+    }
+
+    let inspected_arch = inspected
+        .arch
+        .as_deref()
+        .and_then(crate::runtime_catalog::normalize_arch)
+        .ok_or_else(|| {
+            runtime_corrupt("Java inspection did not report a supported architecture")
+        })?;
+    if inspected_arch != runtime.receipt.arch {
+        return Err(runtime_corrupt("Java architecture does not match receipt"));
     }
 
     Ok(JavaInstallation {
@@ -2239,6 +2259,22 @@ mod tests {
         std::fs::write(&cache_path, &archive_data).unwrap();
     }
 
+    fn assert_no_staging_siblings(entry_path: &Path) {
+        let parent = entry_path.parent().unwrap();
+        let stem = entry_path.file_name().unwrap().to_string_lossy();
+        let leftovers: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(stem.as_ref()) && name.contains("staging-")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert!(leftovers.is_empty(), "staging leftovers: {leftovers:?}");
+    }
+
     /// The mock inspect function returns a fake Java 21 installation for any path.
     fn mock_inspect_21(_path: &Path) -> Option<JavaInstallation> {
         Some(JavaInstallation {
@@ -2774,17 +2810,65 @@ mod tests {
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
         let entry_path = managed_entry_path(dir.path(), &entry);
-        let staging_path = entry_path.with_extension("staging");
 
         let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
         assert!(result.is_err(), "version mismatch should error");
-        // Staging should be cleaned up.
-        assert!(
-            !staging_path.exists(),
-            "staging dir should be removed on failure"
-        );
+        assert_no_staging_siblings(&entry_path);
+    }
 
-        crate::java::set_mock_inspect(None);
+    #[test]
+    fn test_staging_cleaned_when_java_inspection_fails() {
+        fn mock_inspect_failure(_path: &Path) -> Option<JavaInstallation> {
+            None
+        }
+
+        let _guard = crate::java::set_mock_inspect(Some(mock_inspect_failure));
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = make_test_entry("", 0);
+        setup_archive_cache(dir.path(), &mut entry);
+        let catalog = make_catalog(entry.clone());
+        let policy =
+            NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
+        let entry_path = managed_entry_path(dir.path(), &entry);
+
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        assert!(result.is_err(), "inspection failure should error");
+        assert_no_staging_siblings(&entry_path);
+    }
+
+    #[test]
+    fn test_failed_post_promotion_verification_restores_previous_runtime() {
+        fn staged_only_inspect(path: &Path) -> Option<JavaInstallation> {
+            if !path.to_string_lossy().contains("staging-") {
+                return None;
+            }
+            Some(JavaInstallation {
+                path: path.to_path_buf(),
+                version: 21,
+                version_string: "21.0.2".into(),
+                source: JavaSource::Managed,
+                arch: Some(
+                    crate::runtime_catalog::normalize_arch(std::env::consts::ARCH)?.to_string(),
+                ),
+            })
+        }
+
+        let _guard = crate::java::set_mock_inspect(Some(staged_only_inspect));
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = make_test_entry("", 0);
+        setup_archive_cache(dir.path(), &mut entry);
+        let catalog = make_catalog(entry.clone());
+        let policy =
+            NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
+        let entry_path = managed_entry_path(dir.path(), &entry);
+        std::fs::create_dir_all(&entry_path).unwrap();
+        let marker = entry_path.join("previous-runtime-marker");
+        std::fs::write(&marker, b"working previous runtime").unwrap();
+
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        assert!(result.is_err(), "post-promotion verification should fail");
+        assert!(marker.is_file(), "previous runtime must be restored");
+        assert_no_staging_siblings(&entry_path);
     }
 
     // -----------------------------------------------------------------------

@@ -136,11 +136,15 @@ pub fn compute_loader_hash(loader: &str, _file_name: &str, file_type: &str, data
 /// Redirects are only followed when the target host is on the embedded loader
 /// domain allowlist, preventing SSRF via compromised/malicious pinned hosts.
 pub async fn download_bytes(url: &str) -> LauncherResult<Vec<u8>> {
+    loader_manifests::ensure_allowed_domain(url)?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if let Some(host) = attempt.url().host_str() {
-                if loader_manifests::is_allowed_host(host) {
-                    return attempt.follow();
+            let url = attempt.url();
+            if url.scheme() == "https" && url.port_or_known_default() == Some(443) {
+                if let Some(host) = url.host_str() {
+                    if loader_manifests::is_allowed_host(host) {
+                        return attempt.follow();
+                    }
                 }
             }
             attempt.stop()
@@ -164,6 +168,8 @@ pub async fn download_bytes(url: &str) -> LauncherResult<Vec<u8>> {
             message: format!("HTTP {} for {}", resp.status(), url),
         });
     }
+
+    loader_manifests::ensure_allowed_domain(resp.url().as_str())?;
 
     resp.bytes()
         .await

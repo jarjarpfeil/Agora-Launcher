@@ -215,7 +215,7 @@ pub struct InstalledProfileReceipt {
     /// Map of relative Maven paths to SHA-256 hex digests for processor-
     /// created artifacts (Forge/NeoForge). Populated by the install service
     /// when an installer processor completes. Empty for Fabric/Quilt.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_hash_map")]
     pub generated_artifact_sha256: BTreeMap<String, String>,
     /// Map of relative Maven paths to SHA-256 hex digests for loader library
     /// pins supplied by Agora's curated manifest. Pre-populated from the
@@ -1570,6 +1570,15 @@ fn default_source_kind() -> LoaderSourceKind {
     LoaderSourceKind::InstallerJar
 }
 
+fn deserialize_nullable_hash_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<BTreeMap<String, String>>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2663,6 +2672,33 @@ mod tests {
             result.is_err(),
             "receipt with wrong schema version should be rejected"
         );
+    }
+
+    #[test]
+    fn test_legacy_v2_receipt_aliases_and_null_hash_map_deserialize() {
+        let value = json!({
+            "schema_version": 2,
+            "tuple": {
+                "loader": "forge",
+                "minecraft_version": "1.21",
+                "loader_version": "47.1.0"
+            },
+            "installer_sha256": "a".repeat(64),
+            "installer_url": "https://maven.minecraftforge.net/installer.jar",
+            "profile_id": "forge-1.21-47.1.0",
+            "profile_relative_path": "versions/forge-1.21-47.1.0/forge-1.21-47.1.0.json",
+            "profile_stable_hash": "b".repeat(64),
+            "base_version_id": "1.21",
+            "installed_at": "2026-01-01T00:00:00Z",
+            "installer_exit_status": 0,
+            "generated_artifact_sha256": null
+        });
+
+        let receipt: InstalledProfileReceipt = serde_json::from_value(value).unwrap();
+        assert_eq!(receipt.source_kind, LoaderSourceKind::InstallerJar);
+        assert_eq!(receipt.source_sha256, "a".repeat(64));
+        assert!(receipt.generated_artifact_sha256.is_empty());
+        assert!(receipt.curated_artifact_sha256.is_empty());
     }
 
     // -----------------------------------------------------------------------

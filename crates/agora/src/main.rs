@@ -861,6 +861,9 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
             }
 
             let runtimes_root = data_dir.join("runtimes");
+            let minecraft_root = agora_core::paths::minecraft_runtime_root(&data_dir);
+            let minecraft_layout =
+                agora_core::minecraft_runtime::ensure_runtime_layout(&minecraft_root)?;
             let java_candidates = tokio::task::spawn_blocking({
                 let rt = runtimes_root.clone();
                 move || {
@@ -899,13 +902,13 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                     base_version_id: manifest.minecraft_version.clone(),
                     loader: loader.clone(),
                     game_dir: instance_dir.clone(),
-                    assets_dir: data_dir.join("assets"),
-                    cache_dir: data_dir.join("launch_cache"),
+                    assets_dir: minecraft_layout.assets.clone(),
+                    cache_dir: minecraft_layout.root.clone(),
                     java_override: None,
                     java_candidates: java_candidates.clone(),
                     network_policy: network_policy.clone(),
                     allow_incompatible_java_override: false,
-                    minecraft_dir: agora_core::paths::minecraft_dir(),
+                    minecraft_dir: Some(minecraft_layout.root.clone()),
                     receipts_root: Some(
                         data_dir.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
                     ),
@@ -951,13 +954,13 @@ async fn run_command(cli: Cli, data_dir: &PathBuf, client: &reqwest::Client) -> 
                                 base_version_id: manifest.minecraft_version.clone(),
                                 loader,
                                 game_dir: instance_dir.clone(),
-                                assets_dir: data_dir.join("assets"),
-                                cache_dir: data_dir.join("launch_cache"),
+                                assets_dir: minecraft_layout.assets.clone(),
+                                cache_dir: minecraft_layout.root.clone(),
                                 java_override: None,
                                 java_candidates: fresh_candidates,
                                 network_policy: network_policy.clone(),
                                 allow_incompatible_java_override: false,
-                                minecraft_dir: agora_core::paths::minecraft_dir(),
+                                minecraft_dir: Some(minecraft_layout.root.clone()),
                                 receipts_root: Some(
                                     data_dir.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
                                 ),
