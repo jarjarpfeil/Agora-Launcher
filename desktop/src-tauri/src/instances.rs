@@ -414,8 +414,8 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
             })?;
 
             // Re-read the profile hash after receipt creation (which re-validates).
-            let profile_value_after: serde_json::Value = serde_json::from_slice(&data)
-                .map_err(|_| LauncherError::InstanceCreateFailed)?;
+            let profile_value_after: serde_json::Value =
+                serde_json::from_slice(&data).map_err(|_| LauncherError::InstanceCreateFailed)?;
             let final_hash = installed_profile::stable_profile_hash(&profile_value_after);
 
             Ok(agora_core::installed_profile::InstallReceiptSummary {

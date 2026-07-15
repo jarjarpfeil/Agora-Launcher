@@ -944,7 +944,10 @@ pub async fn launch_instance_direct(
             if let Some(task) = stderr_task {
                 let _ = task.await;
             }
-            let exit_code = status.as_ref().ok().and_then(|s| s.code());
+            let exit_code = status
+                .as_ref()
+                .ok()
+                .and_then(agora_core::launch_planner::exit_code_for_classification);
             let was_user_cancelled = {
                 let mut s = state_on_exit.lock().await;
                 s.user_cancelled_launches.remove(&launch_session_id)
@@ -997,12 +1000,10 @@ pub async fn launch_instance_direct(
                 // success outcome. This supports the future patch-update
                 // retention policy: old builds are kept until successful use.
                 if lkg_was_success {
-                    if let Err(error) =
-                        agora_core::runtime_manager::mark_successful_use(
-                            &lkg_runtimes_root,
-                            &lkg_java_path,
-                        )
-                    {
+                    if let Err(error) = agora_core::runtime_manager::mark_successful_use(
+                        &lkg_runtimes_root,
+                        &lkg_java_path,
+                    ) {
                         crate::auth::log_line(&format!(
                             "failed to mark runtime successful use: {error}"
                         ));

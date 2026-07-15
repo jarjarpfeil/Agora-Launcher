@@ -1,4 +1,4 @@
-﻿//! Pure-core installed-profile adoption and receipt layer.
+//! Pure-core installed-profile adoption and receipt layer.
 //!
 //! Provides types and functions to read, validate, adopt, and issue receipts
 //! for installed modloader profiles under `minecraft_dir/versions/<id>/`.
@@ -1456,21 +1456,20 @@ pub fn create_receipt_for_installed_profile(
         installed_at: chrono::Utc::now().to_rfc3339(),
         installer_exit_status: exit_status,
         generated_artifact_sha256,
-            curated_artifact_sha256: BTreeMap::new(),
+        curated_artifact_sha256: BTreeMap::new(),
     };
 
     // 9. Write receipt atomically.
     write_receipt_atomic(receipts_root, tuple, &receipt)?;
 
     // 10. Prove binding by calling normal adoption with the same source SHA.
-    let _adopted =
-        adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
-            .map_err(|issue| {
-                // If adoption fails despite successful write, try to clean up the
-                // receipt to avoid orphaned metadata.
-                let _ = remove_receipt(receipts_root, tuple);
-                issue
-            })?;
+    let _adopted = adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
+        .map_err(|issue| {
+            // If adoption fails despite successful write, try to clean up the
+            // receipt to avoid orphaned metadata.
+            let _ = remove_receipt(receipts_root, tuple);
+            issue
+        })?;
 
     Ok(receipt)
 }
@@ -1557,12 +1556,11 @@ pub fn create_receipt_for_profile_json(
     write_receipt_atomic(receipts_root, tuple, &receipt)?;
 
     // 6. Prove binding by calling normal adoption with the same source SHA.
-    let _adopted =
-        adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
-            .map_err(|issue| {
-                let _ = remove_receipt(receipts_root, tuple);
-                issue
-            })?;
+    let _adopted = adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
+        .map_err(|issue| {
+            let _ = remove_receipt(receipts_root, tuple);
+            issue
+        })?;
 
     Ok(receipt)
 }
@@ -1648,7 +1646,12 @@ mod tests {
             installer_sha: &str,
             profile_stable_hash: &str,
         ) -> InstalledProfileReceipt {
-            self.write_receipt_with_generated(tuple, installer_sha, profile_stable_hash, BTreeMap::new())
+            self.write_receipt_with_generated(
+                tuple,
+                installer_sha,
+                profile_stable_hash,
+                BTreeMap::new(),
+            )
         }
 
         /// Write a receipt with an optional `generated_artifact_sha256` map.
@@ -1997,7 +2000,8 @@ mod tests {
 
         // Write a receipt so adoption succeeds.
         let hash = {
-            let profile_path = fix.minecraft_dir
+            let profile_path = fix
+                .minecraft_dir
                 .join("versions/fabric-loader-0.16.0-1.21/fabric-loader-0.16.0-1.21.json");
             let profile_bytes = std::fs::read(&profile_path).unwrap();
             let profile_value: serde_json::Value = serde_json::from_slice(&profile_bytes).unwrap();
@@ -2005,13 +2009,9 @@ mod tests {
         };
         fix.write_receipt(&tuple, "sha", &hash);
 
-        let adopted = adopt_installed_profile(
-            &fix.minecraft_dir,
-            &fix.receipts_root,
-            &tuple,
-            "sha",
-        )
-        .expect("Fabric adoption should succeed");
+        let adopted =
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+                .expect("Fabric adoption should succeed");
 
         assert_eq!(adopted.profile_id, "fabric-loader-0.16.0-1.21");
         assert!(adopted.receipt.is_some());
@@ -2031,7 +2031,8 @@ mod tests {
 
         // Write a receipt so adoption succeeds.
         let hash = {
-            let profile_path = fix.minecraft_dir
+            let profile_path = fix
+                .minecraft_dir
                 .join("versions/quilt-loader-0.19.0-1.21/quilt-loader-0.19.0-1.21.json");
             let profile_bytes = std::fs::read(&profile_path).unwrap();
             let profile_value: serde_json::Value = serde_json::from_slice(&profile_bytes).unwrap();
@@ -2039,13 +2040,9 @@ mod tests {
         };
         fix.write_receipt(&tuple, "sha", &hash);
 
-        let adopted = adopt_installed_profile(
-            &fix.minecraft_dir,
-            &fix.receipts_root,
-            &tuple,
-            "sha",
-        )
-        .expect("should adopt");
+        let adopted =
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+                .expect("should adopt");
 
         assert_eq!(adopted.profile_id, "quilt-loader-0.19.0-1.21");
         assert!(adopted.receipt.is_some());
@@ -2061,9 +2058,8 @@ mod tests {
         let tuple = TempFixture::forge_tuple();
         fix.write_base("1.21");
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::MissingProfile);
         assert!(
@@ -2081,9 +2077,8 @@ mod tests {
         let tuple = TempFixture::forge_tuple();
         fix.write_profile("forge-1.21-47.1.0", &TempFixture::forge_profile_json());
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::MissingProfile);
     }
@@ -2105,9 +2100,8 @@ mod tests {
         let profile_path = profile_dir.join("forge-1.21-47.1.0.json");
         fs::write(&profile_path, "{\"id\": \"forge-1.21-47.1.0\", ").expect("write truncated");
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
         assert!(
@@ -2133,9 +2127,8 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         // The profile exists at the expected path but its internal ID doesn't match.
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
         assert!(
@@ -2158,9 +2151,8 @@ mod tests {
         profile["inheritsFrom"] = json!("1.20");
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
         assert!(
@@ -2183,9 +2175,8 @@ mod tests {
         profile["mainClass"] = json!("");
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
         assert!(
@@ -2206,9 +2197,8 @@ mod tests {
         profile["mainClass"] = json!("BadClassName");
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
     }
@@ -2229,9 +2219,8 @@ mod tests {
         profile["libraries"][0]["downloads"]["artifact"]["path"] = json!("../../../etc/passwd");
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
     }
@@ -2252,9 +2241,8 @@ mod tests {
             json!("http://evil.example.com/malicious.jar");
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
-        let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
-                .expect_err("should fail");
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
+            .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
     }
@@ -3022,7 +3010,9 @@ mod tests {
 
         // Write a receipt first since adoption now requires one for all loaders.
         let hash = {
-            let profile_path = fix.minecraft_dir.join("versions/neoforge-21.0.0/neoforge-21.0.0.json");
+            let profile_path = fix
+                .minecraft_dir
+                .join("versions/neoforge-21.0.0/neoforge-21.0.0.json");
             let profile_bytes = std::fs::read(&profile_path).unwrap();
             let profile_value: serde_json::Value = serde_json::from_slice(&profile_bytes).unwrap();
             crate::installed_profile::stable_profile_hash(&profile_value)
@@ -3176,4 +3166,3 @@ mod tests {
         assert_eq!(safe_filename("a:b"), "a-b");
     }
 }
-

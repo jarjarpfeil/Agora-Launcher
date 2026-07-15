@@ -1327,12 +1327,36 @@ pub async fn wait_and_classify(
                 .is_some_and(|modified| modified >= launched_at)
         });
     Ok(crate::lkg::classify_launch(&crate::lkg::LaunchEvents {
-        exit_code: output.status.code(),
+        exit_code: exit_code_for_classification(&output.status),
         runtime_ms: started.elapsed().as_millis() as u64,
         was_user_cancelled: false,
         crash_report_found,
         log_crash_signature_matched: crate::crash_diagnostics::triage(&sanitized).matched,
     }))
+}
+
+/// Convert an OS process status into the exit-code signal consumed by LKG
+/// classification.
+///
+/// On Unix, a process terminated by a signal has no conventional exit code:
+/// [`std::process::ExitStatus::code`] returns `None`. Such termination is a
+/// definite abnormal exit, not an unknown observation, so encode it as the
+/// conventional shell value `128 + signal`.
+pub fn exit_code_for_classification(status: &std::process::ExitStatus) -> Option<i32> {
+    if let Some(code) = status.code() {
+        return Some(code);
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        return status.signal().map(|signal| 128 + signal);
+    }
+
+    #[cfg(not(unix))]
+    {
+        None
+    }
 }
 
 struct TemplateContext<'a, 'b> {

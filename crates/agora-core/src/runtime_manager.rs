@@ -313,8 +313,7 @@ pub fn ensure_runtime(
 
     // 2. Check for a valid existing installation using the receipt's actual
     //    java_relative_path (which accounts for any top-level archive dir).
-    let existing_runtime_valid =
-        try_cache_hit(&rec_path, &entry, major, progress);
+    let existing_runtime_valid = try_cache_hit(&rec_path, &entry, major, progress);
 
     if let Some(inst) = existing_runtime_valid {
         return Ok(inst);
@@ -328,14 +327,7 @@ pub fn ensure_runtime(
     let ext = archive_ext(&entry);
     let cache_path = archive_cache_path(runtimes_root, &entry.sha256, ext);
 
-    match resolve_archive_cache(
-        &cache_path,
-        &entry,
-        &rec_path,
-        &entry_path,
-        major,
-        progress,
-    )? {
+    match resolve_archive_cache(&cache_path, &entry, &rec_path, &entry_path, major, progress)? {
         ArchiveCacheOutcome::CacheUsable => { /* proceed to extraction below */ }
         ArchiveCacheOutcome::RuntimeRecovered(inst) => return Ok(inst),
         ArchiveCacheOutcome::DownloadNeeded => { /* fall through to download */ }
@@ -466,10 +458,7 @@ pub fn ensure_runtime(
 
     // 7. Atomically promote staging to final using backup/restore.
     let final_java_path = entry_path.join(&actual_java_relative);
-    let backup = entry_path.with_extension(format!(
-        "backup-{}",
-        uuid::Uuid::new_v4()
-    ));
+    let backup = entry_path.with_extension(format!("backup-{}", uuid::Uuid::new_v4()));
     let had_existing = entry_path.exists();
 
     if had_existing {
@@ -495,10 +484,7 @@ pub fn ensure_runtime(
             let _ = std::fs::remove_dir_all(&staging);
             return Err(LauncherError::Generic {
                 code: "ERR_RUNTIME_PROMOTE".into(),
-                message: format!(
-                    "Failed to promote runtime {}: {error}",
-                    staging.display()
-                ),
+                message: format!("Failed to promote runtime {}: {error}", staging.display()),
             });
         }
     }
@@ -1092,7 +1078,9 @@ fn extract_tar_gz(
                 entry_type = header.entry_type();
                 if !matches!(
                     entry_type,
-                    tar::EntryType::Regular | tar::EntryType::Directory | tar::EntryType::Continuous
+                    tar::EntryType::Regular
+                        | tar::EntryType::Directory
+                        | tar::EntryType::Continuous
                 ) {
                     return Err(LauncherError::Generic {
                         code: "ERR_ARCHIVE_FORBIDDEN_ENTRY".into(),
@@ -1674,21 +1662,22 @@ pub fn validate_managed_runtime(
         return Err(LauncherError::JavaIncompatible);
     }
 
-    let canonical_root = runtime.root_dir.canonicalize().map_err(|e| {
-        runtime_corrupt(&format!("Cannot resolve runtime root: {e}"))
-    })?;
-    let canonical_java = runtime.java_path.canonicalize().map_err(|e| {
-        runtime_corrupt(&format!("Cannot resolve java path: {e}"))
-    })?;
+    let canonical_root = runtime
+        .root_dir
+        .canonicalize()
+        .map_err(|e| runtime_corrupt(&format!("Cannot resolve runtime root: {e}")))?;
+    let canonical_java = runtime
+        .java_path
+        .canonicalize()
+        .map_err(|e| runtime_corrupt(&format!("Cannot resolve java path: {e}")))?;
 
     if !canonical_java.starts_with(&canonical_root) {
         return Err(runtime_corrupt("Java executable escapes runtime root"));
     }
 
     if let Some(expected) = runtime.receipt.java_sha256.as_deref() {
-        let actual = sha256_hex_file(&canonical_java).map_err(|e| {
-            runtime_corrupt(&format!("Cannot hash java binary: {e}"))
-        })?;
+        let actual = sha256_hex_file(&canonical_java)
+            .map_err(|e| runtime_corrupt(&format!("Cannot hash java binary: {e}")))?;
         if actual != expected {
             return Err(LauncherError::HashMismatch);
         }
