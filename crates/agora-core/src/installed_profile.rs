@@ -1,16 +1,16 @@
-//! Pure-core installed-profile adoption and receipt layer.
+﻿//! Pure-core installed-profile adoption and receipt layer.
 //!
 //! Provides types and functions to read, validate, adopt, and issue receipts
 //! for installed modloader profiles under `minecraft_dir/versions/<id>/`.
 //!
-//! This is a **pure observation layer** — it does not install, modify, or
+//! This is a **pure observation layer** â€” it does not install, modify, or
 //! download anything. Every effect is scoped to receipt file I/O.
 //!
 //! # Security invariants
 //!
 //! - All file reads are bounded at 8 MiB.
 //! - Receipt paths are confined within `receipts_root` and deterministically
-//!   derived from the tuple — no caller-supplied path fragments.
+//!   derived from the tuple â€” no caller-supplied path fragments.
 //! - Profile JSON is validated structurally before being adopted.
 //! - Libraries without upstream SHA have their paths included in
 //!   `trusted_unhashed_library_paths` **only** when a valid receipt binds
@@ -26,7 +26,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// InstallReceiptSummary — result from the install service
+// InstallReceiptSummary â€” result from the install service
 // ---------------------------------------------------------------------------
 
 /// Summary returned by the install service after ensuring a loader is installed.
@@ -55,7 +55,7 @@ pub struct InstallReceiptSummary {
 const MAX_PROFILE_FILE_SIZE: u64 = 8 * 1024 * 1024;
 
 /// Schema version for [`InstalledProfileReceipt`].
-const RECEIPT_SCHEMA_VERSION: i64 = 2;
+pub const RECEIPT_SCHEMA_VERSION: i64 = 3;
 pub const RECEIPTS_DIR_NAME: &str = "receipts";
 
 /// Max size for a generated library file during receipt creation (64 MiB).
@@ -67,7 +67,7 @@ const SUGGEST_DELEGATED: &str = "use_delegated_launch";
 const SUGGEST_DISMISS: &str = "dismiss";
 
 // ---------------------------------------------------------------------------
-// LoaderTuple — identifies a loader installation uniquely
+// LoaderTuple â€” identifies a loader installation uniquely
 // ---------------------------------------------------------------------------
 
 /// A (loader, minecraft_version, loader_version) triple.
@@ -82,7 +82,7 @@ pub struct LoaderTuple {
 }
 
 impl LoaderTuple {
-    /// Validate tuple components — no empty strings, no traversal chars.
+    /// Validate tuple components â€” no empty strings, no traversal chars.
     pub fn validate(&self) -> Result<(), String> {
         for (field, name) in [
             (&self.loader, "loader"),
@@ -110,7 +110,7 @@ impl LoaderTuple {
 }
 
 // ---------------------------------------------------------------------------
-// derive_profile_id — matches existing desktop behaviour
+// derive_profile_id â€” matches existing desktop behaviour
 // ---------------------------------------------------------------------------
 
 /// Derive the Mojang launcher profile ID from a validated tuple.
@@ -126,7 +126,7 @@ impl LoaderTuple {
 /// Panics if tuple components have not been validated (contains separators,
 /// empty strings, etc.). Always call [`LoaderTuple::validate`] first.
 pub fn derive_profile_id(tuple: &LoaderTuple) -> String {
-    // These could only fail if validate() wasn't called — panic so the bug is
+    // These could only fail if validate() wasn't called â€” panic so the bug is
     // caught in testing rather than silently producing a wrong ID.
     assert!(!tuple.loader.is_empty(), "loader must not be empty");
     assert!(
@@ -154,21 +154,51 @@ pub fn derive_profile_id(tuple: &LoaderTuple) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// InstalledProfileReceipt — schema v1
+// LoaderSourceKind â€” identifies how the loader was originally installed
+// ---------------------------------------------------------------------------
+
+/// How the loader profile was originally installed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoaderSourceKind {
+    /// Installed from a pinned profile JSON (Fabric, Quilt).
+    ProfileJson,
+    /// Installed via the official installer JAR (Forge, NeoForge).
+    InstallerJar,
+}
+
+// ---------------------------------------------------------------------------
+// InstalledProfileReceipt â€” schema v3
 // ---------------------------------------------------------------------------
 
 /// A signed receipt linking an installed loader profile to a specific curated
-/// installer. Written atomically into `receipts_root`.
+/// source artifact. Written atomically into `receipts_root`.
+///
+/// # Schema versions
+///
+/// | Version | Notes |
+/// |---------|-------|
+/// | 1       | Original Forge/NeoForge-only receipt with `source_sha256` |
+/// | 2       | Added `generated_artifact_sha256` map |
+/// | 3       | Replaced `source_sha256`/`installer_url` with `source_sha256`/`source_url`; added `source_kind`, `curated_artifact_sha256`; made `generated_artifact_sha256` non-optional |
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledProfileReceipt {
-    /// Schema version (currently 1).
+    /// Schema version (currently 3).
     pub schema_version: i64,
     /// The loader tuple that produced this profile.
     pub tuple: LoaderTuple,
-    /// SHA-256 of the curated installer ZIP (hex).
-    pub installer_sha256: String,
-    /// Download URL of the curated installer.
-    pub installer_url: String,
+    /// How this loader was installed. Defaults to InstallerJar for backward
+    /// compatibility with v1/v2 receipts that predate this field.
+    #[serde(default = "default_source_kind")]
+    pub source_kind: LoaderSourceKind,
+    /// SHA-256 of the curated source artifact (profile JSON or installer JAR).
+    /// Reads legacy installer_sha256 field from v1/v2 receipts.
+    #[serde(alias = "installer_sha256")]
+    pub source_sha256: String,
+    /// Download URL of the curated source artifact.
+    /// Reads legacy installer_url field from v1/v2 receipts.
+    #[serde(alias = "installer_url")]
+    pub source_url: String,
     /// The derived profile ID (`versions/<id>/<id>.json`).
     pub profile_id: String,
     /// Must equal `"versions/<profile_id>/<profile_id>.json"`.
@@ -182,24 +212,20 @@ pub struct InstalledProfileReceipt {
     pub installed_at: String,
     /// Exit code of the installer process, or 0 if unknown/success.
     pub installer_exit_status: i32,
-    /// Map of relative Maven paths to SHA-256 hex digests for generated
-    /// artifacts that have no upstream hash. Populated by the install service
-    /// (Stage 4) when an installer processor completes.
-    ///
-    /// Schema-v1 receipts (where this field is `None`) cannot verify generated
-    /// artifacts. When this is `None` and an unhashed generated library is
-    /// encountered, the caller should return
-    /// [`ProfileIssueKind::UnsupportedProfileMetadata`] and trigger a reinstall.
-    ///
-    /// # Backward compatibility
-    /// This field defaults to `None` so that existing schema-v1 receipts
-    /// continue to deserialize.
+    /// Map of relative Maven paths to SHA-256 hex digests for processor-
+    /// created artifacts (Forge/NeoForge). Populated by the install service
+    /// when an installer processor completes. Empty for Fabric/Quilt.
     #[serde(default)]
-    pub generated_artifact_sha256: Option<BTreeMap<String, String>>,
+    pub generated_artifact_sha256: BTreeMap<String, String>,
+    /// Map of relative Maven paths to SHA-256 hex digests for loader library
+    /// pins supplied by Agora's curated manifest. Pre-populated from the
+    /// loader manifest entries for `library_pins`.
+    #[serde(default)]
+    pub curated_artifact_sha256: BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
-// AdoptedProfile — result of a successful adoption
+// AdoptedProfile â€” result of a successful adoption
 // ---------------------------------------------------------------------------
 
 /// A fully validated, adopted installed profile ready for the launch planner.
@@ -239,7 +265,7 @@ pub struct AdoptedProfile {
 }
 
 // ---------------------------------------------------------------------------
-// ProfileIssue — structured error for profile adoption problems
+// ProfileIssue â€” structured error for profile adoption problems
 // ---------------------------------------------------------------------------
 
 /// The kind of profile issue encountered during adoption.
@@ -572,7 +598,7 @@ fn validate_libraries(
             ));
         }
 
-        // Artifact paths (if present) must be safe relative paths — always check,
+        // Artifact paths (if present) must be safe relative paths â€” always check,
         // regardless of whether the name parses as a valid Maven coordinate.
         if let Some(ref downloads) = lib.downloads {
             if let Some(ref artifact) = downloads.artifact {
@@ -681,7 +707,7 @@ fn validate_library_url(
 }
 
 /// Validate a library rule: action must be present, OS/features must be
-/// structurally well-formed. Unknown action values → UnsupportedProfileMetadata.
+/// structurally well-formed. Unknown action values â†’ UnsupportedProfileMetadata.
 fn validate_rule(
     rule: &crate::launch::LibraryRule,
     profile_path: &Path,
@@ -841,8 +867,12 @@ pub fn read_receipt(
         ProfileIssue::corrupt(Some(rpath.clone()), format!("Malformed receipt JSON: {e}"))
     })?;
 
-    // Validate schema version — accept v1 (original) and v2 (with generated hashes).
-    if receipt.schema_version != RECEIPT_SCHEMA_VERSION && receipt.schema_version != 1 {
+    // Validate schema version â€” accept v1 (original), v2 (with generated hash map),
+    // and v3 (with source_kind, curated pins).
+    if receipt.schema_version != RECEIPT_SCHEMA_VERSION
+        && receipt.schema_version != 1
+        && receipt.schema_version != 2
+    {
         return Err(ProfileIssue::corrupt(
             Some(rpath.clone()),
             format!(
@@ -942,23 +972,23 @@ pub fn remove_receipt(receipts_root: &Path, tuple: &LoaderTuple) -> Result<(), P
 /// Validate a receipt against caller-provided expectations.
 ///
 /// Checks:
-/// - `curated_installer_sha` matches receipt's `installer_sha256`.
+/// - `expected_source_sha256` matches receipt's `source_sha256`.
 /// - `expected_profile_id` matches receipt's `profile_id`.
 /// - `expected_relative_path` matches receipt's `profile_relative_path`.
 /// - `current_stable_hash` matches receipt's `profile_stable_hash`.
 pub fn validate_receipt_binding(
     receipt: &InstalledProfileReceipt,
-    curated_installer_sha: &str,
+    expected_source_sha256: &str,
     expected_profile_id: &str,
     expected_relative_path: &str,
     current_stable_hash: &str,
 ) -> Result<(), Vec<String>> {
     let mut reasons = Vec::new();
 
-    if receipt.installer_sha256 != curated_installer_sha {
+    if receipt.source_sha256 != expected_source_sha256 {
         reasons.push(format!(
-            "Installer SHA mismatch: expected '{curated_installer_sha}', got '{}'",
-            receipt.installer_sha256
+            "Source SHA mismatch: expected '{expected_source_sha256}', got '{}'",
+            receipt.source_sha256
         ));
     }
 
@@ -991,7 +1021,7 @@ pub fn validate_receipt_binding(
 }
 
 // ---------------------------------------------------------------------------
-// adopt_installed_profile — main entry point
+// adopt_installed_profile â€” main entry point
 // ---------------------------------------------------------------------------
 
 /// Adopt an installed modloader profile from the Mojang launcher's version
@@ -1031,7 +1061,7 @@ pub fn adopt_installed_profile(
     minecraft_dir: &Path,
     receipts_root: &Path,
     tuple: &LoaderTuple,
-    curated_installer_sha: Option<&str>,
+    expected_source_sha256: &str,
 ) -> Result<AdoptedProfile, ProfileIssue> {
     // 1. Validate tuple.
     tuple
@@ -1091,13 +1121,12 @@ pub fn adopt_installed_profile(
     let validated_receipt: Option<InstalledProfileReceipt>;
     let trusted_unhashed_paths: BTreeSet<String>;
 
-    match (curated_installer_sha, receipt.as_ref()) {
-        // Forge/NeoForge: installer SHA provided, need receipt.
-        (Some(installer_sha), Some(rcpt)) => {
+    match receipt.as_ref() {
+        Some(rcpt) => {
             let expected_relative = format!("versions/{profile_id}/{profile_id}.json");
             match validate_receipt_binding(
                 rcpt,
-                installer_sha,
+                expected_source_sha256,
                 &profile_id,
                 &expected_relative,
                 &profile_stable_hash,
@@ -1106,40 +1135,18 @@ pub fn adopt_installed_profile(
                     validated_receipt = receipt.clone();
                     // Trust unhashed libraries from this validated receipt.
                     // Only paths present in the receipt's generated_artifact_sha256
-                    // map (if populated) are trusted for generated artifacts.
+                    // or curated_artifact_sha256 map are trusted.
                     let unhashed = collect_unhashed_library_paths(&loader_version.libraries);
-                    match &rcpt.generated_artifact_sha256 {
-                        Some(gen_map) => {
-                            // Schema v2+: trust only paths with an explicit hash entry.
-                            trusted_unhashed_paths = unhashed
-                                .into_iter()
-                                .filter(|path| gen_map.contains_key(path.as_str()))
-                                .collect();
-                        }
-                        None => {
-                            if !unhashed.is_empty() {
-                                // Schema-v1 receipt without generated artifact hashes.
-                                // Cannot verify unhashed generated artifacts.
-                                return Err(ProfileIssue::unsupported(
-                                    Some(profile_path),
-                                    vec![
-                                        "Receipt schema does not contain generated artifact \
-                                         SHA-256 hashes. Use reinstall_loader to populate \
-                                         hashes."
-                                            .to_string(),
-                                        format!(
-                                            "Unverifiable unhashed paths: {}",
-                                            unhashed.join(", ")
-                                        ),
-                                    ],
-                                ));
-                            }
-                            trusted_unhashed_paths = BTreeSet::new();
-                        }
-                    }
+                    trusted_unhashed_paths = unhashed
+                        .into_iter()
+                        .filter(|path| {
+                            rcpt.generated_artifact_sha256.contains_key(path.as_str())
+                                || rcpt.curated_artifact_sha256.contains_key(path.as_str())
+                        })
+                        .collect();
                 }
                 Err(reasons) => {
-                    // Receipt exists but doesn't match → unsupported, not corrupt.
+                    // Receipt exists but doesn't match â†’ unsupported.
                     return Err(ProfileIssue::unsupported(
                         Some(profile_path),
                         reasons
@@ -1150,10 +1157,8 @@ pub fn adopt_installed_profile(
                 }
             }
         }
-        // Forge/NeoForge: installer SHA provided, no receipt on disk.
-        (Some(_installer_sha), None) => {
-            validated_receipt = None;
-            // Check if there are any libraries without upstream hashes.
+        None => {
+            // No receipt found â€” all loaders require one for Agora-managed installs.
             let unhashed = collect_unhashed_library_paths(&loader_version.libraries);
             if !unhashed.is_empty() {
                 return Err(ProfileIssue::unsupported(
@@ -1161,30 +1166,17 @@ pub fn adopt_installed_profile(
                     vec![
                         "No receipt found for this loader profile".to_string(),
                         format!(
-                            "The following libraries lack upstream hashes and cannot be verified \
+                            "The following libraries cannot be verified \
                              without a valid receipt: {}",
                             unhashed.join(", ")
                         ),
                     ],
                 ));
             }
-            trusted_unhashed_paths = BTreeSet::new();
-        }
-        // Fabric/Quilt: no installer SHA, no receipt trust needed.
-        (None, _) => {
-            validated_receipt = None;
-            // For Fabric/Quilt, all libraries must have upstream hashes.
-            let unhashed = collect_unhashed_library_paths(&loader_version.libraries);
-            if !unhashed.is_empty() {
-                return Err(ProfileIssue::unsupported(
-                    Some(profile_path),
-                    vec![format!(
-                        "Fabric/Quilt profile has libraries without upstream hashes: {}",
-                        unhashed.join(", ")
-                    )],
-                ));
-            }
-            trusted_unhashed_paths = BTreeSet::new();
+            return Err(ProfileIssue::unsupported(
+                Some(profile_path),
+                vec!["No receipt found for this loader profile".to_string()],
+            ));
         }
     }
 
@@ -1206,7 +1198,7 @@ pub fn adopt_installed_profile(
 }
 
 // ---------------------------------------------------------------------------
-// Error conversion: ProfileIssue → LauncherError
+// Error conversion: ProfileIssue â†’ LauncherError
 // ---------------------------------------------------------------------------
 
 impl From<ProfileIssue> for LauncherError {
@@ -1222,7 +1214,7 @@ impl From<ProfileIssue> for LauncherError {
 }
 
 // ---------------------------------------------------------------------------
-// create_receipt_for_installed_profile — generates a receipt for a profile
+// create_receipt_for_installed_profile â€” generates a receipt for a profile
 // that was just installed by an external installer (Forge/NeoForge).
 // ---------------------------------------------------------------------------
 
@@ -1253,24 +1245,24 @@ impl From<ProfileIssue> for LauncherError {
 ///
 /// # Arguments
 ///
-/// * `minecraft_dir` — The root `.minecraft` directory.
-/// * `receipts_root` — Directory where receipts are stored.
-/// * `tuple` — Identifies the loader, Minecraft version, and loader version.
-/// * `installer_sha256` — SHA-256 hex digest of the curated installer ZIP.
-/// * `installer_url` — Download URL of the curated installer.
-/// * `exit_status` — Exit code of the installer process. Must be 0.
+/// * `minecraft_dir` â€” The root `.minecraft` directory.
+/// * `receipts_root` â€” Directory where receipts are stored.
+/// * `tuple` â€” Identifies the loader, Minecraft version, and loader version.
+/// * `source_sha256` â€” SHA-256 hex digest of the curated installer ZIP.
+/// * `installer_url` â€” Download URL of the curated installer.
+/// * `exit_status` â€” Exit code of the installer process. Must be 0.
 ///
 /// # Returns
 ///
-/// * `Ok(InstalledProfileReceipt)` — Receipt written successfully.
-/// * `Err(ProfileIssue)` — If the profile cannot be validated (includes
+/// * `Ok(InstalledProfileReceipt)` â€” Receipt written successfully.
+/// * `Err(ProfileIssue)` â€” If the profile cannot be validated (includes
 ///   non-zero exit status, corrupt or missing profile, TOCTOU detection).
 pub fn create_receipt_for_installed_profile(
     minecraft_dir: &Path,
     receipts_root: &Path,
     tuple: &LoaderTuple,
-    installer_sha256: &str,
-    installer_url: &str,
+    source_sha256: &str,
+    source_url: &str,
     exit_status: i32,
 ) -> Result<InstalledProfileReceipt, ProfileIssue> {
     // 0. Reject non-zero exit status before any hashing or I/O.
@@ -1449,29 +1441,30 @@ pub fn create_receipt_for_installed_profile(
         ));
     }
 
-    // 8. Build receipt with schema version 2 (includes generated artifact hashes).
+    // 8. Build receipt with schema version 3 (includes source_kind and curated pins).
     let profile_relative_path = format!("versions/{profile_id}/{profile_id}.json");
     let receipt = InstalledProfileReceipt {
-        schema_version: RECEIPT_SCHEMA_VERSION, // 2
+        schema_version: RECEIPT_SCHEMA_VERSION, // 3
         tuple: tuple.clone(),
-        installer_sha256: installer_sha256.to_string(),
-        installer_url: installer_url.to_string(),
+        source_kind: LoaderSourceKind::InstallerJar,
+        source_sha256: source_sha256.to_string(),
+        source_url: source_url.to_string(),
         profile_id: profile_id.clone(),
         profile_relative_path: profile_relative_path.clone(),
         profile_stable_hash: profile_stable_hash.clone(),
         base_version_id: tuple.minecraft_version.clone(),
         installed_at: chrono::Utc::now().to_rfc3339(),
         installer_exit_status: exit_status,
-        generated_artifact_sha256: Some(generated_artifact_sha256),
+        generated_artifact_sha256,
+            curated_artifact_sha256: BTreeMap::new(),
     };
 
     // 9. Write receipt atomically.
     write_receipt_atomic(receipts_root, tuple, &receipt)?;
 
-    // 10. Prove binding by calling normal adoption with the same parameters.
-    // This verifies the receipt we just wrote is valid.
+    // 10. Prove binding by calling normal adoption with the same source SHA.
     let _adopted =
-        adopt_installed_profile(minecraft_dir, receipts_root, tuple, Some(installer_sha256))
+        adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
             .map_err(|issue| {
                 // If adoption fails despite successful write, try to clean up the
                 // receipt to avoid orphaned metadata.
@@ -1490,6 +1483,93 @@ pub fn create_receipt_for_installed_profile(
 pub fn file_sha256_hex(path: &Path, max_bytes: u64) -> Result<String, ProfileIssue> {
     let data = read_bounded_file(path, max_bytes)?;
     Ok(crate::download::sha256_hex(&data))
+}
+
+// ---------------------------------------------------------------------------
+// create_receipt_for_profile_json â€” receipt for Fabric/Quilt-style installs
+// ---------------------------------------------------------------------------
+
+/// Create and write a receipt for a loader installed from a pinned profile JSON
+/// (Fabric or Quilt). Unlike the Forge installer, there is no process exit
+/// status or generated artifact enumeration â€” the profile is simply validated
+/// and its stable hash recorded.
+///
+/// Arguments:
+/// * `minecraft_dir` â€” The root minecraft directory (contains `versions/`).
+/// * `receipts_root` â€” Directory where receipts are stored.
+/// * `tuple` â€” Identifies the loader, Minecraft version, and loader version.
+/// * `source_sha256` â€” SHA-256 hex of the pinned profile JSON source.
+/// * `source_url` â€” Download URL of the pinned profile JSON.
+/// * `curated_artifact_sha256` â€” Map of relative Maven paths to SHA-256 hex
+///   for loader library pins from Agora's curated manifest.
+pub fn create_receipt_for_profile_json(
+    minecraft_dir: &Path,
+    receipts_root: &Path,
+    tuple: &LoaderTuple,
+    source_sha256: &str,
+    source_url: &str,
+    curated_artifact_sha256: BTreeMap<String, String>,
+) -> Result<InstalledProfileReceipt, ProfileIssue> {
+    // 1. Validate tuple.
+    tuple
+        .validate()
+        .map_err(|e| ProfileIssue::corrupt(None, e))?;
+
+    let profile_id = derive_profile_id(tuple);
+
+    // 2. Derive paths.
+    let profile_path = minecraft_dir
+        .join("versions")
+        .join(&profile_id)
+        .join(format!("{profile_id}.json"));
+
+    // 3. Bound-read and parse profile JSON.
+    let profile_value = bounded_parse_profile_json(&profile_path)?;
+    let profile_stable_hash = stable_profile_hash(&profile_value);
+
+    let _loader_version: VersionInfo =
+        serde_json::from_value(profile_value.clone()).map_err(|e| {
+            ProfileIssue::corrupt(
+                Some(profile_path.clone()),
+                format!("Profile JSON is not valid VersionInfo: {e}"),
+            )
+        })?;
+
+    // 4. Build receipt with schema version 3.
+    let profile_relative_path = format!("versions/{profile_id}/{profile_id}.json");
+    let receipt = InstalledProfileReceipt {
+        schema_version: RECEIPT_SCHEMA_VERSION, // 3
+        tuple: tuple.clone(),
+        source_kind: LoaderSourceKind::ProfileJson,
+        source_sha256: source_sha256.to_string(),
+        source_url: source_url.to_string(),
+        profile_id: profile_id.clone(),
+        profile_relative_path: profile_relative_path.clone(),
+        profile_stable_hash: profile_stable_hash.clone(),
+        base_version_id: tuple.minecraft_version.clone(),
+        installed_at: chrono::Utc::now().to_rfc3339(),
+        installer_exit_status: 0,
+        generated_artifact_sha256: BTreeMap::new(),
+        curated_artifact_sha256,
+    };
+
+    // 5. Write receipt atomically.
+    write_receipt_atomic(receipts_root, tuple, &receipt)?;
+
+    // 6. Prove binding by calling normal adoption with the same source SHA.
+    let _adopted =
+        adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
+            .map_err(|issue| {
+                let _ = remove_receipt(receipts_root, tuple);
+                issue
+            })?;
+
+    Ok(receipt)
+}
+
+/// Default source kind for backward-compatible deserialization of v1/v2 receipts.
+fn default_source_kind() -> LoaderSourceKind {
+    LoaderSourceKind::InstallerJar
 }
 
 // ---------------------------------------------------------------------------
@@ -1568,7 +1648,7 @@ mod tests {
             installer_sha: &str,
             profile_stable_hash: &str,
         ) -> InstalledProfileReceipt {
-            self.write_receipt_with_generated(tuple, installer_sha, profile_stable_hash, None)
+            self.write_receipt_with_generated(tuple, installer_sha, profile_stable_hash, BTreeMap::new())
         }
 
         /// Write a receipt with an optional `generated_artifact_sha256` map.
@@ -1577,25 +1657,23 @@ mod tests {
             tuple: &LoaderTuple,
             installer_sha: &str,
             profile_stable_hash: &str,
-            generated_artifact_sha256: Option<BTreeMap<String, String>>,
+            generated: BTreeMap<String, String>,
         ) -> InstalledProfileReceipt {
             let profile_id = derive_profile_id(tuple);
             let receipt = InstalledProfileReceipt {
-                schema_version: if generated_artifact_sha256.is_some() {
-                    2
-                } else {
-                    RECEIPT_SCHEMA_VERSION
-                },
+                schema_version: RECEIPT_SCHEMA_VERSION,
                 tuple: tuple.clone(),
-                installer_sha256: installer_sha.to_string(),
-                installer_url: "https://maven.minecraftforge.net/forge.jar".to_string(),
+                source_kind: LoaderSourceKind::InstallerJar,
+                source_sha256: installer_sha.to_string(),
+                source_url: "https://maven.minecraftforge.net/forge.jar".to_string(),
                 profile_id: profile_id.clone(),
                 profile_relative_path: format!("versions/{profile_id}/{profile_id}.json"),
                 profile_stable_hash: profile_stable_hash.to_string(),
                 base_version_id: tuple.minecraft_version.clone(),
                 installed_at: "2026-01-01T00:00:00Z".to_string(),
                 installer_exit_status: 0,
-                generated_artifact_sha256,
+                generated_artifact_sha256: generated,
+                curated_artifact_sha256: BTreeMap::new(),
             };
             write_receipt_atomic(&self.receipts_root, tuple, &receipt).expect("write receipt");
             receipt
@@ -1853,13 +1931,13 @@ mod tests {
         );
 
         // Write a valid receipt with generated artifact hashes (schema v2).
-        fix.write_receipt_with_generated(&tuple, "curated_sha_abc", &hash, Some(generated));
+        fix.write_receipt_with_generated(&tuple, "curated_sha_abc", &hash, generated);
 
         let adopted = adopt_installed_profile(
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("curated_sha_abc"),
+            "curated_sha_abc",
         )
         .expect("adoption should succeed");
 
@@ -1894,7 +1972,7 @@ mod tests {
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("neoforge_sha_xyz"),
+            "neoforge_sha_xyz",
         )
         .expect("adoption should succeed");
 
@@ -1917,16 +1995,26 @@ mod tests {
             &TempFixture::fabric_profile_json(),
         );
 
+        // Write a receipt so adoption succeeds.
+        let hash = {
+            let profile_path = fix.minecraft_dir
+                .join("versions/fabric-loader-0.16.0-1.21/fabric-loader-0.16.0-1.21.json");
+            let profile_bytes = std::fs::read(&profile_path).unwrap();
+            let profile_value: serde_json::Value = serde_json::from_slice(&profile_bytes).unwrap();
+            crate::installed_profile::stable_profile_hash(&profile_value)
+        };
+        fix.write_receipt(&tuple, "sha", &hash);
+
         let adopted = adopt_installed_profile(
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            None, // Fabric has no installer
+            "sha",
         )
         .expect("Fabric adoption should succeed");
 
         assert_eq!(adopted.profile_id, "fabric-loader-0.16.0-1.21");
-        assert!(adopted.receipt.is_none());
+        assert!(adopted.receipt.is_some());
         assert!(adopted.trusted_unhashed_library_paths.is_empty());
     }
 
@@ -1941,11 +2029,26 @@ mod tests {
             &TempFixture::quilt_profile_json(),
         );
 
-        let adopted = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, None)
-            .expect("Quilt adoption should succeed");
+        // Write a receipt so adoption succeeds.
+        let hash = {
+            let profile_path = fix.minecraft_dir
+                .join("versions/quilt-loader-0.19.0-1.21/quilt-loader-0.19.0-1.21.json");
+            let profile_bytes = std::fs::read(&profile_path).unwrap();
+            let profile_value: serde_json::Value = serde_json::from_slice(&profile_bytes).unwrap();
+            crate::installed_profile::stable_profile_hash(&profile_value)
+        };
+        fix.write_receipt(&tuple, "sha", &hash);
+
+        let adopted = adopt_installed_profile(
+            &fix.minecraft_dir,
+            &fix.receipts_root,
+            &tuple,
+            "sha",
+        )
+        .expect("should adopt");
 
         assert_eq!(adopted.profile_id, "quilt-loader-0.19.0-1.21");
-        assert!(adopted.receipt.is_none());
+        assert!(adopted.receipt.is_some());
     }
 
     // -----------------------------------------------------------------------
@@ -1959,7 +2062,7 @@ mod tests {
         fix.write_base("1.21");
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::MissingProfile);
@@ -1979,7 +2082,7 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &TempFixture::forge_profile_json());
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::MissingProfile);
@@ -2003,7 +2106,7 @@ mod tests {
         fs::write(&profile_path, "{\"id\": \"forge-1.21-47.1.0\", ").expect("write truncated");
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
@@ -2026,12 +2129,12 @@ mod tests {
         fix.write_base("1.21");
 
         let mut profile = TempFixture::forge_profile_json();
-        profile["id"] = json!("forge-1.21-47.2.0"); // Wrong version — write at *expected* path
+        profile["id"] = json!("forge-1.21-47.2.0"); // Wrong version â€” write at *expected* path
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         // The profile exists at the expected path but its internal ID doesn't match.
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
@@ -2056,7 +2159,7 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
@@ -2081,7 +2184,7 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
@@ -2104,7 +2207,7 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
@@ -2127,7 +2230,7 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
@@ -2150,14 +2253,14 @@ mod tests {
         fix.write_profile("forge-1.21-47.1.0", &profile);
 
         let err =
-            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, Some("sha"))
+            adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
                 .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::CorruptProfile);
     }
 
     // -----------------------------------------------------------------------
-    // Unknown rule action → UnsupportedProfileMetadata
+    // Unknown rule action â†’ UnsupportedProfileMetadata
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2173,14 +2276,14 @@ mod tests {
         ]);
         fix.write_profile("fabric-loader-0.16.0-1.21", &profile);
 
-        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, None)
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
             .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::UnsupportedProfileMetadata);
     }
 
     // -----------------------------------------------------------------------
-    // No-hash generated lib without receipt → UnsupportedProfileMetadata
+    // No-hash generated lib without receipt â†’ UnsupportedProfileMetadata
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2196,7 +2299,7 @@ mod tests {
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("curated_sha_abc"),
+            "curated_sha_abc",
         )
         .expect_err("should fail");
 
@@ -2209,7 +2312,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Receipt hash/installer drift → UnsupportedProfileMetadata
+    // Receipt hash/installer drift â†’ UnsupportedProfileMetadata
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2230,7 +2333,7 @@ mod tests {
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("curated_sha_abc"),
+            "curated_sha_abc",
         )
         .expect_err("should fail");
 
@@ -2252,7 +2355,7 @@ mod tests {
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("curated_sha_abc"),
+            "curated_sha_abc",
         )
         .expect_err("should fail");
 
@@ -2260,7 +2363,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Schema-v1 receipt with unhashed library → UnsupportedProfileMetadata
+    // Schema-v1 receipt with unhashed library â†’ UnsupportedProfileMetadata
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2279,32 +2382,32 @@ mod tests {
         let v1_receipt = InstalledProfileReceipt {
             schema_version: 1,
             tuple: tuple.clone(),
-            installer_sha256: "curated_sha_abc".to_string(),
-            installer_url: "https://maven.minecraftforge.net/forge.jar".to_string(),
+            source_kind: LoaderSourceKind::InstallerJar,
+            source_sha256: "curated_sha_abc".to_string(),
+            source_url: "https://maven.minecraftforge.net/forge.jar".to_string(),
             profile_id: profile_id.clone(),
             profile_relative_path: format!("versions/{profile_id}/{profile_id}.json"),
             profile_stable_hash: hash,
             base_version_id: tuple.minecraft_version.clone(),
             installed_at: "2026-01-01T00:00:00Z".to_string(),
             installer_exit_status: 0,
-            generated_artifact_sha256: None,
+            generated_artifact_sha256: BTreeMap::new(),
+            curated_artifact_sha256: BTreeMap::new(),
         };
         write_receipt_atomic(&fix.receipts_root, &tuple, &v1_receipt).expect("write v1 receipt");
 
-        let err = adopt_installed_profile(
+        // Schema v1 receipts are accepted, but unhashed libraries are not
+        // trusted because the hashes aren't in generated_artifact_sha256 or
+        // curated_artifact_sha256.
+        let adopted = adopt_installed_profile(
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("curated_sha_abc"),
+            "curated_sha_abc",
         )
-        .expect_err("should fail with unsupported");
+        .expect("adoption should succeed (unhashed libs simply not trusted)");
 
-        assert_eq!(err.kind, ProfileIssueKind::UnsupportedProfileMetadata);
-        assert!(
-            err.reasons.iter().any(|r| r.contains("generated artifact")),
-            "reason should mention generated artifact hashes, got: {:?}",
-            err.reasons
-        );
+        assert!(adopted.trusted_unhashed_library_paths.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -2330,13 +2433,13 @@ mod tests {
         );
 
         // Write a valid receipt with generated artifact hashes.
-        fix.write_receipt_with_generated(&tuple, "curated_sha_abc", &hash, Some(generated));
+        fix.write_receipt_with_generated(&tuple, "curated_sha_abc", &hash, generated);
 
         let adopted = adopt_installed_profile(
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("curated_sha_abc"),
+            "curated_sha_abc",
         )
         .expect("adoption should succeed with valid receipt");
 
@@ -2387,15 +2490,17 @@ mod tests {
         let bad_receipt = InstalledProfileReceipt {
             schema_version: RECEIPT_SCHEMA_VERSION,
             tuple: tuple.clone(),
-            installer_sha256: "sha".into(),
-            installer_url: "https://example.com".into(),
+            source_kind: LoaderSourceKind::InstallerJar,
+            source_sha256: "sha".into(),
+            source_url: "https://example.com".into(),
             profile_id: derive_profile_id(&tuple),
             profile_relative_path: "../../../etc/passwd".into(),
             profile_stable_hash: "hash".into(),
             base_version_id: tuple.minecraft_version.clone(),
             installed_at: "2026-01-01T00:00:00Z".into(),
             installer_exit_status: 0,
-            generated_artifact_sha256: None,
+            generated_artifact_sha256: BTreeMap::new(),
+            curated_artifact_sha256: BTreeMap::new(),
         };
         let json = serde_json::to_string_pretty(&bad_receipt).unwrap();
         fs::write(&rpath, &json).expect("write bad receipt");
@@ -2425,15 +2530,17 @@ mod tests {
         let receipt = InstalledProfileReceipt {
             schema_version: RECEIPT_SCHEMA_VERSION,
             tuple: tuple.clone(),
-            installer_sha256: "sha".into(),
-            installer_url: "https://example.com".into(),
+            source_kind: LoaderSourceKind::InstallerJar,
+            source_sha256: "sha".into(),
+            source_url: "https://example.com".into(),
             profile_id: pid.clone(),
             profile_relative_path: format!("versions/{pid}/{pid}.json"),
             profile_stable_hash: "hash".into(),
             base_version_id: tuple.minecraft_version.clone(),
             installed_at: "2026-01-01T00:00:00Z".into(),
             installer_exit_status: 0,
-            generated_artifact_sha256: None,
+            generated_artifact_sha256: BTreeMap::new(),
+            curated_artifact_sha256: BTreeMap::new(),
         };
 
         write_receipt_atomic(&fix.receipts_root, &tuple, &receipt)
@@ -2451,7 +2558,7 @@ mod tests {
         let read_back = read_receipt(&fix.receipts_root, &tuple)
             .expect("read receipt")
             .expect("receipt should exist");
-        assert_eq!(read_back.installer_sha256, "sha");
+        assert_eq!(read_back.source_sha256, "sha");
     }
 
     #[test]
@@ -2503,7 +2610,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // ProfileIssue → LauncherError conversion
+    // ProfileIssue â†’ LauncherError conversion
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2548,15 +2655,17 @@ mod tests {
         let bad_receipt = InstalledProfileReceipt {
             schema_version: 999, // Unknown version
             tuple: tuple.clone(),
-            installer_sha256: "sha".into(),
-            installer_url: "https://example.com".into(),
+            source_kind: LoaderSourceKind::InstallerJar,
+            source_sha256: "sha".into(),
+            source_url: "https://example.com".into(),
             profile_id: pid2.clone(),
             profile_relative_path: format!("versions/{pid2}/{pid2}.json"),
             profile_stable_hash: "hash".into(),
             base_version_id: tuple.minecraft_version.clone(),
             installed_at: "2026-01-01T00:00:00Z".into(),
             installer_exit_status: 0,
-            generated_artifact_sha256: None,
+            generated_artifact_sha256: BTreeMap::new(),
+            curated_artifact_sha256: BTreeMap::new(),
         };
         let json = serde_json::to_string_pretty(&bad_receipt).unwrap();
         fs::write(&rpath, &json).expect("write bad receipt");
@@ -2569,7 +2678,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Fabric/Quilt with no-hash library without installer → unsupported
+    // Fabric/Quilt with no-hash library without installer â†’ unsupported
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2589,7 +2698,7 @@ mod tests {
             .remove("sha1");
         fix.write_profile("fabric-loader-0.16.0-1.21", &profile);
 
-        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, None)
+        let err = adopt_installed_profile(&fix.minecraft_dir, &fix.receipts_root, &tuple, "sha")
             .expect_err("should fail");
 
         assert_eq!(err.kind, ProfileIssueKind::UnsupportedProfileMetadata);
@@ -2627,10 +2736,10 @@ mod tests {
         .expect("create_receipt should succeed");
 
         assert_eq!(receipt.schema_version, RECEIPT_SCHEMA_VERSION);
-        assert_eq!(receipt.installer_sha256, installer_sha);
+        assert_eq!(receipt.source_sha256, installer_sha);
         assert_eq!(receipt.tuple.loader, "forge");
-        assert!(receipt.generated_artifact_sha256.is_some());
-        let generated = receipt.generated_artifact_sha256.as_ref().unwrap();
+        assert!(!receipt.generated_artifact_sha256.is_empty());
+        let generated = receipt.generated_artifact_sha256;
         // The unhashed library should have a SHA-256 entry.
         assert!(generated.contains_key("net/minecraft/legacy/1.0/legacy-1.0.jar"));
         // The hash should be the SHA-256 of "generated library content".
@@ -2676,7 +2785,7 @@ mod tests {
 
         fix.write_base("1.21");
         fix.write_profile("forge-1.21-47.1.0", &TempFixture::forge_profile_json());
-        // Do NOT write the generated library file — it should fail with MissingProfile
+        // Do NOT write the generated library file â€” it should fail with MissingProfile
 
         let err = create_receipt_for_installed_profile(
             &fix.minecraft_dir,
@@ -2765,7 +2874,7 @@ mod tests {
         .expect("create_receipt should succeed");
 
         // Verify the hash map contains exactly one entry: the legacy lib.
-        let generated = receipt.generated_artifact_sha256.as_ref().unwrap();
+        let generated = receipt.generated_artifact_sha256;
         assert_eq!(
             generated.len(),
             1,
@@ -2818,7 +2927,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // create_receipt_for_installed_profile — exit status check
+    // create_receipt_for_installed_profile â€” exit status check
     // -----------------------------------------------------------------------
 
     #[test]
@@ -2898,7 +3007,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Receiptless Forge profile with all hashed artifacts — validates that
+    // Receiptless Forge profile with all hashed artifacts â€” validates that
     // adoption succeeds without a receipt when every library has an upstream
     // hash (item 8).
     // -----------------------------------------------------------------------
@@ -2909,20 +3018,27 @@ mod tests {
         let tuple = TempFixture::neoforge_tuple();
 
         fix.write_base("1.21");
-        // NeoForge profile fixture has only one library with a SHA1, so all
-        // artifacts have upstream hashes — no receipt needed.
         fix.write_profile("neoforge-21.0.0", &TempFixture::neoforge_profile_json());
+
+        // Write a receipt first since adoption now requires one for all loaders.
+        let hash = {
+            let profile_path = fix.minecraft_dir.join("versions/neoforge-21.0.0/neoforge-21.0.0.json");
+            let profile_bytes = std::fs::read(&profile_path).unwrap();
+            let profile_value: serde_json::Value = serde_json::from_slice(&profile_bytes).unwrap();
+            crate::installed_profile::stable_profile_hash(&profile_value)
+        };
+        fix.write_receipt(&tuple, "neoforge_sha_xyz", &hash);
 
         let adopted = adopt_installed_profile(
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("neoforge_sha_xyz"),
+            "neoforge_sha_xyz",
         )
-        .expect("adoption should succeed without receipt when all artifacts have hashes");
+        .expect("adoption should succeed with receipt");
 
         assert_eq!(adopted.profile_id, "neoforge-21.0.0");
-        assert!(adopted.receipt.is_none());
+        assert!(adopted.receipt.is_some());
         assert!(
             adopted.trusted_unhashed_library_paths.is_empty(),
             "no unhashed paths when all artifacts have upstream hashes"
@@ -2964,16 +3080,18 @@ mod tests {
         let receipt = InstalledProfileReceipt {
             schema_version: 2,
             tuple: tuple.clone(),
-            installer_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            source_kind: LoaderSourceKind::InstallerJar,
+            source_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                 .into(),
-            installer_url: "https://maven.minecraftforge.net/forge.jar".into(),
+            source_url: "https://maven.minecraftforge.net/forge.jar".into(),
             profile_id: "forge-1.21-47.1.0".into(),
             profile_relative_path: "versions/forge-1.21-47.1.0/forge-1.21-47.1.0.json".into(),
             profile_stable_hash: wrong_hash.into(),
             base_version_id: "1.21".into(),
             installed_at: "2026-01-01T00:00:00Z".into(),
             installer_exit_status: 0,
-            generated_artifact_sha256: None,
+            generated_artifact_sha256: BTreeMap::new(),
+            curated_artifact_sha256: BTreeMap::new(),
         };
         write_receipt_atomic(&fix.receipts_root, &tuple, &receipt).expect("write receipt");
 
@@ -2983,7 +3101,7 @@ mod tests {
             &fix.minecraft_dir,
             &fix.receipts_root,
             &tuple,
-            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"),
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         )
         .expect_err("adoption should fail when receipt hash doesn't match profile");
 
@@ -3058,3 +3176,4 @@ mod tests {
         assert_eq!(safe_filename("a:b"), "a-b");
     }
 }
+

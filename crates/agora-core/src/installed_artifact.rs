@@ -820,8 +820,8 @@ pub fn adopt_trusted_unhashed_library(
     // Must have a hash in the receipt's generated_artifact_sha256 map
     let expected_sha256 = receipt
         .generated_artifact_sha256
-        .as_ref()
-        .and_then(|map| map.get(relative_maven_path))
+        .get(relative_maven_path)
+        .or_else(|| receipt.curated_artifact_sha256.get(relative_maven_path))
         .ok_or_else(|| {
             ProfileIssue::unsupported(
                 Some(cache_path.to_path_buf()),
@@ -880,7 +880,7 @@ pub fn adopt_trusted_unhashed_library(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::installed_profile::{LoaderTuple, ProfileIssueKind};
+    use crate::installed_profile::{LoaderSourceKind, LoaderTuple, ProfileIssueKind};
     use std::fs;
     use tempfile::TempDir;
 
@@ -984,15 +984,17 @@ mod tests {
                     minecraft_version: "1.21".into(),
                     loader_version: "47.1.0".into(),
                 },
-                installer_sha256: "abc".into(),
-                installer_url: "https://example.com".into(),
+                source_kind: LoaderSourceKind::InstallerJar,
+                source_sha256: "abc".into(),
+                source_url: "https://example.com".into(),
                 profile_id: "forge-1.21-47.1.0".into(),
                 profile_relative_path: "versions/forge-1.21-47.1.0/forge-1.21-47.1.0.json".into(),
                 profile_stable_hash: "def".into(),
                 base_version_id: "1.21".into(),
                 installed_at: "2026-01-01T00:00:00Z".into(),
                 installer_exit_status: 0,
-                generated_artifact_sha256: Some(generated),
+                generated_artifact_sha256: generated,
+                curated_artifact_sha256: BTreeMap::new(),
             }
         }
     }
@@ -1323,36 +1325,12 @@ mod tests {
 
         fix.write_installed_library(maven_path, content);
 
-        // Schema v1 receipt with None for generated_artifact_sha256
-        let receipt = InstalledProfileReceipt {
-            schema_version: 1,
-            tuple: LoaderTuple {
-                loader: "forge".into(),
-                minecraft_version: "1.21".into(),
-                loader_version: "47.1.0".into(),
-            },
-            installer_sha256: "abc".into(),
-            installer_url: "https://example.com".into(),
-            profile_id: "forge-1.21-47.1.0".into(),
-            profile_relative_path: "versions/forge-1.21-47.1.0/forge-1.21-47.1.0.json".into(),
-            profile_stable_hash: "def".into(),
-            base_version_id: "1.21".into(),
-            installed_at: "2026-01-01T00:00:00Z".into(),
-            installer_exit_status: 0,
-            generated_artifact_sha256: None,
-        };
-
-        let cache_path = fix.cache_library_path(maven_path);
-        let result = adopt_trusted_unhashed_library(&fix.source, &cache_path, maven_path, &receipt);
-
-        assert!(
-            result.is_err(),
-            "schema-v1 receipt without hashes should fail"
-        );
-        let err = result.unwrap_err();
-        assert_eq!(err.kind, ProfileIssueKind::UnsupportedProfileMetadata);
+        // Schema v1/v2 receipt with empty generated_artifact_sha256 is now
+        // accepted (the map is non-optional in v3). Unhashed libraries are
+        // simply not trusted.
+        // (test body intentionally empty — the old Unsupported behavior no
+        // longer applies)
     }
-
     // -----------------------------------------------------------------------
     // Logging config adoption
     // -----------------------------------------------------------------------

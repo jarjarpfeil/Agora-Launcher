@@ -253,7 +253,12 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
     if !force_reinstall {
         // For Forge/NeoForge: try adoption with the curated installer SHA.
         if entry.file_type == "installer_jar" {
-            match adopt_installed_profile(&mc_dir, &receipts_root, &tuple, Some(&entry.sha256)) {
+            match adopt_installed_profile(
+                &mc_dir,
+                &receipts_root,
+                &tuple,
+                agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
+            ) {
                 Ok(adopted) => {
                     // Profile + valid receipt adoption succeeded — no download/run needed.
                     return Ok(agora_core::installed_profile::InstallReceiptSummary {
@@ -274,9 +279,14 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                 }
             }
         }
-        // For Fabric/Quilt: try adoption with no installer SHA.
+        // For Fabric/Quilt: try adoption with the curated profile JSON SHA.
         if entry.file_type == "profile_json" {
-            match adopt_installed_profile(&mc_dir, &receipts_root, &tuple, None) {
+            match adopt_installed_profile(
+                &mc_dir,
+                &receipts_root,
+                &tuple,
+                agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
+            ) {
                 Ok(adopted) => {
                     return Ok(agora_core::installed_profile::InstallReceiptSummary {
                         tuple,
@@ -376,18 +386,44 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
 
             // Validate the profile after writing.
             let profile_id = derive_profile_id(&tuple);
-            let profile_hash = {
-                let profile_value: serde_json::Value = serde_json::from_slice(&data)
-                    .map_err(|_| LauncherError::InstanceCreateFailed)?;
-                installed_profile::stable_profile_hash(&profile_value)
-            };
+
+            // Create a real receipt for this Fabric/Quilt profile.
+            let curated_pins: std::collections::BTreeMap<String, String> =
+                agora_core::loader_manifests::library_pins()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+            installed_profile::create_receipt_for_profile_json(
+                &mc_dir,
+                &receipts_root,
+                &tuple,
+                agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
+                &entry.source_url,
+                curated_pins,
+            )
+            .map_err(|issue| {
+                let msg = format!(
+                    "Profile JSON written but receipt creation failed: {}",
+                    issue.reasons.join("; ")
+                );
+                eprintln!("[instances] {msg}");
+                LauncherError::Generic {
+                    code: "ERR_PROFILE_CORRUPT".to_string(),
+                    message: msg,
+                }
+            })?;
+
+            // Re-read the profile hash after receipt creation (which re-validates).
+            let profile_value_after: serde_json::Value = serde_json::from_slice(&data)
+                .map_err(|_| LauncherError::InstanceCreateFailed)?;
+            let final_hash = installed_profile::stable_profile_hash(&profile_value_after);
 
             Ok(agora_core::installed_profile::InstallReceiptSummary {
                 tuple,
                 profile_id,
                 cache_hit: false,
-                profile_stable_hash: profile_hash,
-                receipt_schema_version: 2,
+                profile_stable_hash: final_hash,
+                receipt_schema_version: installed_profile::RECEIPT_SCHEMA_VERSION,
                 installer_exit_status: 0,
             })
         }
@@ -451,7 +487,7 @@ pub async fn ensure_loader_installed<R: tauri::Runtime>(
                     &mc_dir,
                     &receipts_root,
                     &tuple,
-                    &entry.sha256,
+                    agora_core::loader_manifests::strip_sha_prefix(&entry.sha256),
                     &entry.source_url,
                     exit_status,
                 )

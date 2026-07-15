@@ -424,7 +424,7 @@ pub async fn resolve(request: ResolveRequest) -> LauncherResult<ResolvedLaunchPl
                 &minecraft_dir,
                 &receipts_root,
                 &tuple,
-                Some(&entry.sha256),
+                loader_manifests::strip_sha_prefix(&entry.sha256),
             )
             .map_err(|issue| {
                 let err: LauncherError = issue.into();
@@ -872,8 +872,13 @@ fn materialize_adopted_profile(
     let generated_paths: std::collections::HashSet<String> = adopted_profile
         .receipt
         .as_ref()
-        .and_then(|r| r.generated_artifact_sha256.as_ref())
-        .map(|m| m.keys().cloned().collect())
+        .map(|r| {
+            r.generated_artifact_sha256
+                .keys()
+                .chain(r.curated_artifact_sha256.keys())
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
 
     // Reference to the installed source for library adoption
@@ -2179,7 +2184,7 @@ fn atomic_temp_path(path: &Path) -> PathBuf {
 /// targeting the same file (since the PID + counter pair is unique, the
 /// stale file remains harmless but is not automatically reaped — a future
 /// enhancement could add a startup sweep).
-fn atomic_write(path: &Path, bytes: &[u8]) -> LauncherResult<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> LauncherResult<()> {
     let parent = path.parent().ok_or_else(|| LauncherError::Generic {
         code: "ERR_LAUNCH_CACHE_PATH".into(),
         message: format!("Launch cache path has no parent: {}", path.display()),
@@ -2462,7 +2467,7 @@ fn is_cache_fresh(cache_path: &Path, url: &str) -> bool {
 /// Integrity/parse failures from a *newly downloaded* response are always
 /// propagated (never masked by stale data), ensuring a tampered or malformed
 /// server response is surfaced to the caller.
-async fn load_json_cache_first<T: serde::de::DeserializeOwned>(
+pub(crate) async fn load_json_cache_first<T: serde::de::DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
     cache_path: &Path,
@@ -3802,15 +3807,17 @@ mod tests {
         let receipt = crate::installed_profile::InstalledProfileReceipt {
             schema_version: 2,
             tuple: tuple.clone(),
-            installer_sha256: installer_sha.to_string(),
-            installer_url: "https://example.com".into(),
+            source_kind: crate::installed_profile::LoaderSourceKind::InstallerJar,
+            source_sha256: installer_sha.to_string(),
+            source_url: "https://example.com".into(),
             profile_id: profile_id.clone(),
             profile_relative_path: format!("versions/{profile_id}/{profile_id}.json"),
             profile_stable_hash: stable_hash,
             base_version_id: tuple.minecraft_version.clone(),
             installed_at: "2026-01-01T00:00:00Z".into(),
             installer_exit_status: 0,
-            generated_artifact_sha256: None,
+            generated_artifact_sha256: BTreeMap::new(),
+            curated_artifact_sha256: BTreeMap::new(),
         };
         crate::installed_profile::write_receipt_atomic(receipts_root, tuple, &receipt).unwrap();
     }

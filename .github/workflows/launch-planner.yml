@@ -21,13 +21,30 @@ on:
   push:
     branches: [main, master]
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crates/agora-core/**"
+      - "crates/agora/**"
+      - "desktop/src-tauri/**"
       - "desktop/src/lib/useTypedSettings.ts"
+      - "loader-manifests/**"
+      - "runtime-catalog/**"
+      - "scripts/check_launch_mode.py"
+      - "scripts/generate_runtime_catalog.py"
       - ".github/workflows/launch-planner.yml"
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crates/agora-core/**"
+      - "crates/agora/**"
+      - "desktop/src-tauri/**"
       - "desktop/src/lib/useTypedSettings.ts"
+      - "loader-manifests/**"
+      - "runtime-catalog/**"
+      - "scripts/check_launch_mode.py"
+      - "scripts/generate_runtime_catalog.py"
+      - ".github/workflows/launch-planner.yml"
   workflow_dispatch:
 
 env:
@@ -90,25 +107,10 @@ jobs:
       # Cross-platform assertion: the desktop settings object must default
       # launchMode to "delegation", not "direct". Python is available on all
       # CI matrix OSes.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Assert launch_mode defaults to delegation in desktop settings
-        shell: python{0}
-        run: |
-          import json, re
-          with open("desktop/src/lib/useTypedSettings.ts", encoding="utf-8") as f:
-              content = f.read()
-          # Find the launchMode enumDef — the third positional argument is the default.
-          m = re.search(
-              r"launchMode\s*:\s*enumDef\(\s*['\"]launch_mode['\"]\s*,\s*(\[[^\]]+\])\s*,\s*([^)\s]+)",
-              content,
-          )
-          assert m, "Could not find launchMode enumDef in useTypedSettings.ts"
-          default_val = m.group(2).strip().strip("'\"")
-          assert default_val == "delegation", (
-              f"launchMode default is '{default_val}', expected 'delegation'"
-          )
-          # Also verify that 'direct' is still present in the allowed values.
-          allowed = m.group(1)
-          assert "'direct'" in allowed or '"direct"' in allowed, (
-              "Allowed launch_mode values must include 'direct'"
-          )
-          print("OK: launchMode defaults to 'delegation'")
+        run: python scripts/check_launch_mode.py

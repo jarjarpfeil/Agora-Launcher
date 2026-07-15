@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the official Minecraft data directory for the current OS.
 ///
@@ -24,6 +24,52 @@ pub fn minecraft_dir() -> Option<PathBuf> {
     {
         None
     }
+}
+
+/// Agora-owned Minecraft runtime root — shared content for direct launch.
+///
+/// All shared artifacts (vanilla client JARs, Mojang version JSONs, loader
+/// profiles, libraries, assets, natives, logging configs) live under this
+/// directory instead of the official `.minecraft` directory.
+///
+/// Instance-specific content (mods, config, saves) goes under `instances/`.
+///
+/// This is a pure path function — it does not create directories.
+pub fn minecraft_runtime_root(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("minecraft-runtime")
+}
+
+/// Path helper for `minecraft-runtime/versions/<version>/<version>.json`.
+pub fn minecraft_version_json(app_data_dir: &Path, version_id: &str) -> PathBuf {
+    minecraft_runtime_root(app_data_dir)
+        .join("versions")
+        .join(version_id)
+        .join(format!("{version_id}.json"))
+}
+
+/// Path helper for `minecraft-runtime/libraries/`.
+pub fn minecraft_libraries_dir(app_data_dir: &Path) -> PathBuf {
+    minecraft_runtime_root(app_data_dir).join("libraries")
+}
+
+/// Path helper for `minecraft-runtime/assets/`.
+pub fn minecraft_assets_dir(app_data_dir: &Path) -> PathBuf {
+    minecraft_runtime_root(app_data_dir).join("assets")
+}
+
+/// Path helper for `minecraft-runtime/logging/`.
+pub fn minecraft_logging_dir(app_data_dir: &Path) -> PathBuf {
+    minecraft_runtime_root(app_data_dir).join("logging")
+}
+
+/// Path helper for `minecraft-runtime/natives/`.
+pub fn minecraft_natives_dir(app_data_dir: &Path) -> PathBuf {
+    minecraft_runtime_root(app_data_dir).join("natives")
+}
+
+/// Path helper for `minecraft-runtime/launcher_profiles.json`.
+pub fn minecraft_launcher_profiles_path(app_data_dir: &Path) -> PathBuf {
+    minecraft_runtime_root(app_data_dir).join("launcher_profiles.json")
 }
 
 /// Path to `launcher_profiles.json` inside the official Minecraft directory.

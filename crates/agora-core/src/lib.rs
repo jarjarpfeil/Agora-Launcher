@@ -42,6 +42,8 @@ pub mod loader_manifests;
 pub mod loadout;
 pub mod lockfile;
 pub mod log_sanitizer;
+pub mod minecraft_metadata;
+pub mod minecraft_runtime;
 pub mod mod_cache;
 pub mod models;
 pub mod modrinth;
