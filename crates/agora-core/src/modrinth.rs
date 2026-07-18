@@ -244,7 +244,7 @@ pub(crate) struct ModrinthVersion {
     pub(crate) loaders: Option<Vec<String>>,
     pub(crate) files: Vec<ModrinthVersionFile>,
     #[serde(default)]
-    pub(crate) dependencies: Vec<RawModrinthDependency>,
+    pub(crate) dependencies: Vec<ModrinthApiDep>,
     #[serde(default)]
     pub(crate) changelog: Option<String>,
 }
@@ -291,6 +291,14 @@ pub(crate) struct ModrinthFileHashesRaw {
 pub(crate) struct ModrinthVersionRaw {
     #[serde(default)]
     files: Vec<ModrinthVersionFileRaw>,
+}
+
+/// Internal API dependency type (snake_case, matching Modrinth v2 API).
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ModrinthApiDep {
+    project_id: Option<String>,
+    version_id: Option<String>,
+    dependency_type: String,
 }
 
 /// A dependency declared in a raw Modrinth version.
