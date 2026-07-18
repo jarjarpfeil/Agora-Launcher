@@ -18,6 +18,7 @@
 
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
+use crate::http_client::{self, ClientCategory, HttpClients};
 use base64::Engine;
 use chrono::{DateTime, Utc};
 use p256::ecdsa::signature::Signer;
@@ -343,8 +344,9 @@ fn sign_request(
 }
 
 /// Send a signed request to an Xbox Live endpoint.
+#[allow(clippy::too_many_arguments)]
 async fn send_signed_request<T: for<'de> serde::Deserialize<'de>>(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     url: &str,
     url_path: &str,
     body: serde_json::Value,
@@ -356,31 +358,38 @@ async fn send_signed_request<T: for<'de> serde::Deserialize<'de>>(
     let body_str = serde_json::to_string(&body).unwrap_or_default();
     let sig = sign_request(key, url_path, authorization, &body_str, current_date);
 
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("Signature", &sig);
-
+    let clients = HttpClients::new()?;
+    let mut headers = vec![
+        ("Content-Type".into(), "application/json".into()),
+        ("Accept".into(), "application/json".into()),
+        ("Signature".into(), sig),
+    ];
     if include_contract_version {
-        req = req.header("x-xbl-contract-version", "1");
+        headers.push(("x-xbl-contract-version".into(), "1".into()));
     }
     if let Some(auth) = authorization {
-        req = req.header("Authorization", auth);
+        headers.push(("Authorization".into(), auth.to_string()));
     }
-
-    let resp = req
-        .body(body_str)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_REQUEST".into(),
-            message: format!("Request to {} failed: {}", url, e),
-        })?;
+    let body = serde_json::to_vec(&body).map_err(|e| LauncherError::Generic {
+        code: "ERR_MSA_REQUEST".into(),
+        message: format!("Request body encoding failed: {e}"),
+    })?;
+    let resp = http_client::checked_send(
+        &clients,
+        ClientCategory::Microsoft,
+        reqwest::Method::POST,
+        url,
+        &headers,
+        Some(body),
+        Some("application/json"),
+    )
+    .await?;
 
     let status = resp.status();
     let current_date = response_date(resp.headers());
-    let raw = resp.text().await.unwrap_or_default();
+    let raw = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+        .await
+        .unwrap_or_default();
 
     if !status.is_success() {
         return Err(LauncherError::Generic {
@@ -478,7 +487,7 @@ fn pkce_challenge(verifier: &str) -> String {
 
 /// Step 2: SISU authenticate with the device token. Returns (session_id, redirect_uri, state).
 async fn sisu_authenticate(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     device_token: &str,
     challenge: &str,
     key: &DeviceTokenKey,
@@ -507,19 +516,22 @@ async fn sisu_authenticate(
     let body_str = serde_json::to_string(&body).unwrap_or_default();
     let sig = sign_request(key, "/authenticate", None, &body_str, current_date);
 
-    let resp = client
-        .post(SISU_AUTH_URL)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("Signature", &sig)
-        .header("x-xbl-contract-version", "1")
-        .body(body_str)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_SISU_AUTH".into(),
-            message: format!("SISU authenticate failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_send(
+        &clients,
+        ClientCategory::Microsoft,
+        reqwest::Method::POST,
+        SISU_AUTH_URL,
+        &[
+            ("Content-Type".into(), "application/json".into()),
+            ("Accept".into(), "application/json".into()),
+            ("Signature".into(), sig),
+            ("x-xbl-contract-version".into(), "1".into()),
+        ],
+        Some(body_str.into_bytes()),
+        Some("application/json"),
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -542,8 +554,10 @@ async fn sisu_authenticate(
             message: "SISU authenticate response did not contain a session ID.".into(),
         })?;
 
+    let response_bytes =
+        http_client::checked_response_bytes(resp, ClientCategory::Microsoft).await?;
     let redirect: xbox_types::SisuRedirect =
-        resp.json().await.map_err(|e| LauncherError::Generic {
+        serde_json::from_slice(&response_bytes).map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_SISU_AUTH_PARSE".into(),
             message: format!("Failed to parse SISU redirect: {}", e),
         })?;
@@ -573,7 +587,7 @@ impl std::fmt::Debug for OAuthToken {
 }
 
 async fn exchange_oauth_token(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     code: &str,
     verifier: &str,
 ) -> LauncherResult<(DateTime<Utc>, OAuthToken)> {
@@ -586,20 +600,22 @@ async fn exchange_oauth_token(
         ("scope", REQUESTED_SCOPE),
     ];
 
-    let resp = client
-        .post(OAUTH_TOKEN_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_OAUTH_TOKEN".into(),
-            message: format!("OAuth token exchange failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_post_form(
+        &clients,
+        ClientCategory::Microsoft,
+        OAUTH_TOKEN_URL,
+        &params,
+        &[],
+    )
+    .await?;
 
     let status = resp.status();
     let date = response_date(resp.headers());
     if !status.is_success() {
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+            .await
+            .unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_OAUTH_TOKEN_HTTP".into(),
             message: format!(
@@ -609,10 +625,9 @@ async fn exchange_oauth_token(
         });
     }
 
-    let token = resp
-        .json::<OAuthToken>()
-        .await
-        .map_err(|e| LauncherError::Generic {
+    let token_bytes = http_client::checked_response_bytes(resp, ClientCategory::Microsoft).await?;
+    let token =
+        serde_json::from_slice::<OAuthToken>(&token_bytes).map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_OAUTH_TOKEN_PARSE".into(),
             message: format!("Failed to parse OAuth token: {}", e),
         })?;
@@ -620,7 +635,7 @@ async fn exchange_oauth_token(
 }
 
 async fn refresh_oauth_token(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     refresh_token: &str,
 ) -> LauncherResult<(DateTime<Utc>, OAuthToken)> {
     let params = [
@@ -631,20 +646,22 @@ async fn refresh_oauth_token(
         ("scope", REQUESTED_SCOPE),
     ];
 
-    let resp = client
-        .post(OAUTH_TOKEN_URL)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_OAUTH_REFRESH".into(),
-            message: format!("OAuth refresh failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_post_form(
+        &clients,
+        ClientCategory::Microsoft,
+        OAUTH_TOKEN_URL,
+        &params,
+        &[],
+    )
+    .await?;
 
     let status = resp.status();
     let date = response_date(resp.headers());
     if !status.is_success() {
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+            .await
+            .unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_OAUTH_REFRESH_HTTP".into(),
             message: format!(
@@ -654,10 +671,9 @@ async fn refresh_oauth_token(
         });
     }
 
-    let token = resp
-        .json::<OAuthToken>()
-        .await
-        .map_err(|e| LauncherError::Generic {
+    let token_bytes = http_client::checked_response_bytes(resp, ClientCategory::Microsoft).await?;
+    let token =
+        serde_json::from_slice::<OAuthToken>(&token_bytes).map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_OAUTH_REFRESH_PARSE".into(),
             message: format!("Failed to parse refreshed OAuth token: {}", e),
         })?;
@@ -703,7 +719,7 @@ async fn sisu_authorize(
 }
 
 async fn xsts_authorize(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     sisu: &xbox_types::SisuAuthorize,
     device_token: &str,
     key: &DeviceTokenKey,
@@ -723,33 +739,40 @@ async fn xsts_authorize(
     let body_str = serde_json::to_string(&body).unwrap_or_default();
     let sig = sign_request(key, "/xsts/authorize", None, &body_str, auth_date);
 
-    let resp = client
-        .post(XSTS_AUTHORIZE_URL)
-        .header("Content-Type", "application/json")
-        .header("Accept", "application/json")
-        .header("Signature", &sig)
-        .header("x-xbl-contract-version", "1")
-        .body(body_str)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_XSTS".into(),
-            message: format!("XSTS authorize failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_send(
+        &clients,
+        ClientCategory::Microsoft,
+        reqwest::Method::POST,
+        XSTS_AUTHORIZE_URL,
+        &[
+            ("Content-Type".into(), "application/json".into()),
+            ("Accept".into(), "application/json".into()),
+            ("Signature".into(), sig),
+            ("x-xbl-contract-version".into(), "1".into()),
+        ],
+        Some(body_str.into_bytes()),
+        Some("application/json"),
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+            .await
+            .unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_XSTS_HTTP".into(),
             message: format!("XSTS returned HTTP {} (response suppressed)", status),
         });
     }
 
-    let token: xbox_types::XboxToken = resp.json().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_MSA_XSTS_PARSE".into(),
-        message: format!("Failed to parse XSTS token: {}", e),
-    })?;
+    let token_bytes = http_client::checked_response_bytes(resp, ClientCategory::Microsoft).await?;
+    let token: xbox_types::XboxToken =
+        serde_json::from_slice(&token_bytes).map_err(|e| LauncherError::Generic {
+            code: "ERR_MSA_XSTS_PARSE".into(),
+            message: format!("Failed to parse XSTS token: {}", e),
+        })?;
 
     // Extract user hash (uhs) from display_claims
     let uhs = token
@@ -772,7 +795,7 @@ async fn xsts_authorize(
 // ---------------------------------------------------------------------------
 
 async fn get_minecraft_token(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     uhs: &str,
     xsts_token: &str,
 ) -> LauncherResult<String> {
@@ -781,21 +804,24 @@ async fn get_minecraft_token(
         "xtoken": format!("XBL3.0 x={};{}", uhs, xsts_token),
     });
 
-    let resp = client
-        .post(MC_LOGIN_URL)
-        .header("Accept", "application/json")
-        .header("User-Agent", USER_AGENT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_MC_TOKEN".into(),
-            message: format!("Minecraft login failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_post_json(
+        &clients,
+        ClientCategory::Microsoft,
+        MC_LOGIN_URL,
+        &body,
+        &[
+            ("Accept".into(), "application/json".into()),
+            ("User-Agent".into(), USER_AGENT.into()),
+        ],
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+            .await
+            .unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_MC_TOKEN_HTTP".into(),
             message: format!(
@@ -805,8 +831,9 @@ async fn get_minecraft_token(
         });
     }
 
+    let token_bytes = http_client::checked_response_bytes(resp, ClientCategory::Microsoft).await?;
     let token: xbox_types::MinecraftToken =
-        resp.json().await.map_err(|e| LauncherError::Generic {
+        serde_json::from_slice(&token_bytes).map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_MC_TOKEN_PARSE".into(),
             message: format!("Failed to parse Minecraft token: {}", e),
         })?;
@@ -814,21 +841,24 @@ async fn get_minecraft_token(
     Ok(token.access_token)
 }
 
-async fn check_entitlements(client: &reqwest::Client, access_token: &str) -> LauncherResult<()> {
+async fn check_entitlements(_client: &reqwest::Client, access_token: &str) -> LauncherResult<()> {
     let url = format!("{}?requestId={}", MC_ENTITLEMENTS_URL, Uuid::new_v4());
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_ENTITLEMENTS".into(),
-            message: format!("Entitlements check failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_request_with_headers(
+        &clients,
+        ClientCategory::Microsoft,
+        &url,
+        vec![
+            ("Authorization".into(), format!("Bearer {access_token}")),
+            ("User-Agent".into(), USER_AGENT.into()),
+        ],
+    )
+    .await?;
 
     if !resp.status().is_success() {
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+            .await
+            .unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_NO_ENTITLEMENT".into(),
             message: "Your Microsoft account does not own Minecraft. Please purchase it at minecraft.net.".into(),
@@ -839,23 +869,26 @@ async fn check_entitlements(client: &reqwest::Client, access_token: &str) -> Lau
 }
 
 async fn get_minecraft_profile(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     access_token: &str,
 ) -> LauncherResult<(String, String)> {
-    let resp = client
-        .get(MC_PROFILE_URL)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("User-Agent", USER_AGENT)
-        .send()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_MSA_PROFILE".into(),
-            message: format!("Profile fetch failed: {}", e),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_request_with_headers(
+        &clients,
+        ClientCategory::Microsoft,
+        MC_PROFILE_URL,
+        vec![
+            ("Authorization".into(), format!("Bearer {access_token}")),
+            ("User-Agent".into(), USER_AGENT.into()),
+        ],
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
-        let _body = resp.text().await.unwrap_or_default();
+        let _body = http_client::checked_response_text(resp, ClientCategory::Microsoft)
+            .await
+            .unwrap_or_default();
         return Err(LauncherError::Generic {
             code: "ERR_MSA_PROFILE_HTTP".into(),
             message: format!(
@@ -865,8 +898,10 @@ async fn get_minecraft_profile(
         });
     }
 
+    let profile_bytes =
+        http_client::checked_response_bytes(resp, ClientCategory::Microsoft).await?;
     let profile: xbox_types::MinecraftProfile =
-        resp.json().await.map_err(|e| LauncherError::Generic {
+        serde_json::from_slice(&profile_bytes).map_err(|e| LauncherError::Generic {
             code: "ERR_MSA_PROFILE_PARSE".into(),
             message: format!("Failed to parse Minecraft profile: {}", e),
         })?;

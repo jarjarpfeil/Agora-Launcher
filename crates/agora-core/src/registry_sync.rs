@@ -6,15 +6,25 @@
 
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
+use crate::lock_manager::LockManager;
+use crate::operation_manager::OperationManager;
 use crate::paths;
 use ed25519_dalek::{Signature, VerifyingKey, PUBLIC_KEY_LENGTH, SIGNATURE_LENGTH};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
-/// The GitHub repository hosting registry release assets (`owner/repo`).
-const REGISTRY_REPO: &str = match option_env!("AGORA_REGISTRY_REPO") {
-    Some(v) => v,
-    None => "",
-};
+/// Resolve the registry repository with priority:
+/// 1. CLI override (passed as parameter)
+/// 2. `AGORA_REGISTRY_REPO` environment variable
+/// 3. Built-in default: `"jarjarpfeil/agora-registry"`
+pub fn resolve_registry_repo(cli_override: Option<&str>) -> String {
+    cli_override
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("AGORA_REGISTRY_REPO").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "jarjarpfeil/agora-registry".into())
+}
 
 /// Ed25519 public key (hex) for verifying registry.db signatures.
 const REGISTRY_PUBKEY_HEX: &str = match option_env!("AGORA_REGISTRY_PUBKEY") {
@@ -63,18 +73,18 @@ pub struct RegistryStatus {
 /// 5. Check schema_version for forward/backward compatibility.
 /// 6. Atomically replace the cached DB (write .tmp, rename).
 /// 7. Update the cached tag in local_state.db.
+///
+/// When `operation_manager` is provided, a "Update registry" operation is
+/// registered for the duration of the download and verification.
 pub async fn check_and_download_update(
-    app_data_dir: &std::path::PathBuf,
-    local_state_path: &std::path::PathBuf,
+    app_data_dir: &Path,
+    local_state_path: &Path,
     force: bool,
     github_token: Option<String>,
+    operation_manager: Option<&OperationManager>,
+    registry_repo: &str,
+    lock_manager: &LockManager,
 ) -> LauncherResult<RegistryStatus> {
-    if REGISTRY_REPO.is_empty() {
-        return Err(LauncherError::Generic {
-            code: "ERR_REGISTRY_REPO_NOT_CONFIGURED".into(),
-            message: "Registry repository is not configured in this build. Set AGORA_REGISTRY_REPO to owner/repository when building Agora Launcher.".into(),
-        });
-    }
     let conn =
         db::local_state_connection(local_state_path).map_err(|e| LauncherError::Generic {
             code: "ERR_DB".into(),
@@ -115,7 +125,14 @@ pub async fn check_and_download_update(
         }
     }
 
-    let latest = match query_latest_release(github_token.as_deref()).await {
+    // Acquire cross-process RegistryUpdate lock for the entire
+    // check / download / atomic-replace / cached-tag update transaction.
+    let _registry_lock = lock_manager.acquire(
+        crate::lock_manager::LockResource::RegistryUpdate,
+        "registry-sync",
+    )?;
+
+    let latest = match query_latest_release(registry_repo, github_token.as_deref()).await {
         Ok(release) => release,
         Err(e) => {
             return Ok(RegistryStatus {
@@ -146,6 +163,9 @@ pub async fn check_and_download_update(
         });
     }
 
+    // Register operation only when we are about to start network I/O.
+    let _op = operation_manager.map(|m| m.register("Update registry"));
+
     let db_id = latest
         .find_asset("registry.db")
         .ok_or(LauncherError::RegistryDownloadFailed)?;
@@ -157,11 +177,11 @@ pub async fn check_and_download_update(
     // signed URL. The `browser_download_url` returns 404 for this repo.
     let db_url = format!(
         "https://api.github.com/repos/{}/releases/assets/{}",
-        REGISTRY_REPO, db_id
+        registry_repo, db_id
     );
     let sig_url = format!(
         "https://api.github.com/repos/{}/releases/assets/{}",
-        REGISTRY_REPO, sig_id
+        registry_repo, sig_id
     );
 
     let db_bytes = download_file(&db_url, github_token.as_deref()).await?;
@@ -187,16 +207,8 @@ pub async fn check_and_download_update(
     atomic_replace_db(&db_path, &sig_path, &db_bytes, &sig_bytes)?;
     set_cached_tag(local_state_path, &latest.tag_name)?;
 
-    // Initialize the loader catalog runtime override from the freshly
-    // downloaded signed registry.  Silently ignore when the table is
-    // absent (pre-catalog registry releases) or on connection errors
-    // (the embedded fallback remains in effect).
-    if let Ok(conn) = rusqlite::Connection::open_with_flags(
-        &db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) {
-        let _ = crate::loader_manifests::LoaderCatalog::init_from_registry(&conn);
+    if let Some(op) = _op {
+        op.complete();
     }
 
     Ok(RegistryStatus {
@@ -211,10 +223,7 @@ pub async fn check_and_download_update(
 }
 
 /// Return the current registry status without performing a network check.
-pub fn get_status(
-    app_data_dir: &std::path::PathBuf,
-    local_state_path: &std::path::PathBuf,
-) -> RegistryStatus {
+pub fn get_status(app_data_dir: &Path, local_state_path: &Path) -> RegistryStatus {
     let has_cached_db = paths::registry_db_path(app_data_dir)
         .map(|p| p.exists())
         .unwrap_or(false);
@@ -243,7 +252,7 @@ pub fn get_status(
 /// On first run with no cached DB, copy the local registry.db from the repo
 /// if it exists. Development convenience for local testing.
 #[cfg(debug_assertions)]
-pub fn seed_from_local_build(app_data_dir: &std::path::PathBuf) -> LauncherResult<bool> {
+pub fn seed_from_local_build(app_data_dir: &Path) -> LauncherResult<bool> {
     let dest = paths::registry_db_path(app_data_dir).map_err(|_| LauncherError::RegistryMissing)?;
 
     if dest.exists() {
@@ -282,13 +291,6 @@ pub fn seed_from_local_build(app_data_dir: &std::path::PathBuf) -> LauncherResul
                                 local_version,
                                 candidate.display()
                             );
-                            if let Ok(conn) = rusqlite::Connection::open_with_flags(
-                                &dest,
-                                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                            ) {
-                                let _ = crate::loader_manifests::LoaderCatalog::init_from_registry(&conn);
-                            }
                             return Ok(true);
                         }
                     }
@@ -320,13 +322,6 @@ pub fn seed_from_local_build(app_data_dir: &std::path::PathBuf) -> LauncherResul
                     "Seeded registry.db from local build at {}",
                     candidate.display()
                 );
-                if let Ok(conn) = rusqlite::Connection::open_with_flags(
-                    &dest,
-                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                        | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                ) {
-                    let _ = crate::loader_manifests::LoaderCatalog::init_from_registry(&conn);
-                }
                 return Ok(true);
             }
             search_dir = dir.parent().map(std::path::Path::to_path_buf);
@@ -367,17 +362,21 @@ impl GitHubRelease {
     }
 }
 
-async fn query_latest_release(token: Option<&str>) -> Result<GitHubRelease, String> {
-    let url = format!(
-        "https://api.github.com/repos/{}/releases/latest",
-        REGISTRY_REPO
-    );
+async fn query_latest_release(repo: &str, token: Option<&str>) -> Result<GitHubRelease, String> {
+    let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
     let _permit = crate::github_ratelimit::acquire_github_permit().await;
-    let mut req = crate::github_ratelimit::github_client().get(&url);
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
-    }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let clients = crate::http_client::HttpClients::new().map_err(|e| e.to_string())?;
+    let headers = token
+        .map(|t| vec![("Authorization".into(), format!("Bearer {t}"))])
+        .unwrap_or_default();
+    let resp = crate::http_client::checked_request_with_headers(
+        &clients,
+        crate::http_client::ClientCategory::GitHub,
+        &url,
+        headers,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     if crate::github_ratelimit::is_rate_limit_response(&resp) {
         let retry = crate::github_ratelimit::parse_retry_after(&resp);
         crate::github_ratelimit::report_rate_limit(retry).await;
@@ -386,23 +385,29 @@ async fn query_latest_release(token: Option<&str>) -> Result<GitHubRelease, Stri
     if !resp.status().is_success() {
         return Err(format!("HTTP {}", resp.status()));
     }
-    resp.json::<GitHubRelease>()
-        .await
-        .map_err(|e| e.to_string())
+    let body = crate::http_client::checked_response_bytes(
+        resp,
+        crate::http_client::ClientCategory::GitHub,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    serde_json::from_slice::<GitHubRelease>(&body).map_err(|e| e.to_string())
 }
 
 async fn download_file(url: &str, token: Option<&str>) -> LauncherResult<Vec<u8>> {
     let _permit = crate::github_ratelimit::acquire_github_permit().await;
-    let mut req = crate::github_ratelimit::github_client()
-        .get(url)
-        .header("Accept", "application/octet-stream");
+    let clients = crate::http_client::HttpClients::new()?;
+    let mut headers = vec![("Accept".into(), "application/octet-stream".into())];
     if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {t}"));
+        headers.push(("Authorization".into(), format!("Bearer {t}")));
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let resp = crate::http_client::checked_request_with_headers(
+        &clients,
+        crate::http_client::ClientCategory::GitHub,
+        url,
+        headers,
+    )
+    .await?;
     if crate::github_ratelimit::is_rate_limit_response(&resp) {
         let retry = crate::github_ratelimit::parse_retry_after(&resp);
         crate::github_ratelimit::report_rate_limit(retry).await;
@@ -414,9 +419,8 @@ async fn download_file(url: &str, token: Option<&str>) -> LauncherResult<Vec<u8>
     if !resp.status().is_success() {
         return Err(LauncherError::RegistryDownloadFailed);
     }
-    resp.bytes()
+    crate::http_client::checked_response_bytes(resp, crate::http_client::ClientCategory::GitHub)
         .await
-        .map(|b| b.to_vec())
         .map_err(|_| LauncherError::RegistryDownloadFailed)
 }
 
@@ -588,8 +592,8 @@ fn atomic_replace_db(
     // Rename sig first, then db. If the sig rename fails, the old db is still
     // intact. If the sig rename succeeds but db rename fails, old-db + new-sig
     // still verifies against the old db and allows a clean retry on next check.
-    std::fs::rename(&sig_tmp, &sig_path).map_err(|_| LauncherError::RegistryDownloadFailed)?;
-    std::fs::rename(&db_tmp, &db_path).map_err(|_| LauncherError::RegistryDownloadFailed)?;
+    std::fs::rename(sig_tmp, sig_path).map_err(|_| LauncherError::RegistryDownloadFailed)?;
+    std::fs::rename(db_tmp, db_path).map_err(|_| LauncherError::RegistryDownloadFailed)?;
 
     Ok(())
 }
@@ -838,6 +842,6 @@ mod tests {
     #[test]
     fn test_app_schema_version_constant() {
         // Sanity check: the expected schema version should be >= 1.
-        assert!(APP_REGISTRY_SCHEMA_VERSION >= 1);
+        const { assert!(APP_REGISTRY_SCHEMA_VERSION >= 1) };
     }
 }

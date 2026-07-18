@@ -86,15 +86,8 @@ fn validate_override_source(source: &OverrideSource) -> Result<&str, String> {
     Ok(sha256)
 }
 
-fn is_allowed_override_download_host(host: &str) -> bool {
-    matches!(
-        host,
-        "github.com" | "objects.githubusercontent.com" | "release-assets.githubusercontent.com"
-    )
-}
-
 async fn modrinth_version_download_url(
-    client: &reqwest::Client,
+    clients: &crate::http_client::HttpClients,
     project_id: &str,
     version: Option<&str>,
 ) -> Result<(String, String, String), String> {
@@ -103,17 +96,13 @@ async fn modrinth_version_download_url(
         urlencoding::encode(project_id)
     );
 
-    let versions: Vec<serde_json::Value> = client
-        .get(&url)
-        .header("User-Agent", "AgoraLauncher/1.0")
-        .send()
-        .await
-        .map_err(|e| format!("Modrinth API request failed: {}", e))?
-        .error_for_status()
-        .map_err(|e| format!("Modrinth API HTTP error: {}", e))?
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Modrinth versions response: {}", e))?;
+    let versions: Vec<serde_json::Value> = crate::http_client::checked_get_json(
+        clients,
+        crate::http_client::ClientCategory::Modrinth,
+        &url,
+    )
+    .await
+    .map_err(|e| format!("Modrinth API request failed: {e}"))?;
 
     let selected = if let Some(ver) = version {
         versions
@@ -200,47 +189,24 @@ async fn download_and_extract_overrides(
         urlencoding::encode(&source.asset_name)
     );
 
-    // Override archives are untrusted input. Keep their initial request and
-    // every redirect on the small GitHub release-asset allowlist.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if let Some(host) = attempt.url().host_str() {
-                if is_allowed_override_download_host(host) {
-                    return attempt.follow();
-                }
-            }
-            attempt.stop()
-        }))
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .map_err(|e| format!("Failed to create override download client: {e}"))?;
+    // Override archives go through the checked API with the GitHub category.
+    // The checked helper handles initial URL validation, per-hop redirect
+    // re-validation against the category allowlist, and response size limits.
+    let clients = crate::http_client::HttpClients::new()
+        .map_err(|e| format!("Failed to create download client: {e}"))?;
+    let data = crate::http_client::checked_get_bytes(
+        &clients,
+        crate::http_client::ClientCategory::GitHub,
+        &url,
+    )
+    .await
+    .map_err(|e| format!("Failed to download override bundle: {e}"))?;
 
-    let mut resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download override bundle: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Download override bundle failed: {e}"))?;
-
-    if resp.content_length().unwrap_or(0) > override_sanitizer::MAX_ZIP_SIZE {
-        return Err("Override bundle exceeds the 500MB compressed size limit.".to_string());
-    }
-
-    let mut data = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("Failed to read override bundle: {e}"))?
-    {
-        if data.len().saturating_add(chunk.len()) > override_sanitizer::MAX_ZIP_SIZE as usize {
-            return Err(format!(
-                "Override bundle exceeds the {}MB compressed size limit.",
-                override_sanitizer::MAX_ZIP_SIZE / (1024 * 1024)
-            ));
-        }
-        data.extend_from_slice(&chunk);
+    if data.len() > override_sanitizer::MAX_ZIP_SIZE as usize {
+        return Err(format!(
+            "Override bundle exceeds the {}MB compressed size limit.",
+            override_sanitizer::MAX_ZIP_SIZE / (1024 * 1024)
+        ));
     }
 
     let actual_sha256 = download::sha256_hex(&data);
@@ -265,8 +231,11 @@ async fn download_and_extract_overrides(
 }
 
 /// Install a simple pack (Tier 1) — just the mod list.
+///
+/// Internal compatibility helper. Prefer [`crate::import_service::ImportService::install_pack`].
+#[doc(hidden)]
 pub async fn install_simple_pack(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     manifest: &PackManifest,
     target_dir: &Path,
 ) -> Result<PackInstallResult, String> {
@@ -277,6 +246,8 @@ pub async fn install_simple_pack(
         .map_err(|e| format!("Failed to create mods directory: {}", e))?;
 
     let mut mods_installed = 0;
+    let clients = crate::http_client::HttpClients::new()
+        .map_err(|e| format!("Failed to initialize HTTP clients: {e}"))?;
 
     for entry in &manifest.mods {
         if entry.status == "optional" {
@@ -286,29 +257,16 @@ pub async fn install_simple_pack(
         match entry.source.as_str() {
             "modrinth" => {
                 let (download_url, filename, sha1) =
-                    modrinth_version_download_url(client, &entry.id, entry.version.as_deref())
+                    modrinth_version_download_url(&clients, &entry.id, entry.version.as_deref())
                         .await?;
 
-                let resp = client
-                    .get(&download_url)
-                    .header("User-Agent", "AgoraLauncher/1.0")
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed to download mod {}: {}", entry.id, e))?;
-
-                if !resp.status().is_success() {
-                    return Err(format!(
-                        "Download mod {} returned HTTP {}",
-                        entry.id,
-                        resp.status()
-                    ));
-                }
-
-                let data = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| format!("Failed to read mod {}: {}", entry.id, e))?
-                    .to_vec();
+                let data = crate::http_client::checked_get_bytes(
+                    &clients,
+                    crate::http_client::ClientCategory::Modrinth,
+                    &download_url,
+                )
+                .await
+                .map_err(|e| format!("Failed to download mod {}: {e}", entry.id))?;
 
                 if !sha1.is_empty() {
                     let actual_sha1 = download::sha1_hex(&data);
@@ -355,6 +313,9 @@ pub async fn install_simple_pack(
 }
 
 /// Install a complex pack (Tier 2) — mod list + override bundle.
+///
+/// Internal compatibility helper. Prefer [`crate::import_service::ImportService::install_pack`].
+#[doc(hidden)]
 pub async fn install_complex_pack(
     client: &reqwest::Client,
     manifest: &PackManifest,

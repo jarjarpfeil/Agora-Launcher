@@ -228,7 +228,7 @@ pub fn create_snapshot(instance_dir: &Path, label: Option<&str>) -> Result<Snaps
                 &src,
                 entry_name,
                 &mut zip,
-                options.clone(),
+                options,
                 &mut files,
                 &mut total_size,
             )?;
@@ -283,14 +283,7 @@ fn walk_and_zip(
         let relative = format!("{prefix}/{entry_name}");
 
         if entry_type.is_dir() {
-            walk_and_zip(
-                &src_path,
-                &relative,
-                zip,
-                options.clone(),
-                files,
-                total_size,
-            )?;
+            walk_and_zip(&src_path, &relative, zip, options, files, total_size)?;
         } else if entry_type.is_file() {
             let contents = fs::read(&src_path)
                 .map_err(|e| format!("failed to read {}: {e}", src_path.display()))?;

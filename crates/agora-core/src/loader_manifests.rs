@@ -1,7 +1,7 @@
 use crate::error::{LauncherError, LauncherResult};
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 // ---------------------------------------------------------------------------
 // Embedded compile-time data (fallback when registry.db is unavailable).
@@ -51,24 +51,35 @@ pub struct LoaderCatalog {
 // ---------------------------------------------------------------------------
 
 /// Embedded fallback — parsed at first access and never changed.
-static MANIFEST: OnceLock<LoaderCatalog> = OnceLock::new();
+static MANIFEST: OnceLock<Arc<LoaderCatalog>> = OnceLock::new();
 
-/// Runtime override populated from the signed `loader_catalog` table in
-/// `registry.db` when available.  Takes priority over the embedded copy.
-static CATALOG_OVERRIDE: OnceLock<LoaderCatalog> = OnceLock::new();
+/// Runtime catalog populated from the signed `loader_catalog` table in
+/// `registry.db`. Replacing the `Arc` makes refreshes visible to new callers
+/// without invalidating snapshots already held by an active operation.
+static CATALOG_OVERRIDE: RwLock<Option<Arc<LoaderCatalog>>> = RwLock::new(None);
 
 static MC_VERSIONS_LIST: OnceLock<Vec<String>> = OnceLock::new();
 
-/// Return the effective catalog: runtime override when set, else embedded.
-fn catalog() -> &'static LoaderCatalog {
-    CATALOG_OVERRIDE.get().unwrap_or_else(|| {
-        MANIFEST.get_or_init(|| {
-            serde_json::from_str(LOADER_MANIFESTS).unwrap_or_else(|_| LoaderCatalog {
-                domain_allowlist: Vec::new(),
-                loaders: std::collections::BTreeMap::new(),
-            })
+fn embedded_catalog() -> Arc<LoaderCatalog> {
+    MANIFEST
+        .get_or_init(|| {
+            Arc::new(
+                serde_json::from_str(LOADER_MANIFESTS).unwrap_or_else(|_| LoaderCatalog {
+                    domain_allowlist: Vec::new(),
+                    loaders: std::collections::BTreeMap::new(),
+                }),
+            )
         })
-    })
+        .clone()
+}
+
+/// Return an immutable snapshot of the effective catalog.
+fn catalog() -> Arc<LoaderCatalog> {
+    CATALOG_OVERRIDE
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_else(embedded_catalog)
 }
 
 /// Parse the embedded Mojang version list once and cache the result.
@@ -136,27 +147,31 @@ impl LoaderCatalog {
         Ok(Self::embedded())
     }
 
-    /// One-shot override: replace the global static catalog with a
-    /// registry-sourced version.  This affects all *free-function* callers
-    /// for the remainder of the process lifetime.
+    /// Replace the process-wide runtime snapshot with a registry-sourced
+    /// version. Existing operation snapshots remain valid while subsequent
+    /// free-function callers observe the new catalog.
     ///
     /// Returns `Ok(true)` when the override was applied, `Ok(false)` when
     /// the registry has no loader_catalog row, or `Err` on parse/validation
     /// failure.
     ///
-    /// # Panics
-    /// Panics if called more than once (the override slot can only be
-    /// populated once per process).
     pub fn init_from_registry(conn: &rusqlite::Connection) -> LauncherResult<bool> {
-        match Self::from_registry(conn)? {
-            Some(catalog) => {
-                CATALOG_OVERRIDE.set(catalog).unwrap_or_else(|_| {
-                    panic!("LoaderCatalog::init_from_registry called more than once")
-                });
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        let catalog = Self::from_registry(conn)?;
+        Self::replace_active(catalog.clone())?;
+        Ok(catalog.is_some())
+    }
+
+    /// Atomically replace the active registry override after all coordinated
+    /// catalogs have been parsed and validated.
+    pub fn replace_active(catalog: Option<Self>) -> LauncherResult<()> {
+        let mut active = CATALOG_OVERRIDE
+            .write()
+            .map_err(|_| LauncherError::Generic {
+                code: "ERR_LOADER_CATALOG_LOCK".into(),
+                message: "Loader catalog state is unavailable.".into(),
+            })?;
+        *active = catalog.map(Arc::new);
+        Ok(())
     }
 
     /// Find a pinned loader entry for a `(loader, mc_version, loader_version)` triple.
@@ -245,12 +260,10 @@ impl LoaderCatalog {
 // ---------------------------------------------------------------------------
 
 /// Find a pinned loader entry (delegates to global effective catalog).
-pub fn find_entry(
-    loader: &str,
-    mc_version: &str,
-    loader_version: &str,
-) -> Option<&'static LoaderEntry> {
-    catalog().find_entry(loader, mc_version, loader_version)
+pub fn find_entry(loader: &str, mc_version: &str, loader_version: &str) -> Option<LoaderEntry> {
+    catalog()
+        .find_entry(loader, mc_version, loader_version)
+        .cloned()
 }
 
 /// Verify URL host is allowed (delegates).
@@ -264,13 +277,21 @@ pub fn is_allowed_host(host: &str) -> bool {
 }
 
 /// List pinned loader versions (delegates).
-pub fn list_versions(loader: &str, mc_version: &str) -> Vec<&'static LoaderEntry> {
-    catalog().list_versions(loader, mc_version)
+pub fn list_versions(loader: &str, mc_version: &str) -> Vec<LoaderEntry> {
+    catalog()
+        .list_versions(loader, mc_version)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 /// Distinct loader names (delegates).
-pub fn list_loaders() -> Vec<&'static str> {
-    catalog().list_loaders()
+pub fn list_loaders() -> Vec<String> {
+    catalog()
+        .list_loaders()
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 /// All stable Minecraft versions (delegates).
@@ -325,6 +346,25 @@ mod tests {
     fn test_manifest_allowlist_nonempty() {
         let m = catalog();
         assert!(!m.domain_allowlist.is_empty());
+    }
+
+    #[test]
+    fn test_registry_override_can_reload_without_panic() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE loader_catalog (singleton_id INTEGER PRIMARY KEY, catalog_json TEXT NOT NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO loader_catalog (singleton_id, catalog_json) VALUES (1, ?1)",
+            [LOADER_MANIFESTS],
+        )
+        .unwrap();
+
+        assert!(LoaderCatalog::init_from_registry(&conn).unwrap());
+        assert!(LoaderCatalog::init_from_registry(&conn).unwrap());
+        assert!(!catalog().domain_allowlist.is_empty());
     }
 
     #[test]

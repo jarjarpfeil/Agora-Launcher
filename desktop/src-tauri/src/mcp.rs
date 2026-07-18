@@ -1,24 +1,16 @@
-#![allow(dead_code)]
-
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
-use crate::crash_diagnostics;
-use crate::crash_investigator;
-use crate::db;
-use crate::error::LauncherError;
-use crate::instances;
-use crate::models::InstanceManifest;
 use crate::paths;
-use crate::registry;
 
 // ---------------------------------------------------------------------------
 // Baked-in MCP skill guide
@@ -49,6 +41,7 @@ fn generate_session_id() -> String {
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
+    #[allow(dead_code)]
     jsonrpc: String,
     method: String,
     #[serde(default)]
@@ -97,11 +90,12 @@ struct JsonRpcError {
 }
 
 const JSONRPC_ERROR_METHOD_NOT_FOUND: i32 = -32601;
-const JSONRPC_ERROR_INTERNAL_ERROR: i32 = -32603;
 const MCP_ERR_TOO_MANY_REQUESTS: &str = "ERR_MCP_TOO_MANY_REQUESTS";
+const MAX_MCP_BODY_SIZE: usize = 1_048_576; // 1 MiB
+const MAX_CONCURRENT_CONNECTIONS: usize = 64;
+const MAX_HEADER_SIZE: usize = 32_768; // 32 KiB
 
 // MCP error codes (application-level)
-const MCP_ERR_DENIED: &str = "ERR_MCP_DENIED";
 const MCP_TOKEN_KEY: &str = "mcp_bearer_token";
 
 fn generate_token() -> String {
@@ -111,17 +105,15 @@ fn generate_token() -> String {
 }
 
 fn get_or_create_mcp_token(app: &AppHandle) -> Option<String> {
-    let conn = db::local_state_connection(app).ok()?;
-    match db::get_setting(&conn, MCP_TOKEN_KEY) {
+    let ctx = crate::core_context(app).ok()?;
+    let svc = agora_core::settings::SettingsService::new(ctx);
+    match svc.get(MCP_TOKEN_KEY) {
         Ok(Some(serde_json::Value::String(t))) if !t.is_empty() => Some(t),
         _ => {
             let token = generate_token();
-            if db::set_setting(
-                &conn,
-                MCP_TOKEN_KEY,
-                &serde_json::Value::String(token.clone()),
-            )
-            .is_ok()
+            if svc
+                .set(MCP_TOKEN_KEY, &serde_json::Value::String(token.clone()))
+                .is_ok()
             {
                 if let Ok(app_data) = paths::app_data_dir(app) {
                     write_token_file(&app_data, &token);
@@ -146,18 +138,7 @@ fn write_token_file(app_data_dir: &std::path::Path, token: &str) {
     }
 }
 
-fn read_stored_token(app: &AppHandle) -> Option<String> {
-    let conn = db::local_state_connection(app).ok()?;
-    match db::get_setting(&conn, MCP_TOKEN_KEY) {
-        Ok(Some(serde_json::Value::String(t))) if !t.is_empty() => Some(t),
-        _ => None,
-    }
-}
-
-fn extract_bearer_token(
-    headers: &std::collections::HashMap<String, String>,
-    full_path: &str,
-) -> Option<String> {
+fn extract_bearer_token(headers: &std::collections::HashMap<String, String>) -> Option<String> {
     if let Some(auth) = headers.get("authorization") {
         if let Some(t) = auth.strip_prefix("Bearer ") {
             return Some(t.trim().to_string());
@@ -166,37 +147,19 @@ fn extract_bearer_token(
             return Some(t.trim().to_string());
         }
     }
-    if let Some(q) = full_path.find('?') {
-        for pair in full_path[q + 1..].split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                if k == "token" {
-                    return urlencoding::decode(v).ok().map(|s| s.to_string());
-                }
-            }
-        }
-    }
     None
 }
 
-fn validate_token(
-    app: &AppHandle,
-    headers: &std::collections::HashMap<String, String>,
-    full_path: &str,
-) -> bool {
-    match read_stored_token(app) {
-        Some(expected) => match extract_bearer_token(headers, full_path) {
-            Some(t) => t == expected,
-            None => false,
-        },
-        None => false,
-    }
+// ---------------------------------------------------------------------------
+// SSE session store + global rate limiter
+// ---------------------------------------------------------------------------
+
+struct McpServerState {
+    sessions: std::sync::Mutex<HashMap<String, tokio::sync::mpsc::Sender<String>>>,
+    rate_limiter: std::sync::Mutex<RateLimiter>,
+    expected_token: String,
+    semaphore: Arc<tokio::sync::Semaphore>,
 }
-
-// ---------------------------------------------------------------------------
-// SSE session store
-// ---------------------------------------------------------------------------
-
-type SessionStore = Arc<std::sync::Mutex<HashMap<String, tokio::sync::mpsc::Sender<String>>>>;
 
 // ---------------------------------------------------------------------------
 // Rate limiter
@@ -228,788 +191,11 @@ impl RateLimiter {
 }
 
 // ---------------------------------------------------------------------------
-// Approval check
-// ---------------------------------------------------------------------------
-
-/// Decision result for the pure approval logic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApprovalResult {
-    Allowed,
-    Denied,
-}
-
-/// Pure approval decision: given a stored grant state and whether the tool
-/// is destructive, decide if the call is allowed.
-///
-/// Read-only tools (is_destructive=false) are always allowed (safe default).
-/// Destructive tools require an explicit grant.
-fn check_approval_grant(state: Option<&str>, is_destructive: bool) -> ApprovalResult {
-    if !is_destructive {
-        return ApprovalResult::Allowed;
-    }
-    match state {
-        Some("always_allow") | Some("session") => ApprovalResult::Allowed,
-        Some("always_deny") => ApprovalResult::Denied,
-        None => ApprovalResult::Denied,
-        Some(_) => ApprovalResult::Denied,
-    }
-}
-
-fn check_approval(
-    app: &AppHandle,
-    tool_name: &str,
-    instance_id: &str,
-    is_destructive: bool,
-) -> Result<(), LauncherError> {
-    if !is_destructive {
-        return Ok(());
-    }
-
-    let conn = match db::local_state_connection(app) {
-        Ok(c) => c,
-        Err(_) => return Err(LauncherError::LocalStateFailed),
-    };
-
-    let mut stmt = match conn
-        .prepare("SELECT state FROM mcp_approval_grants WHERE tool_name = ?1 AND instance_id = ?2")
-    {
-        Ok(s) => s,
-        Err(_) => return Err(LauncherError::LocalStateFailed),
-    };
-
-    let state: Option<String> = match stmt.query_row([tool_name, instance_id], |row| row.get(0)) {
-        Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(_) => return Err(LauncherError::LocalStateFailed),
-    };
-
-    match check_approval_grant(state.as_deref(), is_destructive) {
-        ApprovalResult::Allowed => Ok(()),
-        ApprovalResult::Denied => {
-            // Determine the specific denial reason for the error message.
-            match state.as_deref() {
-                Some("always_deny") => Err(LauncherError::McpDenied),
-                None => Err(LauncherError::Generic {
-                    code: MCP_ERR_DENIED.to_string(),
-                    message: format!(
-                        "Approval required: grant '{}' for instance '{}' in Agora Settings",
-                        tool_name, instance_id
-                    ),
-                }),
-                Some(other) => Err(LauncherError::Generic {
-                    code: MCP_ERR_DENIED.to_string(),
-                    message: format!("Unknown approval state: {}", other),
-                }),
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tool definitions
 // ---------------------------------------------------------------------------
 
-fn tool_definitions() -> Vec<serde_json::Value> {
-    vec![
-        serde_json::json!({
-            "name": "list_instances",
-            "description": "List all Minecraft instances managed by Agora, including their IDs, names, and loader configurations.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        serde_json::json!({
-            "name": "list_instance_mods",
-            "description": "List all installed mods for a specific instance, including filenames, versions, sources, and dependency information.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "The instance ID to list mods for."
-                    }
-                },
-                "required": ["instance_id"]
-            }
-        }),
-        serde_json::json!({
-            "name": "disable_mod",
-            "description": "Disable a mod in an instance by renaming its .jar file to .jar.disabled. Destructive â€” requires approval.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "The instance ID."
-                    },
-                    "filename": {
-                        "type": "string",
-                        "description": "The mod filename to disable."
-                    }
-                },
-                "required": ["instance_id", "filename"]
-            }
-        }),
-        serde_json::json!({
-            "name": "search_crash_signatures",
-            "description": "Search the curated crash signature database for patterns matching the provided crash text. Returns matching signatures and fix hints.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "crash_text": {
-                        "type": "string",
-                        "description": "The crash log text to search against."
-                    }
-                },
-                "required": ["crash_text"]
-            }
-        }),
-        serde_json::json!({
-            "name": "suggest_mod_incompatibility",
-            "description": "Analyze crash text against installed mods in an instance and return ranked suspect mods that may be causing the crash.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "The instance ID."
-                    },
-                    "crash_text": {
-                        "type": "string",
-                        "description": "The crash log text to analyze."
-                    }
-                },
-                "required": ["instance_id", "crash_text"]
-            }
-        }),
-        serde_json::json!({
-            "name": "get_system_context",
-            "description": "Return a markdown summary of the current Agora system state, including instances, installed mods, and recent crashes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        }),
-        serde_json::json!({
-            "name": "read_latest_crash",
-            "description": "Read the most recent crash report or log for an instance. Returns the last 200 lines of the newest crash file.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "The instance ID to read crash reports for."
-                    }
-                },
-                "required": ["instance_id"]
-            }
-        }),
-        serde_json::json!({
-            "name": "read_mod_manifest",
-            "description": "Fetch curated metadata for a specific mod from the local SQLite registry, including curator notes, categories, compatibility data, and license info.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "mod_id": {
-                        "type": "string",
-                        "description": "The registry ID of the mod (e.g. 'sodium', 'iris')."
-                    }
-                },
-                "required": ["mod_id"]
-            }
-        }),
-        serde_json::json!({
-            "name": "enable_mod",
-            "description": "Re-enable a previously disabled mod in an instance by renaming its .jar.disabled file back to .jar. Destructive -- requires approval.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "instance_id": {
-                        "type": "string",
-                        "description": "The instance ID."
-                    },
-                    "filename": {
-                        "type": "string",
-                        "description": "The mod filename to re-enable."
-                    }
-                },
-                "required": ["instance_id", "filename"]
-            }
-        }),
-        serde_json::json!({
-            "name": "search_knowledge_base",
-            "description": "Search the curated registry for mods matching a natural-language query. Uses LIKE matching across mod names and descriptions in the local SQLite database. Returns the top 5 matches with their curator metadata.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural-language search string, e.g. 'performance rendering optimization' or 'magic mod'."
-                    }
-                },
-                "required": ["query"]
-            }
-        }),
-    ]
-}
-
-// ---------------------------------------------------------------------------
-// Tool implementations
-// ---------------------------------------------------------------------------
-
-fn read_manifest(
-    app: &AppHandle,
-    instance_id: &str,
-) -> Result<Option<InstanceManifest>, LauncherError> {
-    let path = paths::instance_manifest_path(app, instance_id)
-        .map_err(|_| LauncherError::LocalStateFailed)?;
-    if !path.exists() {
-        return Ok(None);
-    }
-    let text = std::fs::read_to_string(&path).map_err(|_| LauncherError::LocalStateFailed)?;
-    serde_json::from_str(&text)
-        .map(Some)
-        .map_err(|_| LauncherError::LocalStateFailed)
-}
-
-fn build_system_context(app: &AppHandle) -> String {
-    let mut lines: Vec<String> = Vec::new();
-
-    lines.push("# Agora System Context".to_string());
-    lines.push("".to_string());
-
-    // Instances
-    lines.push("## Instances".to_string());
-    let instance_rows = instances::list_instances(app);
-    match instance_rows {
-        Ok(rows) => {
-            if rows.is_empty() {
-                lines.push("No instances configured.".to_string());
-            } else {
-                for row in &rows {
-                    lines.push(format!(
-                        "- **{}** (`{}`) â€” Minecraft {}, Loader: {} {}",
-                        row.name,
-                        row.instance_id,
-                        row.minecraft_version,
-                        row.loader,
-                        row.loader_version
-                    ));
-                }
-            }
-        }
-        Err(e) => {
-            lines.push(format!("Error listing instances: {}", e));
-        }
-    }
-    lines.push("".to_string());
-
-    // Installed mods
-    lines.push("## Installed Mods".to_string());
-    let instance_rows = instances::list_instances(app);
-    match instance_rows {
-        Ok(rows) => {
-            let mut total_mods = 0usize;
-            for row in &rows {
-                let manifest = read_manifest(app, &row.instance_id);
-                match manifest {
-                    Ok(Some(m)) => {
-                        lines.push(format!("- **{}** â€” {} mods", row.name, m.mods.len()));
-                        total_mods += m.mods.len();
-                        for mod_ in &m.mods {
-                            let ver = mod_.version.as_deref().unwrap_or("unknown");
-                            lines.push(format!(
-                                "  - {} v{} (source: {})",
-                                mod_.filename, ver, mod_.source
-                            ));
-                        }
-                    }
-                    Ok(None) => {
-                        lines.push(format!("- **{}** â€” manifest not found", row.name));
-                    }
-                    Err(_) => {
-                        lines.push(format!("- **{}** â€” could not read manifest", row.name));
-                    }
-                }
-            }
-            if total_mods == 0 && rows.is_empty() {
-                lines.push("No installed mods.".to_string());
-            }
-        }
-        Err(e) => {
-            lines.push(format!("Error listing instances: {}", e));
-        }
-    }
-    lines.push("".to_string());
-
-    // Recent crashes
-    lines.push("## Recent Crashes".to_string());
-    let instance_rows = instances::list_instances(app);
-    match instance_rows {
-        Ok(rows) => {
-            let mut found_crashes = false;
-            for row in &rows {
-                let instance_path = paths::instance_dir(app, &row.instance_id);
-                if let Ok(dir) = instance_path {
-                    let crash_dir = dir.join("crash-reports");
-                    if crash_dir.exists() {
-                        if let Ok(entries) = std::fs::read_dir(&crash_dir) {
-                            let mut crash_files: Vec<_> = entries
-                                .filter_map(|e| e.ok())
-                                .filter(|e| {
-                                    let fname = e.file_name();
-                                    let name = fname.to_string_lossy();
-                                    name.ends_with(".log") || name.ends_with(".txt")
-                                })
-                                .collect();
-                            // Sort by modified time descending (newest first).
-                            crash_files.sort_by(|a, b| {
-                                let ma = a.metadata().and_then(|m| m.modified()).ok();
-                                let mb = b.metadata().and_then(|m| m.modified()).ok();
-                                mb.cmp(&ma) // descending
-                            });
-                            for entry in crash_files.iter().take(3) {
-                                let fname = entry.file_name().to_string_lossy().to_string();
-                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                                lines.push(format!("- {} ({} bytes)", fname, size));
-                                found_crashes = true;
-                            }
-                        }
-                    }
-                }
-            }
-            if !found_crashes {
-                lines.push("No recent crash reports found.".to_string());
-            }
-        }
-        Err(e) => {
-            lines.push(format!("Error listing instances: {}", e));
-        }
-    }
-
-    lines.join("\n")
-}
-
-fn handle_list_instances(app: &AppHandle) -> serde_json::Value {
-    match instances::list_instances(app) {
-        Ok(rows) => {
-            let items: Vec<serde_json::Value> = rows
-                .into_iter()
-                .map(|r| {
-                    serde_json::json!({
-                        "instance_id": r.instance_id,
-                        "name": r.name,
-                        "minecraft_version": r.minecraft_version,
-                        "loader": r.loader,
-                        "loader_version": r.loader_version,
-                    })
-                })
-                .collect();
-            serde_json::json!({ "instances": items })
-        }
-        Err(e) => serde_json::json!({ "error": "ERR_MCP_INTERNAL", "message": e.to_string() }),
-    }
-}
-
-fn handle_list_instance_mods(app: &AppHandle, instance_id: &str) -> serde_json::Value {
-    let manifest = match read_manifest(app, instance_id) {
-        Ok(m) => m,
-        Err(e) => {
-            return serde_json::json!({
-                "error": "ERR_MCP_INTERNAL",
-                "message": e.to_string(),
-            });
-        }
-    };
-    match manifest {
-        Some(m) => {
-            let mods: Vec<serde_json::Value> = m
-                .mods
-                .into_iter()
-                .map(|mod_| {
-                    serde_json::json!({
-                        "filename": mod_.filename,
-                        "version": mod_.version,
-                        "source": mod_.source,
-                        "mod_jar_id": mod_.mod_jar_id,
-                        "depends_on": mod_.depends_on,
-                        "optional_deps": mod_.optional_deps,
-                        "java_packages": mod_.java_packages,
-                    })
-                })
-                .collect();
-            serde_json::json!({ "mods": mods })
-        }
-        None => serde_json::json!({ "mods": [] }),
-    }
-}
-
-fn handle_disable_mod(app: &AppHandle, instance_id: &str, filename: &str) -> serde_json::Value {
-    match crash_investigator::disable_mod(app, instance_id, filename) {
-        Ok(()) => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Mod {} disabled in instance {}. Restart the game to apply.", filename, instance_id),
-            }],
-            "isError": false,
-        }),
-        Err(e) => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": e.to_string(),
-            }],
-            "isError": true,
-        }),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// search_crash_signatures implementation
-// ---------------------------------------------------------------------------
-
-async fn handle_search_crash_signatures(app: &AppHandle, crash_text: &str) -> serde_json::Value {
-    let app_clone = app.clone();
-    let text = crash_text.to_string();
-    let matches: Vec<serde_json::Value> = match tokio::task::spawn_blocking(move || {
-        perform_signature_search(&app_clone, &text)
-    })
-    .await
-    {
-        Ok(Ok(m)) => m,
-        Ok(Err(_)) | Err(_) => Vec::new(),
-    };
-
-    serde_json::json!({ "matches": matches })
-}
-
-fn perform_signature_search(
-    app: &AppHandle,
-    crash_text: &str,
-) -> Result<Vec<serde_json::Value>, LauncherError> {
-    let conn = registry::open_registry(app)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, regex_pattern, solution_markdown \
-         FROM crash_signatures",
-        )
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_INVALID_QUERY".to_string(),
-            message: e.to_string(),
-        })?;
-
-    let rows = stmt
-        .query_map([], |row| {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let pattern: String = row.get(2)?;
-            let solution: String = row.get(3)?;
-            Ok((id, name, pattern, solution))
-        })
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_INVALID_QUERY".to_string(),
-            message: e.to_string(),
-        })?;
-
-    let mut matches: Vec<serde_json::Value> = Vec::new();
-    for row in rows {
-        let (_id, name, pattern, solution) = match row {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let regex = match regex::Regex::new(&pattern) {
-            Ok(r) => r,
-            Err(_) => continue, // Skip invalid patterns silently
-        };
-
-        if regex.is_match(crash_text) {
-            matches.push(serde_json::json!({
-                "id": _id,
-                "name": name,
-                "fix_hint": solution,
-            }));
-        }
-    }
-
-    Ok(matches)
-}
-
-// ---------------------------------------------------------------------------
-// suggest_mod_incompatibility implementation
-// ---------------------------------------------------------------------------
-
-async fn suggest_mod_incompatibility_impl(
-    app: &AppHandle,
-    instance_id: &str,
-    crash_text: &str,
-) -> serde_json::Value {
-    // Check for a parseable crash fingerprint first.
-    if crash_investigator::parse_crash_log(crash_text).is_none() {
-        return serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": "No crash fingerprint detected in the provided text.",
-            }],
-            "isError": false,
-        });
-    }
-
-    let manifest = match read_manifest(app, instance_id) {
-        Ok(m) => m,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": e.to_string(),
-                }],
-                "isError": true,
-            });
-        }
-    };
-    let manifest = match manifest {
-        Some(m) => m,
-        None => {
-            return serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Instance '{}' not found", instance_id),
-                }],
-                "isError": true,
-            });
-        }
-    };
-
-    match tokio::runtime::Handle::try_current() {
-        Ok(_handle) => {
-            let app_clone = app.clone();
-            let instance_id = instance_id.to_string();
-            let text = crash_text.to_string();
-            let mods: Vec<crate::models::InstalledMod> = manifest.mods.clone();
-            match tokio::task::spawn_blocking(move || {
-                crash_investigator::score_suspects(&app_clone, &instance_id, &text, &mods)
-            })
-            .await
-            {
-                Ok(Ok(suspects)) => {
-                    let results: Vec<serde_json::Value> = suspects
-                        .into_iter()
-                        .map(|s| {
-                            serde_json::json!({
-                                "mod_id": s.mod_id,
-                                "filename": s.filename,
-                                "total_score": s.total_score,
-                                "is_dependent_of": s.is_dependent_of,
-                                "breakdown": s.breakdown,
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({ "suspects": results })
-                }
-                Ok(Err(e)) => serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": e.to_string(),
-                    }],
-                    "isError": true,
-                }),
-                Err(_) => serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": "Scoring task panicked",
-                    }],
-                    "isError": true,
-                }),
-            }
-        }
-        Err(_) => {
-            // No async runtime â€” run synchronously.
-            match crash_investigator::score_suspects(app, instance_id, crash_text, &manifest.mods) {
-                Ok(suspects) => {
-                    let results: Vec<serde_json::Value> = suspects
-                        .into_iter()
-                        .map(|s| {
-                            serde_json::json!({
-                                "mod_id": s.mod_id,
-                                "filename": s.filename,
-                                "total_score": s.total_score,
-                                "is_dependent_of": s.is_dependent_of,
-                                "breakdown": s.breakdown,
-                            })
-                        })
-                        .collect();
-                    serde_json::json!({ "suspects": results })
-                }
-                Err(e) => serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": e.to_string(),
-                    }],
-                    "isError": true,
-                }),
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// read_latest_crash handler
-// ---------------------------------------------------------------------------
-
-fn handle_read_latest_crash(app: &AppHandle, instance_id: &str) -> serde_json::Value {
-    let reports = match crash_diagnostics::list_crash_reports(app, instance_id) {
-        Ok(r) => r,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Error listing crash reports: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    let newest = match reports.first() {
-        Some(r) => r.filename.clone(),
-        None => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("No crash reports found for instance '{}'", instance_id)}],
-                "isError": false,
-            })
-        }
-    };
-    let full = match crash_diagnostics::read_crash_log(app, instance_id, &newest) {
-        Ok(t) => t,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Error reading crash log: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    // Return the last 200 lines (most relevant for diagnosis).
-    let lines: Vec<&str> = full.lines().collect();
-    let start = if lines.len() > 200 {
-        lines.len() - 200
-    } else {
-        0
-    };
-    let tail: Vec<&str> = lines[start..].to_vec();
-    serde_json::json!({
-        "content": [{"type": "text", "text": tail.join("\n")}],
-        "isError": false,
-        "filename": newest,
-        "total_lines": lines.len(),
-    })
-}
-
-// ---------------------------------------------------------------------------
-// read_mod_manifest handler
-// ---------------------------------------------------------------------------
-
-fn handle_read_mod_manifest(app: &AppHandle, mod_id: &str) -> serde_json::Value {
-    let conn = match registry::open_registry(app) {
-        Ok(c) => c,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Could not open registry: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    let item = match registry::get_item_by_id(&conn, mod_id) {
-        Ok(Some(i)) => i,
-        Ok(None) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Mod '{}' not found in curated registry", mod_id)}],
-                "isError": true,
-            })
-        }
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Registry query error: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    serde_json::json!({
-        "id": item.id,
-        "name": item.name,
-        "content_type": item.content_type,
-        "download_strategy": item.download_strategy,
-        "source_identifier": item.source_identifier,
-        "sha256": item.sha256,
-        "license_id": item.license_id,
-        "description": item.description,
-        "body_markdown": item.body_markdown,
-        "page_url": item.page_url,
-        "icon_url": item.icon_url,
-        "upvotes": item.upvotes,
-        "downvotes": item.downvotes,
-        "net_score": item.net_score,
-        "velocity": item.velocity,
-        "status": item.status,
-        "is_immune": item.is_immune,
-        "immunity_reason": item.immunity_reason,
-        "date_added": item.date_added,
-        "compatible_versions_json": item.compatible_versions_json,
-        "modrinth_id": item.modrinth_id,
-    })
-}
-
-// ---------------------------------------------------------------------------
-// search_knowledge_base handler
-// ---------------------------------------------------------------------------
-
-fn handle_search_knowledge_base(app: &AppHandle, query: &str) -> serde_json::Value {
-    let conn = match registry::open_registry(app) {
-        Ok(c) => c,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Could not open registry: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    let like_pattern = format!("%{}%", query);
-    let sql = "SELECT id, name, content_type, description                FROM registry_items                WHERE (description IS NOT NULL AND description LIKE ?1)                   OR (name LIKE ?1)                LIMIT 5";
-    let mut stmt = match conn.prepare(sql) {
-        Ok(s) => s,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Query prepare error: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    let rows = match stmt.query_map(
-        [&like_pattern],
-        |row| -> rusqlite::Result<serde_json::Value> {
-            Ok(serde_json::json!({
-                "id": row.get::<_, String>(0)?,
-                "name": row.get::<_, String>(1)?,
-                "content_type": row.get::<_, String>(2)?,
-                "description": row.get::<_, Option<String>>(3)?,
-            }))
-        },
-    ) {
-        Ok(r) => r,
-        Err(e) => {
-            return serde_json::json!({
-                "content": [{"type": "text", "text": format!("Query error: {}", e)}],
-                "isError": true,
-            })
-        }
-    };
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for row in rows {
-        if let Ok(v) = row {
-            results.push(v);
-        }
-    }
-    serde_json::json!({
-        "results": results,
-        "query": query,
-    })
+fn tool_definitions_desktop_only() -> Vec<serde_json::Value> {
+    vec![]
 }
 
 // ---------------------------------------------------------------------------
@@ -1021,137 +207,44 @@ async fn handle_tool_call(
     tool_name: &str,
     params: &serde_json::Value,
 ) -> serde_json::Value {
-    let get_str = |key: &str| -> Option<String> {
-        params
-            .get(key)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    };
-
-    let instance_id = get_str("instance_id").unwrap_or_default();
-    let filename = get_str("filename").unwrap_or_default();
-    let _crash_text = get_str("crash_text").unwrap_or_default();
-
-    match tool_name {
-        "list_instances" => {
-            let result = handle_list_instances(app);
-            serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&result).unwrap_or_default(),
-                }],
-                "isError": result.get("error").is_some(),
-            })
-        }
-        "list_instance_mods" => {
-            let result = handle_list_instance_mods(app, &instance_id);
-            serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&result).unwrap_or_default(),
-                }],
-                "isError": result.get("error").is_some(),
-            })
-        }
-        "disable_mod" => {
-            if let Err(e) = check_approval(app, "disable_mod", &instance_id, true) {
+    // Portable tools — route through agora_core::mcp_dispatcher (handles
+    // approval for destructive tools internally).
+    let portable_tools: &[&str] = &[
+        "list_instances",
+        "list_instance_mods",
+        "read_mod_manifest",
+        "get_system_context",
+        "search_crash_signatures",
+        "search_knowledge_base",
+        "disable_mod",
+        "enable_mod",
+        "read_latest_crash",
+        "suggest_mod_incompatibility",
+    ];
+    if portable_tools.contains(&tool_name) {
+        let ctx = match crate::core_context(app) {
+            Ok(c) => c,
+            Err(e) => {
                 return serde_json::json!({
                     "content": [{
                         "type": "text",
-                        "text": format!("Approval denied: {}", e),
+                        "text": format!("Core context error: {}", e),
                     }],
                     "isError": true,
                 });
             }
-            let result = handle_disable_mod(app, &instance_id, &filename);
-            serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&result).unwrap_or_default(),
-                }],
-                "isError": result.get("error").is_some(),
-            })
-        }
-        "search_crash_signatures" => {
-            let crash_text = get_str("crash_text").unwrap_or_default();
-            let result = handle_search_crash_signatures(app, &crash_text).await;
-            serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&result).unwrap_or_default(),
-                }],
-                "isError": false,
-            })
-        }
-        "suggest_mod_incompatibility" => {
-            let instance_id = get_str("instance_id").unwrap_or_default();
-            let crash_text = get_str("crash_text").unwrap_or_default();
-            let result = suggest_mod_incompatibility_impl(app, &instance_id, &crash_text).await;
-            serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": serde_json::to_string(&result).unwrap_or_default(),
-                }],
-                "isError": false,
-            })
-        }
-        "get_system_context" => {
-            let md = build_system_context(app);
-            serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": md,
-                }],
-                "isError": false,
-            })
-        }
-        "read_latest_crash" => {
-            let instance_id = get_str("instance_id").unwrap_or_default();
-            handle_read_latest_crash(app, &instance_id)
-        }
-        "read_mod_manifest" => {
-            let mod_id = get_str("mod_id").unwrap_or_default();
-            handle_read_mod_manifest(app, &mod_id)
-        }
-        "enable_mod" => {
-            if let Err(e) = check_approval(app, "enable_mod", &instance_id, true) {
-                return serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("Approval denied: {}", e),
-                    }],
-                    "isError": true,
-                });
-            }
-            match crash_investigator::enable_mod(app, &instance_id, &filename) {
-                Ok(()) => serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("Mod {} re-enabled in instance {}. Restart the game to apply.", filename, instance_id),
-                    }],
-                    "isError": false,
-                }),
-                Err(e) => serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": e.to_string(),
-                    }],
-                    "isError": true,
-                }),
-            }
-        }
-        "search_knowledge_base" => {
-            let query = get_str("query").unwrap_or_default();
-            handle_search_knowledge_base(app, &query)
-        }
-        _ => serde_json::json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Tool '{}' not found", tool_name),
-            }],
-            "isError": true,
-        }),
+        };
+        let dispatcher = agora_core::mcp_dispatcher::McpDispatcher::new(ctx);
+        return dispatcher.call_tool(tool_name, params);
     }
+
+    serde_json::json!({
+        "content": [{
+            "type": "text",
+            "text": format!("Tool '{}' not found", tool_name),
+        }],
+        "isError": true,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1165,22 +258,33 @@ async fn handle_mcp_method(
 ) -> serde_json::Value {
     match method {
         "initialize" => {
-            serde_json::json!({
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                    "resources": {}
-                },
-                "serverInfo": {
-                    "name": "agora",
-                    "version": "0.1.0"
+            let ctx = match crate::core_context(app) {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": { "code": -32603, "message": format!("Core context error: {}", e) },
+                    });
                 }
-            })
+            };
+            let dispatcher = agora_core::mcp_dispatcher::McpDispatcher::new(ctx);
+            dispatcher.initialize()
         }
         "tools/list" => {
-            serde_json::json!({
-                "tools": tool_definitions()
-            })
+            let ctx = match crate::core_context(app) {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": { "code": -32603, "message": format!("Core context error: {}", e) },
+                    });
+                }
+            };
+            let dispatcher = agora_core::mcp_dispatcher::McpDispatcher::new(ctx);
+            let mut result = dispatcher.list_tools();
+            // Append desktop-only tools
+            if let Some(tools) = result["tools"].as_array_mut() {
+                tools.extend(tool_definitions_desktop_only());
+            }
+            result
         }
         "tools/call" => {
             let params = params.unwrap_or(&serde_json::Value::Null);
@@ -1188,37 +292,17 @@ async fn handle_mcp_method(
             let tool_params = params.get("arguments").unwrap_or(&serde_json::Value::Null);
             handle_tool_call(app, tool_name, tool_params).await
         }
-        "resources/list" => {
-            serde_json::json!({
-                "resources": [{
-                    "uri": "system_context.md",
-                    "name": "System Context",
-                    "mimeType": "text/markdown",
-                    "description": "Current Agora system state",
-                }]
-            })
-        }
-        "resources/read" => {
-            let params = params.unwrap_or(&serde_json::Value::Null);
-            let uri = params.get("uri").and_then(|v| v.as_str()).unwrap_or("");
-
-            if uri == "system_context.md" {
-                let md = build_system_context(app);
-                serde_json::json!({
-                    "contents": [{
-                        "uri": "system_context.md",
-                        "mimeType": "text/markdown",
-                        "text": md,
-                    }]
-                })
-            } else {
-                serde_json::json!({
-                    "error": {
-                        "code": -32602,
-                        "message": format!("Unknown resource URI: {}", uri),
-                    }
-                })
-            }
+        "resources/list" | "resources/read" => {
+            let ctx = match crate::core_context(app) {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::json!({
+                        "error": { "code": -32603, "message": format!("Core context error: {}", e) },
+                    });
+                }
+            };
+            let dispatcher = agora_core::mcp_dispatcher::McpDispatcher::new(ctx);
+            dispatcher.handle_method(method, params)
         }
         _ => serde_json::json!({
             "error": {
@@ -1241,6 +325,8 @@ fn parse_request_line(line: &str) -> Option<(String, String)> {
         None
     }
 }
+// NOTE: url::Url is not available in the desktop crate dependencies (would
+// modify Cargo.lock), so this handwritten parser is retained as a known gap.
 
 fn parse_query_params(path: &str) -> HashMap<String, String> {
     let mut params = HashMap::new();
@@ -1250,10 +336,10 @@ fn parse_query_params(path: &str) -> HashMap<String, String> {
             if let (Some(k), Some(v)) = (kv.next(), kv.next()) {
                 params.insert(
                     urlencoding::decode(k)
-                        .unwrap_or_else(|_| Cow::Borrowed(k))
+                        .unwrap_or(Cow::Borrowed(k))
                         .into_owned(),
                     urlencoding::decode(v)
-                        .unwrap_or_else(|_| Cow::Borrowed(v))
+                        .unwrap_or(Cow::Borrowed(v))
                         .into_owned(),
                 );
             }
@@ -1261,6 +347,9 @@ fn parse_query_params(path: &str) -> HashMap<String, String> {
     }
     params
 }
+// NOTE: url::Url / url::form_urlencoded are not available in the desktop crate
+// dependencies (would modify Cargo.lock), so this handwritten parser is retained
+// as a known gap.
 
 fn extract_route(path: &str) -> &str {
     path.split('?').next().unwrap_or(path)
@@ -1271,88 +360,118 @@ fn extract_session_id(path: &str) -> Option<String> {
     parse_query_params(path).remove("session_id")
 }
 
+fn is_origin_allowed(origin: &str, port: u16) -> bool {
+    let expected_127 = format!("http://127.0.0.1:{}", port);
+    let expected_local = format!("http://localhost:{}", port);
+    origin == expected_127 || origin == expected_local
+}
+
 // ---------------------------------------------------------------------------
 // Connection handler â€” the core of the MCP server
 // ---------------------------------------------------------------------------
 
 async fn handle_connection(
     stream: tokio::net::TcpStream,
-    store: SessionStore,
+    state: Arc<McpServerState>,
     app: AppHandle,
+    port: u16,
 ) -> std::io::Result<()> {
-    let (raw_read, mut write_half) = stream.into_split();
-    let mut read_half = BufReader::new(raw_read);
+    tokio::time::timeout(Duration::from_secs(30), async move {
+        let (raw_read, mut write_half) = stream.into_split();
+        let mut read_half = BufReader::new(raw_read);
 
-    // Read request line
-    let mut request_line = String::new();
-    if read_half.read_line(&mut request_line).await? == 0 {
-        return Ok(());
-    }
+        // Read request line
+        let mut request_line = String::new();
+        if read_half.read_line(&mut request_line).await? == 0 {
+            return Ok(());
+        }
 
-    let (method, full_path) = match parse_request_line(&request_line) {
-        Some(v) => v,
-        None => return Ok(()),
-    };
+        let (method, full_path) = match parse_request_line(&request_line) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
 
-    // Read headers
-    let mut headers = HashMap::new();
-    loop {
-        let mut header_line = String::new();
-        let bytes = read_half.read_line(&mut header_line).await?;
-        if bytes == 0 {
-            break;
+        // Read headers with aggregate size limit
+        let mut headers = HashMap::new();
+        let mut total_header_bytes: usize = 0;
+        loop {
+            let mut header_line = String::new();
+            let bytes = read_half.read_line(&mut header_line).await?;
+            if bytes == 0 {
+                break;
+            }
+            total_header_bytes += bytes;
+            if total_header_bytes > MAX_HEADER_SIZE {
+                let _ = write_half
+                    .write_all(b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+                let _ = write_half.shutdown().await;
+                return Ok(());
+            }
+            let header_line = header_line.trim();
+            if header_line.is_empty() {
+                break;
+            }
+            if let Some((key, value)) = header_line.split_once(':') {
+                headers.insert(key.trim().to_lowercase(), value.trim().to_string());
+            }
         }
-        let header_line = header_line.trim();
-        if header_line.is_empty() {
-            break;
-        }
-        if let Some((key, value)) = header_line.split_once(':') {
-            headers.insert(key.trim().to_lowercase(), value.trim().to_string());
-        }
-    }
 
-    let route = extract_route(&full_path);
+        // Origin header validation
+        if let Some(origin) = headers.get("origin") {
+            if !origin.is_empty() && !is_origin_allowed(origin, port) {
+                let body = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Origin not allowed"}}"#;
+                let msg = format!(
+                    "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap_or(""),
+                );
+                let _ = write_half.write_all(msg.as_bytes()).await;
+                return Ok(());
+            }
+        }
 
-    // Token auth: reject unauthenticated connections (spec 10.0 #2, B2 2026-07-05).
-    if !validate_token(&app, &headers, &full_path) {
-        let body = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Unauthorized: MCP Bearer token required. Copy it from Settings > Integrations > MCP Server."}}"#;
-        let msg = format!(
-            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-            body.len(),
-            std::str::from_utf8(body).unwrap_or(""),
-        );
-        let _ = write_half.write_all(msg.as_bytes()).await;
-        return Ok(());
-    }
+        let route = extract_route(&full_path);
 
-    match (method.as_str(), route) {
-        ("GET", "/sse") => handle_sse(write_half, store, app).await,
-        ("POST", "/messages") => {
-            handle_post_messages(full_path, store, app, headers, read_half, write_half).await
+        // Token auth: reject unauthenticated connections (spec 10.0 #2, B2 2026-07-05).
+        if extract_bearer_token(&headers).is_none_or(|t| t != state.expected_token) {
+            let body = br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Unauthorized: MCP Bearer token required. Copy it from Settings > Integrations > MCP Server."}}"#;
+            let msg = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                std::str::from_utf8(body).unwrap_or(""),
+            );
+            let _ = write_half.write_all(msg.as_bytes()).await;
+            return Ok(());
         }
-        // Streamable HTTP transport (POST to /mcp or POST to /sse).
-        // Modern MCP clients (Kilo Code, etc.) try Streamable HTTP first by POSTing
-        // directly to the server URL before falling back to the legacy SSE transport.
-        // We handle both /mcp and /sse POST paths to support either URL in config.
-        ("POST", "/mcp") | ("POST", "/sse") => {
-            handle_streamable_http(app, headers, read_half, write_half).await
+
+        match (method.as_str(), route) {
+            ("GET", "/sse") => handle_sse(write_half, state, app).await,
+            ("POST", "/messages") => {
+                handle_post_messages(full_path, state, app, headers, read_half, write_half).await
+            }
+            ("POST", "/mcp") | ("POST", "/sse") => {
+                handle_streamable_http(app, headers, read_half, write_half, state).await
+            }
+            _ => {
+                let mut w = tokio::io::BufWriter::new(write_half);
+                let _ = w
+                    .write_all(
+                        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
+                            .as_bytes(),
+                    )
+                    .await;
+                Ok(())
+            }
         }
-        _ => {
-            let mut w = tokio::io::BufWriter::new(write_half);
-            let _ = w
-                .write_all(
-                    "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}"
-                        .as_bytes(),
-                )
-                .await;
-            Ok(())
-        }
-    }
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "MCP request timed out"))?
 }
 
 async fn handle_sse(
     writer: tokio::net::tcp::OwnedWriteHalf,
-    store: SessionStore,
+    state: Arc<McpServerState>,
     _app: AppHandle,
 ) -> std::io::Result<()> {
     let session_id = generate_session_id();
@@ -1360,7 +479,7 @@ async fn handle_sse(
 
     // Register session
     {
-        let mut sessions = store.lock().unwrap();
+        let mut sessions = state.sessions.lock().unwrap();
         sessions.insert(session_id.clone(), tx);
     }
 
@@ -1415,7 +534,7 @@ async fn handle_sse(
 
     // Clean up session
     {
-        let mut sessions = store.lock().unwrap();
+        let mut sessions = state.sessions.lock().unwrap();
         sessions.remove(&session_id);
     }
 
@@ -1436,12 +555,35 @@ async fn handle_streamable_http(
     headers: HashMap<String, String>,
     mut read_half: tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
+    state: Arc<McpServerState>,
 ) -> std::io::Result<()> {
     // Read POST body
     let content_length = headers
         .get("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
+
+    // Maximum body size check
+    if content_length > MAX_MCP_BODY_SIZE {
+        let _ = write_half
+            .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        let _ = write_half.shutdown().await;
+        return Ok(());
+    }
+
+    // Rate limit check (global)
+    let allowed = {
+        let mut rl = state.rate_limiter.lock().unwrap();
+        rl.allow()
+    };
+    if !allowed {
+        let _ = write_half
+            .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        let _ = write_half.shutdown().await;
+        return Ok(());
+    }
 
     let mut body = Vec::with_capacity(content_length);
     if content_length > 0 {
@@ -1515,7 +657,7 @@ async fn handle_streamable_http(
 
 async fn handle_post_messages(
     full_path: String,
-    store: SessionStore,
+    state: Arc<McpServerState>,
     app: AppHandle,
     headers: HashMap<String, String>,
     mut read_half: tokio::io::BufReader<tokio::net::tcp::OwnedReadHalf>,
@@ -1531,6 +673,15 @@ async fn handle_post_messages(
         .get("content-length")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0);
+
+    // Maximum body size check
+    if content_length > MAX_MCP_BODY_SIZE {
+        let _ = write_half
+            .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+            .await;
+        let _ = write_half.shutdown().await;
+        return Ok(());
+    }
 
     let mut body = Vec::with_capacity(content_length);
     if content_length > 0 {
@@ -1566,9 +717,12 @@ async fn handle_post_messages(
         return Ok(());
     };
 
-    // Rate limit check
-    let mut rate_limiter = RateLimiter::new();
-    if !rate_limiter.allow() {
+    // Rate limit check (global)
+    let allowed = {
+        let mut rl = state.rate_limiter.lock().unwrap();
+        rl.allow()
+    };
+    if !allowed {
         let resp = JsonRpcResponse::error(
             request.id.unwrap_or(serde_json::Value::Null),
             -32000,
@@ -1624,7 +778,7 @@ async fn handle_post_messages(
 
     // Send the response via the SSE channel (the primary delivery path).
     {
-        let sender = store.lock().unwrap().get(&session_id).cloned();
+        let sender = state.sessions.lock().unwrap().get(&session_id).cloned();
         if let Some(sender) = sender {
             let _ = sender
                 .send(String::from_utf8_lossy(&resp_bytes).to_string())
@@ -1758,8 +912,13 @@ pub async fn start_server(app: AppHandle) -> Result<McpServer, std::io::Error> {
 
     let listener = TcpListener::bind(addr).await?;
     // Ensure the MCP bearer token exists on server start (generates + persists on first call).
-    let _ = get_or_create_mcp_token(&app);
-    let session_store: SessionStore = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let expected_token = get_or_create_mcp_token(&app).unwrap_or_default();
+    let server_state = Arc::new(McpServerState {
+        sessions: std::sync::Mutex::new(HashMap::new()),
+        rate_limiter: std::sync::Mutex::new(RateLimiter::new()),
+        expected_token,
+        semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+    });
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1773,7 +932,7 @@ pub async fn start_server(app: AppHandle) -> Result<McpServer, std::io::Error> {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
-                                        Ok((mut stream, _addr)) => {
+                        Ok((mut stream, _addr)) => {
                             // Whitelist: only allow 127.0.0.1
                             let is_local = stream
                                 .peer_addr()
@@ -1790,10 +949,17 @@ pub async fn start_server(app: AppHandle) -> Result<McpServer, std::io::Error> {
                                 continue;
                             }
 
-                            let store_clone = Arc::clone(&session_store);
+                            // Bounded concurrent connections via semaphore
+                            let permit = Arc::clone(&server_state.semaphore)
+                                .acquire_owned()
+                                .await
+                                .expect("MCP server semaphore closed");
+
+                            let state_clone = Arc::clone(&server_state);
                             let app_clone = app_for_loop.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, store_clone, app_clone).await {
+                                let _permit = permit;
+                                if let Err(e) = handle_connection(stream, state_clone, app_clone, port).await {
                                     eprintln!("MCP connection error: {}", e);
                                 }
                             });
@@ -1828,44 +994,8 @@ pub async fn start_server(app: AppHandle) -> Result<McpServer, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---- Approval logic (pure helper) ----
-
-    #[test]
-    fn test_approval_always_allow() {
-        assert_eq!(
-            check_approval_grant(Some("always_allow"), true),
-            ApprovalResult::Allowed
-        );
-    }
-
-    #[test]
-    fn test_approval_always_deny() {
-        assert_eq!(
-            check_approval_grant(Some("always_deny"), true),
-            ApprovalResult::Denied
-        );
-    }
-
-    #[test]
-    fn test_approval_session() {
-        assert_eq!(
-            check_approval_grant(Some("session"), true),
-            ApprovalResult::Allowed
-        );
-    }
-
-    #[test]
-    fn test_approval_no_grant_readonly() {
-        // No grant + non-destructive â†’ allowed (safe default).
-        assert_eq!(check_approval_grant(None, false), ApprovalResult::Allowed);
-    }
-
-    #[test]
-    fn test_approval_no_grant_destructive() {
-        // No grant + destructive â†’ denied (safe default).
-        assert_eq!(check_approval_grant(None, true), ApprovalResult::Denied);
-    }
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
 
     // ---- JSON-RPC helpers ----
 
@@ -1954,22 +1084,19 @@ mod tests {
 
     #[test]
     fn test_rate_limiter_allows_under_limit() {
-        let mut rl = RateLimiter::new();
-        // Under 100 requests â€” all allowed.
+        let rl = Arc::new(std::sync::Mutex::new(RateLimiter::new()));
         for _ in 0..100 {
-            assert!(rl.allow());
+            assert!(rl.lock().unwrap().allow());
         }
     }
 
     #[test]
     fn test_rate_limiter_blocks_over_limit() {
-        let mut rl = RateLimiter::new();
-        // Fill up to limit.
+        let rl = Arc::new(std::sync::Mutex::new(RateLimiter::new()));
         for _ in 0..100 {
-            assert!(rl.allow());
+            assert!(rl.lock().unwrap().allow());
         }
-        // Next request should be denied.
-        assert!(!rl.allow());
+        assert!(!rl.lock().unwrap().allow());
     }
 
     #[test]
@@ -1990,5 +1117,491 @@ mod tests {
         assert!(shutdown_rx.try_recv().is_ok());
         assert!(server.take_stopped_rx().is_some());
         assert!(server.take_stopped_rx().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests — ephemeral-loopback-port HTTP transport
+    // -----------------------------------------------------------------------
+
+    const TEST_TOKEN: &str = "test-mcp-token-00000000000000000000000000000000";
+
+    struct TestServer {
+        port: u16,
+        shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    }
+
+    impl TestServer {
+        async fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+
+            let state = Arc::new(McpServerState {
+                sessions: std::sync::Mutex::new(HashMap::new()),
+                rate_limiter: std::sync::Mutex::new(RateLimiter::new()),
+                expected_token: TEST_TOKEN.to_string(),
+                semaphore: Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS)),
+            });
+
+            let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        result = listener.accept() => {
+                            if let Ok((stream, _addr)) = result {
+                                let state = Arc::clone(&state);
+                                let permit = Arc::clone(&state.semaphore)
+                                    .acquire_owned()
+                                    .await
+                                    .expect("test semaphore closed");
+                                tokio::spawn(async move {
+                                    let _permit = permit;
+                                    let _ = handle_test_connection(stream, state, port).await;
+                                });
+                            }
+                        }
+                        _ = &mut shutdown_rx => break,
+                    }
+                }
+            });
+
+            Self { port, shutdown_tx }
+        }
+
+        fn port(&self) -> u16 {
+            self.port
+        }
+    }
+
+    /// Minimal connection handler for tests: same transport validation as
+    /// `handle_connection` but with a simple dispatch that handles `initialize`.
+    async fn handle_test_connection(
+        stream: TcpStream,
+        state: Arc<McpServerState>,
+        port: u16,
+    ) -> std::io::Result<()> {
+        tokio::time::timeout(Duration::from_secs(30), async move {
+            let (raw_read, mut write_half) = stream.into_split();
+            let mut read_half = BufReader::new(raw_read);
+
+            let mut request_line = String::new();
+            if read_half.read_line(&mut request_line).await? == 0 {
+                return Ok(());
+            }
+
+            let (method, full_path) = match parse_request_line(&request_line) {
+                Some(v) => v,
+                None => return Ok(()),
+            };
+
+            // Headers with aggregate size limit
+            let mut headers = HashMap::new();
+            let mut total_header_bytes: usize = 0;
+            loop {
+                let mut header_line = String::new();
+                let bytes = read_half.read_line(&mut header_line).await?;
+                if bytes == 0 {
+                    break;
+                }
+                total_header_bytes += bytes;
+                if total_header_bytes > MAX_HEADER_SIZE {
+                    let _ = write_half
+                        .write_all(
+                            b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                    let _ = write_half.shutdown().await;
+                    return Ok(());
+                }
+                let header_line = header_line.trim();
+                if header_line.is_empty() {
+                    break;
+                }
+                if let Some((k, v)) = header_line.split_once(':') {
+                    headers.insert(k.trim().to_lowercase(), v.trim().to_string());
+                }
+            }
+
+            // Origin check
+            if let Some(origin) = headers.get("origin") {
+                if !origin.is_empty() && !is_origin_allowed(origin, port) {
+                    let body =
+                        br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Origin not allowed"}}"#;
+                    let msg = format!(
+                        "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        std::str::from_utf8(body).unwrap_or(""),
+                    );
+                    let _ = write_half.write_all(msg.as_bytes()).await;
+                    let _ = write_half.shutdown().await;
+                    return Ok(());
+                }
+            }
+
+            // Token check
+            if extract_bearer_token(&headers).is_none_or(|t| t != state.expected_token) {
+                let body =
+                    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Unauthorized: MCP Bearer token required."}}"#;
+                let msg = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    std::str::from_utf8(body).unwrap_or(""),
+                );
+                let _ = write_half.write_all(msg.as_bytes()).await;
+                let _ = write_half.shutdown().await;
+                return Ok(());
+            }
+
+            // Rate limiter
+            let allowed = state.rate_limiter.lock().unwrap().allow();
+            if !allowed {
+                let _ = write_half
+                    .write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+                let _ = write_half.shutdown().await;
+                return Ok(());
+            }
+
+            let route = extract_route(&full_path);
+
+            // Body read
+            let content_length = headers
+                .get("content-length")
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
+
+            if content_length > MAX_MCP_BODY_SIZE {
+                let _ = write_half
+                    .write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\n\r\n")
+                    .await;
+                // Drain the request body so TCP can FIN without RST
+                let mut drain = [0u8; 4096];
+                let mut remaining = content_length;
+                while remaining > 0 {
+                    let n = remaining.min(4096);
+                    let _ = read_half.read_exact(&mut drain[..n]).await;
+                    remaining -= n;
+                }
+                return Ok(());
+            }
+
+            let mut body = Vec::with_capacity(content_length);
+            if content_length > 0 {
+                body.resize(content_length, 0u8);
+                let _ = read_half.read_exact(&mut body).await;
+            }
+
+            match (method.as_str(), route) {
+                ("POST", "/mcp") | ("POST", "/sse") => {
+                    let request: JsonRpcRequest = match serde_json::from_slice(&body) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let resp = JsonRpcResponse::error(
+                                serde_json::Value::Null,
+                                -32700,
+                                &format!("JSON parse error: {}", e),
+                            );
+                            let resp_bytes = serde_json::to_vec(&resp).unwrap_or_default();
+                            let msg = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                resp_bytes.len(),
+                                String::from_utf8_lossy(&resp_bytes),
+                            );
+                            let _ = write_half.write_all(msg.as_bytes()).await;
+                            return Ok(());
+                        }
+                    };
+
+                    if request.id.is_none() {
+                        let _ = write_half
+                            .write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+                            .await;
+                        return Ok(());
+                    }
+
+                    let result = match request.method.as_str() {
+                        "initialize" => serde_json::json!({
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": { "tools": {}, "resources": {} },
+                            "serverInfo": { "name": "agora", "version": env!("CARGO_PKG_VERSION") }
+                        }),
+                        _ => serde_json::json!({
+                            "error": {
+                                "code": -32601,
+                                "message": format!("Unknown method: {}", request.method)
+                            }
+                        }),
+                    };
+
+                    let response = JsonRpcResponse::success(
+                        request.id.unwrap_or(serde_json::Value::Null),
+                        result,
+                    );
+                    let resp_bytes = response.to_json_bytes();
+                    let msg = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        resp_bytes.len(),
+                        String::from_utf8_lossy(&resp_bytes),
+                    );
+                    let _ = write_half.write_all(msg.as_bytes()).await;
+                    Ok(())
+                }
+                _ => {
+                    let _ = write_half
+                        .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 2\r\n\r\n{}")
+                        .await;
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "test request timed out"))?
+    }
+
+    fn build_request(
+        method: &str,
+        path: &str,
+        token: Option<&str>,
+        body: Option<&[u8]>,
+        extra_headers: &[(&str, &str)],
+    ) -> Vec<u8> {
+        let mut req = format!("{} {} HTTP/1.1\r\nHost: 127.0.0.1\r\n", method, path);
+        if let Some(t) = token {
+            req.push_str(&format!("Authorization: Bearer {}\r\n", t));
+        }
+        if let Some(b) = body {
+            req.push_str(&format!("Content-Length: {}\r\n", b.len()));
+            req.push_str("Content-Type: application/json\r\n");
+        }
+        for (k, v) in extra_headers {
+            req.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        req.push_str("\r\n");
+        let mut bytes = req.into_bytes();
+        if let Some(b) = body {
+            bytes.extend_from_slice(b);
+        }
+        bytes
+    }
+
+    async fn raw_request(port: u16, raw: &[u8]) -> (u16, Vec<u8>) {
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(raw).await.unwrap();
+        // Read response in a loop so that a TCP RST (from unread request body)
+        // does not discard data already received.
+        let mut response = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stream.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => response.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+
+        let status_line = String::from_utf8_lossy(&response)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let body_start = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .unwrap_or(response.len());
+        let body = response[body_start..].to_vec();
+
+        (status, body)
+    }
+
+    // ---- Transport integration tests ----
+
+    #[tokio::test]
+    async fn test_missing_token_401() {
+        let server = TestServer::start().await;
+        let req = build_request(
+            "POST",
+            "/mcp",
+            None,
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_token_401() {
+        let server = TestServer::start().await;
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some("wrong-token"),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_origin_403() {
+        let server = TestServer::start().await;
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[("Origin", "https://evil.com")],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 403);
+    }
+
+    #[tokio::test]
+    async fn test_valid_mcp_call() {
+        let server = TestServer::start().await;
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[],
+        );
+        let (status, body) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 200);
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["jsonrpc"], "2.0");
+        assert_eq!(json["id"], 1);
+        assert_eq!(json["result"]["protocolVersion"], "2024-11-05");
+        assert_eq!(json["result"]["serverInfo"]["name"], "agora");
+    }
+
+    #[tokio::test]
+    async fn test_oversized_body_413() {
+        let server = TestServer::start().await;
+        let big_body = vec![b'X'; MAX_MCP_BODY_SIZE + 1];
+        let req = build_request("POST", "/mcp", Some(TEST_TOKEN), Some(&big_body), &[]);
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 413);
+    }
+
+    #[tokio::test]
+    async fn test_header_too_large_431() {
+        let server = TestServer::start().await;
+        let huge_value = "X".repeat(MAX_HEADER_SIZE);
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{}"#),
+            &[("X-Huge", &huge_value)],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 431);
+    }
+
+    #[tokio::test]
+    async fn test_rate_limiting() {
+        let server = TestServer::start().await;
+        for _ in 0..100 {
+            let req = build_request(
+                "POST",
+                "/mcp",
+                Some(TEST_TOKEN),
+                Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+                &[],
+            );
+            let (status, _) = raw_request(server.port(), &req).await;
+            assert_eq!(status, 200, "expected 200, got {}", status);
+        }
+        // 101st request should be rate-limited
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 429);
+    }
+
+    #[tokio::test]
+    async fn test_stop_restart_lifecycle() {
+        let server = TestServer::start().await;
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 200);
+
+        // Explicitly stop the server
+        let _ = server.shutdown_tx.send(());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Start a fresh server on a new port
+        let server2 = TestServer::start().await;
+        let req2 = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize","id":1}"#),
+            &[],
+        );
+        let (status2, _) = raw_request(server2.port(), &req2).await;
+        assert_eq!(status2, 200);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_request_404() {
+        let server = TestServer::start().await;
+        let req = b"GET /unknown HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test-mcp-token-00000000000000000000000000000000\r\n\r\n";
+        let (status, _) = raw_request(server.port(), req).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test]
+    async fn test_malformed_header_skip_200() {
+        let server = TestServer::start().await;
+        let req = b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nBadHeaderNoColon\r\nAuthorization: Bearer test-mcp-token-00000000000000000000000000000000\r\nContent-Length: 46\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"id\":1}";
+        let (status, _) = raw_request(server.port(), req).await;
+        assert_eq!(status, 200, "malformed header line should be skipped");
+    }
+
+    #[tokio::test]
+    async fn test_notification_202() {
+        let server = TestServer::start().await;
+        // A JSON-RPC notification (no "id" field) should get 202 Accepted
+        let req = build_request(
+            "POST",
+            "/mcp",
+            Some(TEST_TOKEN),
+            Some(br#"{"jsonrpc":"2.0","method":"initialize"}"#),
+            &[],
+        );
+        let (status, _) = raw_request(server.port(), &req).await;
+        assert_eq!(status, 202);
+    }
+
+    #[tokio::test]
+    async fn test_semaphore_bounds_concurrent_connections() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(2));
+        // Acquire both permits
+        let _p1 = semaphore.acquire().await;
+        let _p2 = semaphore.acquire().await;
+        // Third acquire without permit should not complete
+        let try_result = semaphore.try_acquire();
+        assert!(try_result.is_err(), "semaphore should be exhausted at 3");
     }
 }

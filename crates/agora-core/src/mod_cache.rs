@@ -118,7 +118,7 @@ impl ModCache {
                 continue;
             }
 
-            let hash_entries = fs::read_dir(&entry.path())
+            let hash_entries = fs::read_dir(entry.path())
                 .map_err(|e| format!("failed to read hash dir: {}", e))?;
 
             for hash_entry in hash_entries {

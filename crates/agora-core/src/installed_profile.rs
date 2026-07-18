@@ -510,7 +510,7 @@ fn validate_loader_profile(
     }
 
     // 4. Arguments validation.
-    validate_arguments(&info, profile_path)?;
+    validate_arguments(info, profile_path)?;
 
     // 5. Library validation.
     validate_libraries(&info.libraries, profile_path)?;
@@ -1464,11 +1464,10 @@ pub fn create_receipt_for_installed_profile(
 
     // 10. Prove binding by calling normal adoption with the same source SHA.
     let _adopted = adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
-        .map_err(|issue| {
+        .inspect_err(|_issue| {
             // If adoption fails despite successful write, try to clean up the
             // receipt to avoid orphaned metadata.
             let _ = remove_receipt(receipts_root, tuple);
-            issue
         })?;
 
     Ok(receipt)
@@ -1557,9 +1556,8 @@ pub fn create_receipt_for_profile_json(
 
     // 6. Prove binding by calling normal adoption with the same source SHA.
     let _adopted = adopt_installed_profile(minecraft_dir, receipts_root, tuple, source_sha256)
-        .map_err(|issue| {
+        .inspect_err(|_issue| {
             let _ = remove_receipt(receipts_root, tuple);
-            issue
         })?;
 
     Ok(receipt)
@@ -3147,14 +3145,16 @@ mod tests {
     fn test_max_generated_library_size_is_reasonable() {
         // The constant must be at least large enough for typical Forge libraries
         // (usually < 32 MiB) but not absurdly large.
-        assert!(
-            MAX_GENERATED_LIBRARY_SIZE >= 8 * 1024 * 1024,
-            "MAX_GENERATED_LIBRARY_SIZE should be at least 8 MiB"
-        );
-        assert!(
-            MAX_GENERATED_LIBRARY_SIZE <= 256 * 1024 * 1024,
-            "MAX_GENERATED_LIBRARY_SIZE should be at most 256 MiB"
-        );
+        const {
+            assert!(
+                MAX_GENERATED_LIBRARY_SIZE >= 8 * 1024 * 1024,
+                "MAX_GENERATED_LIBRARY_SIZE should be at least 8 MiB"
+            );
+            assert!(
+                MAX_GENERATED_LIBRARY_SIZE <= 256 * 1024 * 1024,
+                "MAX_GENERATED_LIBRARY_SIZE should be at most 256 MiB"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

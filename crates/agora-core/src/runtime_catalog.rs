@@ -11,6 +11,7 @@
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::{Arc, RwLock};
 
 /// Embedded runtime catalog bytes at compile time.
 /// All consumers should use [`RuntimeCatalog::embedded`] instead of their own
@@ -419,9 +420,7 @@ impl RuntimeCatalog {
     /// Panics if the embedded JSON is invalid (this is a compile-time invariant
     /// checked in tests).
     pub fn embedded() -> Self {
-        let catalog = Self::from_json(EMBEDDED_CATALOG_BYTES)
-            .expect("embedded runtime catalog should be valid");
-        catalog
+        Self::from_json(EMBEDDED_CATALOG_BYTES).expect("embedded runtime catalog should be valid")
     }
 
     /// Load the runtime catalog from the registry database if available.
@@ -496,6 +495,55 @@ impl RuntimeCatalog {
     /// Returns `true` if the catalog has no entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cloneable handle with atomic reload
+// ---------------------------------------------------------------------------
+
+/// A cloneable handle to a shared [`RuntimeCatalog`] that supports atomic
+/// reload at runtime.
+///
+/// All consumers that need the catalog for a single operation should call
+/// [`snapshot`](Self::snapshot), which yields an immutable copy valid for
+/// that operation.  The handle itself is cheap to clone (an `Arc` bump).
+#[derive(Clone)]
+pub struct RuntimeCatalogHandle {
+    inner: Arc<RwLock<RuntimeCatalog>>,
+}
+
+impl RuntimeCatalogHandle {
+    /// Wrap a catalog into a shared handle.
+    pub fn new(catalog: RuntimeCatalog) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(catalog)),
+        }
+    }
+
+    /// Take an immutable snapshot of the current catalog.
+    ///
+    /// The returned [`RuntimeCatalog`] is a plain struct — cheap to pass
+    /// around — that reflects the state at the moment of the call.
+    pub fn snapshot(&self) -> RuntimeCatalog {
+        self.inner.read().unwrap().clone()
+    }
+
+    /// Atomically replace the inner catalog with a new value.
+    ///
+    /// The old catalog is dropped exactly when the last-held snapshot goes
+    /// away.  Panics if the lock is poisoned.
+    pub fn replace(&self, catalog: RuntimeCatalog) {
+        *self.inner.write().unwrap() = catalog;
+    }
+}
+
+impl std::fmt::Debug for RuntimeCatalogHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let snapshot = self.snapshot();
+        f.debug_struct("RuntimeCatalogHandle")
+            .field("snapshot", &snapshot)
+            .finish()
     }
 }
 
@@ -623,7 +671,6 @@ mod tests {
     fn test_catalog_not_empty() {
         let catalog = load_test_catalog();
         assert!(!catalog.is_empty());
-        assert!(catalog.len() > 0);
     }
 
     #[test]
@@ -749,5 +796,55 @@ mod tests {
         let json = serde_json::to_string(&catalog).expect("serialize");
         let deserialized: RuntimeCatalog = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(catalog, deserialized);
+    }
+
+    #[test]
+    fn test_handle_snapshot_returns_initial() {
+        let catalog = RuntimeCatalog::embedded();
+        let handle = RuntimeCatalogHandle::new(catalog.clone());
+        assert_eq!(handle.snapshot(), catalog);
+    }
+
+    #[test]
+    fn test_handle_replace_visible_on_next_snapshot() {
+        let catalog = RuntimeCatalog::embedded();
+        let handle = RuntimeCatalogHandle::new(catalog.clone());
+        let mut modified = catalog.clone();
+        modified.generated_at = "replaced".into();
+        handle.replace(modified.clone());
+        assert_eq!(handle.snapshot(), modified);
+    }
+
+    #[test]
+    fn test_handle_clone_shares_inner() {
+        let handle = RuntimeCatalogHandle::new(RuntimeCatalog::embedded());
+        let cloned = handle.clone();
+        let new_cat = RuntimeCatalog::embedded();
+        // cloned sees the same state as handle
+        assert_eq!(cloned.snapshot(), handle.snapshot());
+        drop(cloned);
+        // handle still works after clone drops
+        assert_eq!(handle.snapshot(), new_cat);
+    }
+
+    #[test]
+    fn test_handle_debug_does_not_panic() {
+        let handle = RuntimeCatalogHandle::new(RuntimeCatalog::embedded());
+        let debug = format!("{:?}", handle);
+        assert!(!debug.is_empty());
+    }
+
+    #[test]
+    fn test_handle_old_catalog_preserved_on_replace() {
+        let embedded = RuntimeCatalog::embedded();
+        let handle = RuntimeCatalogHandle::new(embedded.clone());
+        // Take a snapshot before replace.
+        let before = handle.snapshot();
+        let mut after = embedded.clone();
+        after.source = "replaced-source".into();
+        handle.replace(after);
+        // The old snapshot is not affected.
+        assert_eq!(before, embedded);
+        assert_ne!(before.source, "replaced-source");
     }
 }

@@ -35,12 +35,24 @@ const MAX_JITTER_SECS: u64 = 30;
 // ---------------------------------------------------------------------------
 
 static GITHUB_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .user_agent("AgoraLauncher/1.0")
-        .timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(MAX_CONCURRENT_GITHUB)
-        .build()
-        .expect("failed to build shared GitHub HTTP client")
+    // Build via HttpClients to ensure consistent policy (HTTPS, no redirects,
+    // no IP literals, size limits). The GitHub category allowlist is enforced
+    // by the checked helper callers should use. The raw client is available
+    // for low-level API calls; explicit URL validation happens in callers.
+    match crate::http_client::HttpClients::new() {
+        Ok(clients) => clients
+            .get(crate::http_client::ClientCategory::GitHub)
+            .clone(),
+        Err(_) => {
+            // Fallback: minimal client if TLS init fails unexpectedly.
+            reqwest::Client::builder()
+                .user_agent("AgoraLauncher/1.0")
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("failed to build GitHub HTTP client")
+        }
+    }
 });
 
 /// Returns the shared [`reqwest::Client`] used for **all** GitHub API calls.
@@ -87,7 +99,7 @@ static COOLDOWN_UNTIL: LazyLock<Mutex<Option<Instant>>> = LazyLock::new(|| Mutex
 pub async fn report_rate_limit(retry_after_header: Option<u64>) {
     let base = retry_after_header.unwrap_or(DEFAULT_COOLDOWN_SECS);
     // Deterministic-ish jitter (10-25 % of base, capped).
-    let jitter_range = (base / 4).min(MAX_JITTER_SECS).max(1);
+    let jitter_range = (base / 4).clamp(1, MAX_JITTER_SECS);
     let jitter = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -98,7 +110,7 @@ pub async fn report_rate_limit(retry_after_header: Option<u64>) {
 
     let mut lock = COOLDOWN_UNTIL.lock().await;
     // Only ever *extend* the cooldown, never shorten it.
-    if lock.map_or(true, |cur| expiry > cur) {
+    if lock.is_none_or(|cur| expiry > cur) {
         *lock = Some(expiry);
     }
     eprintln!("[GITHUB_RATE_LIMIT] cooldown for {total}s — all GitHub traffic paused");
@@ -116,7 +128,7 @@ pub async fn clear_rate_limit() {
 /// Returns `true` if a cooldown is currently active.
 pub async fn is_rate_limited() -> bool {
     let lock = COOLDOWN_UNTIL.lock().await;
-    lock.map_or(false, |until| Instant::now() < until)
+    lock.is_some_and(|until| Instant::now() < until)
 }
 
 /// Sleep until the cooldown expires.  Returns immediately if no cooldown is

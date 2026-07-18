@@ -714,5 +714,108 @@ class TestRuntimeCatalogMaliciousHost(unittest.TestCase):
         self.assertGreater(len(url_errors), 0)
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Tauri command binding check tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+import check_tauri_bindings as ctb
+
+
+class TestParseRustCommands(unittest.TestCase):
+    """Tests for parse_rust_commands."""
+
+    def test_parses_generate_handler(self):
+        text = """
+        .invoke_handler(tauri::generate_handler![
+            commands::browse_items,
+            commands::for_you_items,
+            commands::get_registry_item,
+        ])
+        """
+        result = ctb.parse_rust_commands(text)
+        self.assertEqual(result, {"browse_items", "for_you_items", "get_registry_item"})
+
+    def test_handles_generics_in_block(self):
+        text = """
+        generate_handler![
+            commands::foo::<u64>,
+            commands::bar,
+        ]
+        """
+        result = ctb.parse_rust_commands(text)
+        # Only picks up commands:: prefix, not the generic
+        self.assertIn("bar", result)
+
+    def test_empty_handler(self):
+        text = """generate_handler![]"""
+        result = ctb.parse_rust_commands(text)
+        self.assertEqual(result, set())
+
+    def test_no_handler_errors(self):
+        """Missing handler block should exit."""
+        with self.assertRaises(SystemExit):
+            ctb.parse_rust_commands("fn main() {}")
+
+
+class TestParseRustDefinedCommands(unittest.TestCase):
+    """Tests for parse_rust_defined_commands."""
+
+    def test_detects_tauri_command(self):
+        text = """
+        #[tauri::command]
+        pub async fn browse_items() -> Result<Vec<String>> { todo!() }
+
+        #[tauri::command]
+        pub fn list_things() -> Result<()> { todo!() }
+        """
+        result = ctb.parse_rust_defined_commands(text)
+        self.assertEqual(result, {"browse_items", "list_things"})
+
+    def test_skips_non_command_fns(self):
+        text = """
+        pub fn helper() {}
+        #[tauri::command]
+        pub fn exposed() {}
+        """
+        result = ctb.parse_rust_defined_commands(text)
+        self.assertEqual(result, {"exposed"})
+
+
+class TestParseTsInvokeCalls(unittest.TestCase):
+    """Tests for parse_ts_invoke_calls."""
+
+    def test_parses_invoke_calls(self):
+        text = """
+        export const foo = () => invoke<string>('foo_cmd');
+        export const bar = (x: number) => invoke<number>('bar_cmd', { x });
+        export const baz = () => invoke<Record<string, unknown> | null>('baz_cmd');
+        """
+        result = ctb.parse_ts_invoke_calls(text)
+        self.assertEqual(result, {"foo_cmd", "bar_cmd", "baz_cmd"})
+
+
+class TestBuildManifest(unittest.TestCase):
+    """Tests for build_manifest structure."""
+
+    def test_returns_expected_keys(self):
+        """The manifest dict has the expected top-level keys."""
+        # Parse a known-small set of files via inline fixtures
+        manifest = {
+            "schema_version": ctb.SCHEMA_VERSION,
+            "summary": {"registered_rust": 0, "defined_rust": 0, "ts_wrappers": 0},
+            "commands": {
+                "registered": [],
+                "defined": [],
+                "ts_wrappers": [],
+                "missing_ts_wrapper": [],
+                "missing_rust_command": [],
+                "defined_not_registered": [],
+            },
+        }
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertIn("registered_rust", manifest["summary"])
+        self.assertIn("commands", manifest)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,7 +2,6 @@ use crate::ai_assistant::{self, ChatMessage, ChatResponse};
 use crate::auth::{DeviceFlowResponse, GithubProfile};
 use crate::crash_diagnostics::{self, CrashReportInfo, CrashTriageResult};
 use crate::crash_investigator;
-use crate::db;
 use crate::dependency_ops;
 use crate::error::{LauncherError, LauncherResult};
 use crate::instances::{self, CreateInstanceRequest, InstanceDetail, LoaderVersionSummary};
@@ -20,11 +19,9 @@ use crate::registry::{
 use crate::state::LauncherState;
 use crate::version_cache::{self, ModVersionPage, SharedVersionCache};
 use agora_core::browse_cache::{self, BrowseFilters, BrowsePage};
-use agora_core::minecraft_runtime;
 use agora_core::modrinth::{ModrinthSearchParams, ModrinthSort};
-use agora_core::pack_install;
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex};
 use tauri::Manager;
 
@@ -60,15 +57,11 @@ impl From<&agora_core::msa::MsaCredentials> for MsaAccountStatus {
 /// Global version list cache for paginated mod version resolution.
 static VERSION_CACHE: LazyLock<SharedVersionCache> = LazyLock::new(version_cache::new_cache);
 
-#[tauri::command]
-pub async fn greet(name: String) -> String {
-    format!("Hello, {}!", name)
-}
-
 /// Browse registry items with typed filters (replaces raw-SQL queryRegistry).
 ///
 /// When `modrinth_enabled` is false, items with `download_strategy = 'modrinth_id'`
 /// are excluded from results.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn browse_items(
     app: tauri::AppHandle,
@@ -82,9 +75,9 @@ pub async fn browse_items(
     limit: Option<i64>,
 ) -> LauncherResult<Vec<RegistryItem>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::browse_items(
-            &conn,
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.browse_items(
             content_type.as_deref(),
             category.as_deref(),
             &sort.unwrap_or_default(),
@@ -103,9 +96,9 @@ pub async fn browse_items(
 }
 
 /// "For You" recommendations: boost uninstalled mods whose categories overlap
-/// with the user's installed mods (§6.2). Honors the user's selected MC version
-/// and loader compatibility filters when supplied. Accepts optional Modrinth
-/// category facets from the Browse page filter state to build the overlap set.
+/// with the user's installed mods (§6.2). Delegates to core
+/// [`RegistryService::for_you_items`] for all business logic.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn for_you_items(
     app: tauri::AppHandle,
@@ -119,10 +112,10 @@ pub async fn for_you_items(
 ) -> LauncherResult<Vec<RegistryItem>> {
     let modrinth_enabled = modrinth_enabled.unwrap_or(false);
     let limit = limit.unwrap_or(50).clamp(1, 500);
-    let app = app.clone();
     tokio::task::spawn_blocking(move || {
-        registry::for_you_items(
-            &app,
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.for_you_items(
             modrinth_enabled,
             mc_version.as_deref(),
             loader.as_deref(),
@@ -146,8 +139,9 @@ pub async fn get_curated_annotation(
     modrinth_id: String,
 ) -> LauncherResult<Option<CuratedAnnotation>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::get_curated_annotation(&conn, &modrinth_id)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.get_curated_annotation(&modrinth_id)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -164,8 +158,9 @@ pub async fn get_registry_item(
     item_id: String,
 ) -> LauncherResult<Option<RegistryItem>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::get_item_by_id(&conn, &item_id)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.get_item_by_id(&item_id)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -181,8 +176,9 @@ pub async fn list_categories(
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Vec<CategoryInfo>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::list_categories(&conn)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.list_categories()
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -199,8 +195,9 @@ pub async fn list_pack_mods(
     pack_id: String,
 ) -> LauncherResult<Vec<PackModRow>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::pack_mods_for_pack(&conn, &pack_id)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.pack_mods_for_pack(&pack_id)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -209,7 +206,7 @@ pub async fn list_pack_mods(
     })?
 }
 
-/// List audit log entries from the registry DB (Â§4.6).
+/// List audit log entries from the registry DB (§4.6).
 #[tauri::command]
 pub async fn list_audit_log(
     app: tauri::AppHandle,
@@ -218,8 +215,9 @@ pub async fn list_audit_log(
 ) -> LauncherResult<Vec<AuditLogEntry>> {
     let limit = limit.unwrap_or(200).clamp(1, 1000);
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::list_audit_log(&conn, limit)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.list_audit_log(limit)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -314,7 +312,10 @@ pub async fn revert_instance(
     instances::revert_instance(&app, &instance_id).await
 }
 
-/// Launch an instance via the official Mojang launcher delegation.
+/// Launch an instance via the official Mojang launcher delegation. Delegates
+/// orchestration to core [`LaunchService`] and runs the outcome monitoring
+/// in a background task.  LKG outcome recording and retention happen in core;
+/// the desktop adapter only emits Tauri UI events.
 #[tauri::command]
 pub async fn launch_instance(
     app: tauri::AppHandle,
@@ -328,115 +329,135 @@ pub async fn launch_instance(
             message: "Instance ID is empty or invalid.".into(),
         });
     }
-    let session_id = {
-        let mut shared = state.lock().await;
-        if shared.running_process.is_some() || shared.launch_reservation.is_some() {
-            return Err(LauncherError::Generic {
-                code: "ERR_ALREADY_RUNNING".into(),
-                message: "Another launch is already running or starting.".into(),
-            });
-        }
-        shared.launch_session_counter += 1;
-        let session_id = shared.launch_session_counter;
-        shared.launch_reservation = Some(agora_core::state::LaunchReservation {
-            instance_id: sanitized.clone(),
-            session_id,
+    if state.lock().await.running_process.is_some() {
+        return Err(LauncherError::Generic {
+            code: "ERR_ALREADY_RUNNING".into(),
+            message: "Another launch is already running or starting.".into(),
         });
-        session_id
-    };
+    }
 
-    let launch_result: LauncherResult<()> = async {
-        let instance_dir =
-            paths::instance_dir(&app, &sanitized).map_err(|e| LauncherError::Generic {
-                code: "ERR_INSTANCE_PATH".into(),
-                message: e.to_string(),
-            })?;
-        let snapshot_dir = instance_dir.clone();
-        let snapshot_label = format!(
-            "pre-launch-delegated-{}",
-            chrono::Utc::now().format("%Y%m%d-%H%M%S")
-        );
-        let snapshot_id = tokio::task::spawn_blocking(move || {
-            create_or_reuse_prelaunch_snapshot(&snapshot_dir, &snapshot_label)
-        })
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_SNAPSHOT".into(),
-            message: format!("Pre-launch snapshot task failed: {e}"),
-        })?
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_SNAPSHOT".into(),
-            message: format!("Could not create the recovery snapshot required for launch: {e}"),
+    let ctx = crate::core_context(&app)?;
+    let instance_dir =
+        paths::instance_dir(&app, &sanitized).map_err(|e| LauncherError::Generic {
+            code: "ERR_INSTANCE_PATH".into(),
+            message: e.to_string(),
         })?;
 
-        let launched_at = std::time::SystemTime::now();
-        let app_for_launch = app.clone();
-        let id_for_launch = sanitized.clone();
-        tokio::task::spawn_blocking(move || {
-            instances::launch_instance(&app_for_launch, &id_for_launch)
-        })
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_LAUNCH_TASK".into(),
-            message: format!("Launcher handoff task failed: {e}"),
-        })??;
+    let progress = DelegatedLaunchProgress {
+        app: app.clone(),
+        instance_id: sanitized.clone(),
+    };
+    let request = agora_core::launch_service::LaunchRequest {
+        instance_id: sanitized.clone(),
+        mode: agora_core::launch_service::LaunchMode::Delegated,
+        health_policy: agora_core::launch_service::HealthPolicy::BlockOnRed,
+    };
+    let result = agora_core::launch_service::LaunchService::new(ctx.clone())
+        .launch(request, &progress)
+        .await?;
 
-        let state_for_monitor = state.inner().clone();
-        let app_for_monitor = app.clone();
-        let id_for_monitor = sanitized.clone();
-        tokio::spawn(async move {
-            monitor_delegated_launch(
-                app_for_monitor,
-                state_for_monitor,
-                id_for_monitor,
-                instance_dir,
-                snapshot_id,
-                session_id,
-                launched_at,
-            )
-            .await;
-        });
+    let launched_at = std::time::SystemTime::now();
+    let app_for_monitor = app.clone();
+    let id_for_monitor = sanitized.clone();
+    let dir_for_monitor = instance_dir;
+    let snap_id = result.snapshot_id.clone();
+    let session_id = result.session_id;
+    tokio::spawn(async move {
+        // Core-owned wait_delegated handles monitoring, LKG recording,
+        // and retention. Desktop only emits the Tauri event.
+        let outcome = agora_core::launch_service::LaunchService::wait_delegated(
+            &ctx,
+            &id_for_monitor,
+            &dir_for_monitor,
+            &snap_id,
+            session_id,
+            launched_at,
+        )
+        .await;
 
-        // Delegated launches hand off control to the official Mojang launcher,
-        // which then owns the game process. Agora cannot observe the game's
-        // true lifetime or exit state through the delegated launcher, so holding
-        // the launch reservation would only deadlock future launches — e.g. if
-        // the user closes the Mojang launcher UI while the background monitor
-        // is still waiting for a "Stopping!" log marker that may never arrive.
-        //
-        // Treat the handoff itself as the completion point for launch-ownership
-        // purposes: release the reservation now so the instance is immediately
-        // ready to launch again. The background monitor above continues only to
-        // record a best-effort launch outcome for LKG snapshot promotion; it is
-        // self-canceling if a newer launch supersedes this session.
-        {
-            let mut shared = state.lock().await;
-            if shared.launch_reservation.as_ref().map(|r| r.session_id) == Some(session_id) {
-                shared.launch_reservation = None;
-            }
-        }
-        Ok(())
-    }
-    .await;
+        use tauri::Emitter;
+        let _ = app_for_monitor.emit(
+            "game-exited",
+            serde_json::json!({
+                "instance_id": id_for_monitor,
+                "outcome": outcome,
+                "snapshot_id": snap_id,
+                "delegated": true,
+            }),
+        );
+    });
 
-    if launch_result.is_err() {
-        let mut shared = state.lock().await;
-        if shared.launch_reservation.as_ref().map(|r| r.session_id) == Some(session_id) {
-            shared.launch_reservation = None;
-        }
-    }
-    launch_result
+    Ok(())
 }
 
-/// Direct Java spawn — Agora owns the launch process instead of delegating to Mojang launcher.
+struct DelegatedLaunchProgress {
+    app: tauri::AppHandle,
+    instance_id: String,
+}
+
+impl agora_core::launch_service::LaunchProgress for DelegatedLaunchProgress {
+    fn phase(&self, phase: &str, message: &str) {
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            "launch-progress",
+            serde_json::json!({
+                "instance_id": self.instance_id,
+                "phase": phase,
+                "message": message,
+            }),
+        );
+    }
+
+    fn started(&self, started: &agora_core::launch_service::LaunchStarted) {
+        use tauri::Emitter;
+        let app = self.app.clone();
+        let instance_id = self.instance_id.clone();
+        let started = started.clone();
+        tokio::spawn(async move {
+            let _ = app.emit(
+                "game-started",
+                serde_json::json!({
+                    "instance_id": instance_id,
+                    "session_id": started.session_id,
+                    "delegated": true,
+                }),
+            );
+        });
+    }
+
+    fn finished(&self, _result: &agora_core::launch_service::LaunchResult) {
+        // Empty for delegated — the background monitoring task emits
+        // `game-exited` when the monitored log shows game exit.
+    }
+
+    fn handoff(
+        &self,
+        _identity: &agora_core::launch_planner::LaunchIdentity,
+    ) -> LauncherResult<()> {
+        instances::launch_instance(&self.app, &self.instance_id)
+    }
+}
+
+/// Launch an instance with an optional recovery action performed before the
+/// launch. The recovery action (provision Java or repair loader) runs in the
+/// same backend operation; if it fails the launch is aborted. Uses the same
+/// process/session machinery as [`launch_instance_direct`].
+///
+/// - `action.None` → plain direct launch (same as `launch_instance_direct`)
+/// - `action.ProvisionJava { major }` → provision runtime then retry
+/// - `action.RepairLoader` → force-reinstall loader then retry
+///
+/// Always uses Direct mode (recovery actions only make sense for direct
+/// launches). Returns the PID on success.
 #[tauri::command]
-pub async fn launch_instance_direct(
+pub async fn launch_instance_with_recovery(
     app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
     instance_id: String,
+    action: agora_core::launch_service::LaunchRecoveryAction,
 ) -> LauncherResult<u32> {
-    use tauri::Emitter;
-    use tokio::io::AsyncBufReadExt;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
 
     let sanitized = paths::sanitize_id(&instance_id);
     if sanitized.is_empty() {
@@ -445,890 +466,280 @@ pub async fn launch_instance_direct(
             message: "Instance ID is empty or invalid.".into(),
         });
     }
-
-    // Reserve launch ownership before any asynchronous setup. This closes the
-    // check-then-spawn race while avoiding a state mutex held across network IO.
-    let launch_session_id = {
-        let mut s = state.lock().await;
-        if s.running_process.is_some() || s.launch_reservation.is_some() {
+    {
+        let shared = state.lock().await;
+        if shared.running_process.is_some() || shared.launch_reservation.is_some() {
             return Err(LauncherError::Generic {
                 code: "ERR_ALREADY_RUNNING".into(),
-                message: "Another direct launch is already running or starting. Wait for it to finish or stop it first.".into(),
+                message: "Another direct launch is already running or starting.".into(),
             });
         }
-        s.launch_session_counter += 1;
-        let session_id = s.launch_session_counter;
-        s.launch_reservation = Some(agora_core::state::LaunchReservation {
+    }
+
+    let ctx = crate::core_context(&app)?;
+    let (started_tx, started_rx) = oneshot::channel::<LauncherResult<u32>>();
+    {
+        let mut shared = state.lock().await;
+        shared.launch_reservation = Some(agora_core::state::LaunchReservation {
             instance_id: sanitized.clone(),
-            session_id,
         });
-        session_id
+    }
+    let progress = TauriLaunchProgress {
+        app: app.clone(),
+        state: state.inner().clone(),
+        instance_id: sanitized.clone(),
+        started: Mutex::new(Some(started_tx)),
+        session_id: Mutex::new(None),
     };
-
-    let launch_result: LauncherResult<u32> = async {
-        let conn = db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
-            code: "ERR_DB".into(),
-            message: e.to_string(),
-        })?;
-        let row = db::get_instance(&conn, &sanitized)
-            .map_err(|_| LauncherError::LocalStateFailed)?
-            .ok_or(LauncherError::LaunchFailed)?;
-        drop(conn);
-
-        let instance_dir =
-            paths::instance_dir(&app, &sanitized).map_err(|e| LauncherError::Generic {
-                code: "ERR_INSTANCE_PATH".into(),
-                message: e.to_string(),
-            })?;
-
-        let java_runtime_mode: String = {
-            let conn2 = db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
-                code: "ERR_DB".into(),
-                message: e.to_string(),
-            })?;
-            db::get_setting(&conn2, "java_runtime_mode")
-                .ok()
-                .flatten()
-                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                .unwrap_or_else(|| "automatic".to_string())
-        };
-
-        let app_data_for_java =
-            paths::app_data_dir(&app).map_err(|error| LauncherError::Generic {
-                code: "ERR_APP_DATA".into(),
-                message: error.to_string(),
-            })?;
-        let minecraft_dir_for_java = paths::minecraft_dir();
-        let runtimes_root = app_data_for_java.join("runtimes");
-
-        let java_candidates = tokio::task::spawn_blocking(move || {
-            agora_core::java::detect_java_candidates(
-                Some(&runtimes_root),
-                minecraft_dir_for_java.as_deref(),
-            )
-        })
-        .await
-        .map_err(|error| LauncherError::Generic {
-            code: "ERR_JAVA_DETECTION".into(),
-            message: format!("Java detection task failed: {error}"),
-        })?;
-
-        // Resolve java override: per-instance first, then global setting
-        let java_override: Option<PathBuf> = {
-            let conn2 = db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
-                code: "ERR_DB".into(),
-                message: e.to_string(),
-            })?;
-            // Per-instance override takes priority
-            let per_instance = row
-                .java_path
-                .as_ref()
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| PathBuf::from(p));
-            if per_instance.is_some() {
-                per_instance
-            } else {
-                let user_override = db::get_setting(&conn2, "java_path")
-                    .map_err(|e| LauncherError::Generic {
-                        code: "ERR_DB".into(),
-                        message: e.to_string(),
-                    })?
-                    .and_then(|v| v.as_str().map(|s| s.to_string()));
-                drop(conn2);
-                user_override.map(PathBuf::from)
-            }
-        };
-        let client = reqwest::Client::new();
-        let db_path = paths::local_state_db_path(&app).map_err(|error| LauncherError::Generic {
-            code: "ERR_DB_PATH".into(),
-            message: error.to_string(),
-        })?;
-
-        // Build network policy from local_state.db settings.
-        let network_policy = {
-            let policy_conn =
-                db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
-                    code: "ERR_DB".into(),
-                    message: e.to_string(),
-                })?;
-            agora_core::network::NetworkPolicy::from_db(&policy_conn)
-        };
-
-        // Check MicrosoftAuthentication policy before touching MSA.
-        network_policy.check(agora_core::network::NetworkCategory::MicrosoftAuthentication)?;
-
-        let mut credentials =
-            agora_core::msa::load_credentials()?.ok_or(LauncherError::AuthRequired)?;
-        if credentials.needs_refresh() {
-            credentials = agora_core::msa::refresh_credentials(&client, &credentials, &db_path)
-                .await
-                .map_err(|error| LauncherError::Generic {
-                    code: "ERR_AUTH_REFRESH_FAILED".into(),
-                    message: format!("Minecraft account refresh failed: {error}"),
-                })?;
-        }
-        if credentials.is_expired() {
-            return Err(LauncherError::AuthExpired);
-        }
-
-        let app_data = paths::app_data_dir(&app).map_err(|error| LauncherError::Generic {
-            code: "ERR_APP_DATA".into(),
-            message: error.to_string(),
-        })?;
-        let minecraft_runtime_root = app_data.join("minecraft-runtime");
-        let runtime_layout = minecraft_runtime::ensure_runtime_layout(&minecraft_runtime_root)?;
-        let loader = if matches!(row.loader.as_str(), "" | "vanilla") {
-            None
-        } else {
-            Some(agora_core::launch::LoaderInfo {
-                loader_type: row.loader.clone(),
-                version: row.loader_version.clone(),
-                version_url: String::new(),
-            })
-        };
-        let allow_incompatible = row.java_incompatible_override;
-
-        let resolve_result =
-            agora_core::launch_planner::resolve(agora_core::launch_planner::ResolveRequest {
-                instance_id: sanitized.clone(),
-                base_version_id: row.minecraft_version.clone(),
-                loader,
-                game_dir: instance_dir.clone(),
-                assets_dir: runtime_layout.assets.clone(),
-                cache_dir: runtime_layout.root.clone(),
-                java_override,
-                java_candidates: java_candidates.clone(),
-                network_policy: network_policy.clone(),
-                allow_incompatible_java_override: allow_incompatible,
-                minecraft_dir: Some(runtime_layout.root.clone()),
-                receipts_root: Some(
-                    app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
-                ),
-            })
-            .await;
-
-        let resolved = match resolve_result {
-            Ok(plan) => plan,
-            Err(LauncherError::JavaRuntimeMissing { major, component }) => {
-                // In automatic mode, provision the runtime and retry exactly once.
-                if java_runtime_mode == "automatic" {
-                    let app_data =
-                        paths::app_data_dir(&app).map_err(|error| LauncherError::Generic {
-                            code: "ERR_APP_DATA".into(),
-                            message: error.to_string(),
-                        })?;
-                    let runtimes_root = app_data.join("runtimes");
-                    let registry_conn = registry::open_registry(&app).ok();
-                    let catalog = agora_core::runtime_catalog::RuntimeCatalog::effective(
-                        registry_conn.as_ref(),
-                    );
-
-                    // Check network policy — preserve major info on failure
-                    network_policy
-                        .check(agora_core::network::NetworkCategory::JavaRuntime)
-                        .map_err(|_| LauncherError::JavaRuntimeDownloadDisabled {
-                            major,
-                            component: component.clone(),
-                        })?;
-
-                    // Register cancellation flag for auto-launch provisioning.
-                    let auto_op_id = java_runtime_op_id(&sanitized, major);
-                    let (_auto_id, cancel_flag) = register_java_runtime_cancel(&auto_op_id);
-                    let _auto_cancel_guard = CancelGuard::new(&auto_op_id);
-
-                    // Emit progress event (cancel-safe)
-                    let _ = app.emit(
-                        "java-runtime-progress",
-                        serde_json::json!({
-                            "instance_id": sanitized,
-                            "major": major,
-                            "stage": "ensuring",
-                            "message": format!("Provisioning Java {} runtime...", major),
-                            "percent": 0.0,
-                        }),
-                    );
-
-                    // Use channel-based progress with cancellation
-                    let (prog_tx, mut prog_rx) =
-                        tokio::sync::mpsc::unbounded_channel::<(String, Option<f64>)>();
-                    let emit_app = app.clone();
-                    let emit_id = sanitized.clone();
-                    let _prog_task = tokio::spawn(async move {
-                        while let Some((msg, pct)) = prog_rx.recv().await {
-                            let stage = if pct.map_or(false, |p| p >= 100.0) {
-                                "ready"
-                            } else {
-                                "downloading"
-                            };
-                            let _ = emit_app.emit(
-                                "java-runtime-progress",
-                                serde_json::json!({
-                                    "instance_id": emit_id,
-                                    "major": major,
-                                    "stage": stage,
-                                    "message": msg,
-                                    "percent": pct.unwrap_or(0.0),
-                                }),
-                            );
-                        }
-                    });
-
-                    let cancel_for_progress = cancel_flag.clone();
-                    let rt_root = runtimes_root.clone();
-                    let cat = catalog.clone();
-                    let net_pol = network_policy.clone();
-                    let result: LauncherResult<_> = tokio::task::spawn_blocking(move || {
-                        struct ChannelProgress {
-                            sender: tokio::sync::mpsc::UnboundedSender<(String, Option<f64>)>,
-                            cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-                        }
-                        impl agora_core::runtime_manager::RuntimeProgress for ChannelProgress {
-                            fn on_progress(&self, message: &str, percent: Option<f64>) {
-                                let _ = self.sender.send((message.to_string(), percent));
-                            }
-                            fn is_cancelled(&self) -> bool {
-                                self.cancel.load(std::sync::atomic::Ordering::SeqCst)
-                            }
-                        }
-                        let progress = ChannelProgress {
-                            sender: prog_tx,
-                            cancel: cancel_for_progress,
-                        };
-                        agora_core::runtime_manager::ensure_runtime(
-                            &rt_root,
-                            major,
-                            &cat,
-                            &net_pol,
-                            Some(&progress),
-                        )
-                    })
-                    .await
-                    .map_err(|_| LauncherError::JavaRuntimeMissing {
-                        major,
-                        component: component.clone(),
-                    })?;
-
-                    let ensured = match result {
-                        Ok(installation) => installation,
-                        Err(agora_core::error::LauncherError::JavaRuntimeCatalogMissing {
-                            ..
-                        }) => {
-                            // Catalog doesn't have the required major. Force a registry update.
-                            let _ =
-                                crate::registry_sync::check_and_download_update(&app, true).await;
-
-                            let refreshed_conn = registry::open_registry(&app).ok();
-                            let refreshed_catalog =
-                                agora_core::runtime_catalog::RuntimeCatalog::effective(
-                                    refreshed_conn.as_ref(),
-                                );
-
-                            let refreshed_rt_root = runtimes_root.clone();
-                            let refreshed_net_pol = network_policy.clone();
-                            tokio::task::spawn_blocking(move || {
-                                agora_core::runtime_manager::ensure_runtime(
-                                    &refreshed_rt_root,
-                                    major,
-                                    &refreshed_catalog,
-                                    &refreshed_net_pol,
-                                    None,
-                                )
-                            })
-                            .await
-                            .map_err(|_| {
-                                LauncherError::JavaRuntimeMissing {
-                                    major,
-                                    component: "runtime-catalog".to_string(),
-                                }
-                            })??
-                        }
-                        Err(e) => return Err(e),
-                    };
-
-                    let _ = app.emit(
-                        "java-runtime-progress",
-                        serde_json::json!({
-                            "instance_id": sanitized,
-                            "major": major,
-                            "stage": "ready",
-                            "message": format!("Java {} runtime provisioned.", major),
-                            "percent": 100.0,
-                        }),
-                    );
-
-                    // Refresh candidates and retry resolve exactly once
-                    let fresh_candidates = tokio::task::spawn_blocking(move || {
-                        let mut cands = java_candidates;
-                        cands.push(agora_core::java::JavaInstallation {
-                            path: ensured.path,
-                            version: ensured.version,
-                            version_string: ensured.version_string,
-                            source: agora_core::java::JavaSource::Managed,
-                            arch: ensured.arch,
-                        });
-                        cands
-                    })
-                    .await
-                    .map_err(|_| LauncherError::JavaRuntimeMissing {
-                        major,
-                        component: component.clone(),
-                    })?;
-
-                    agora_core::launch_planner::resolve(
-                        agora_core::launch_planner::ResolveRequest {
-                            instance_id: sanitized.clone(),
-                            base_version_id: row.minecraft_version.clone(),
-                            loader: if matches!(row.loader.as_str(), "" | "vanilla") {
-                                None
-                            } else {
-                                Some(agora_core::launch::LoaderInfo {
-                                    loader_type: row.loader.clone(),
-                                    version: row.loader_version.clone(),
-                                    version_url: String::new(),
-                                })
-                            },
-                            game_dir: instance_dir.clone(),
-                            assets_dir: runtime_layout.assets.clone(),
-                            cache_dir: runtime_layout.root.clone(),
-                            java_override: None,
-                            java_candidates: fresh_candidates,
-                            network_policy: network_policy.clone(),
-                            allow_incompatible_java_override: false,
-                            minecraft_dir: Some(runtime_layout.root.clone()),
-                            receipts_root: Some(
-                                app_data.join(agora_core::installed_profile::RECEIPTS_DIR_NAME),
-                            ),
-                        },
-                    )
-                    .await?
-                } else {
-                    // prompt/manual mode: return structured missing error
-                    return Err(LauncherError::JavaRuntimeMissing { major, component });
-                }
-            }
-            Err(e) => return Err(e),
-        };
-        let selected_java_major = resolved.java.major_version;
-        let java_path_for_receipt = resolved.java.path.clone();
-        let materialized = agora_core::launch_planner::materialize(resolved).await?;
-        let gc = agora_core::gc::compute_gc(
-            selected_java_major,
-            row.jvm_memory_mb.max(1024),
-            &row.jvm_custom_args,
-            None,
-        );
-        let user_jvm_args = agora_core::launch_planner::parse_argument_string(&gc.jvm_args)?;
-        let identity = agora_core::launch_planner::LaunchIdentity {
-            username: credentials.username,
-            access_token: credentials.access_token,
-            uuid: credentials.uuid,
-            user_type: "msa".into(),
-            client_id: String::new(),
-            xuid: String::new(),
-            user_properties: "{}".into(),
-        };
-        let features = agora_core::launch_planner::LaunchFeatures::default();
-        let prepared = agora_core::launch_planner::build_command(
-            agora_core::launch_planner::BuildCommandRequest {
-                plan: &materialized,
-                identity: &identity,
-                features: &features,
-                user_jvm_args: &user_jvm_args,
-                extra_game_args: &[],
-            },
-        )?;
-
-        // Pre-launch snapshot — the exact archive promoted after a genuine success.
-        let snapshot_label = format!("pre-launch-{}", chrono::Utc::now().format("%Y%m%d-%H%M%S"));
-        let snapshot_dir = instance_dir.clone();
-        let pre_launch_snapshot_id = tokio::task::spawn_blocking(move || {
-            create_or_reuse_prelaunch_snapshot(&snapshot_dir, &snapshot_label)
-        })
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_SNAPSHOT".into(),
-            message: format!("Pre-launch snapshot task failed: {e}"),
-        })?
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_SNAPSHOT".into(),
-            message: format!("Could not create the recovery snapshot required for launch: {e}"),
-        })?;
-
-        let launched_at = std::time::SystemTime::now();
-        let mut child = match agora_core::launch_planner::spawn(&prepared) {
-            Ok(child) => child,
-            Err(error) => {
-                let retention_dir = instance_dir.clone();
-                let _ = tokio::task::spawn_blocking(move || run_retention(&retention_dir)).await;
-                return Err(error);
-            }
-        };
-        let pid = child.id().ok_or_else(|| LauncherError::Generic {
-            code: "ERR_NO_PID".into(),
-            message: "Spawned process has no PID.".into(),
-        })?;
-
-        // Capture OS-level process identity immediately after spawn.  If this
-        // fails the process may have already died or the OS cannot provide
-        // identity info — kill the owned child and abort the launch.
-        let pid_for_identity = pid;
-        let proc_identity = {
-            tokio::task::spawn_blocking(move || {
-                agora_core::process_identity::capture(pid_for_identity)
-            })
+    let request = agora_core::launch_service::LaunchRequest {
+        instance_id: sanitized,
+        mode: agora_core::launch_service::LaunchMode::Direct,
+        health_policy: agora_core::launch_service::HealthPolicy::BlockOnRed,
+    };
+    let task = tokio::spawn(async move {
+        agora_core::launch_service::LaunchService::new(ctx)
+            .launch_with_recovery(request, action, &progress)
             .await
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_IDENTITY_CAPTURE_TASK".into(),
-                message: format!("Identity capture task failed: {e}"),
-            })?? as agora_core::process_identity::ProcessIdentity
-        };
+    });
 
-        // Update history only after Java was successfully spawned.
-        let conn = db::local_state_connection(&app).map_err(|error| LauncherError::Generic {
-            code: "ERR_DB".into(),
-            message: error.to_string(),
-        })?;
-        db::touch_last_launched(&conn, &sanitized, &chrono::Utc::now().to_rfc3339())
-            .map_err(|_| LauncherError::LocalStateFailed)?;
-        drop(conn);
-
-        // Record launch start time for LKG promotion classification.
-        let launch_start = std::time::Instant::now();
-
-        // Store the running process + identity in backend state so the frontend
-        // can recover running state after navigation or reload, and the backend
-        // can verify the process before operating on it.
-        {
-            let mut s = state.lock().await;
-            if s.launch_reservation.as_ref().map(|r| r.session_id) != Some(launch_session_id) {
-                drop(s);
-                let _ = child.kill().await;
-                return Err(LauncherError::Generic {
-                    code: "ERR_LAUNCH_OWNERSHIP".into(),
-                    message: "Launch ownership was lost before the game process could be tracked."
-                        .into(),
-                });
-            }
-            s.running_process = Some(agora_core::state::RunningProcess {
-                instance_id: sanitized.clone(),
-                pid,
-                session_id: launch_session_id,
-            });
-            s.process_identity = Some(proc_identity);
-            s.launch_reservation = None;
-        }
-
-        let inst_id = sanitized.clone();
-
-        // Clone the access token for log sanitization. It is consumed by the
-        // stdout/stderr reader tasks and does NOT persist in any running-process
-        // state after the tasks end.
-        let access_token_for_sanitizer = identity.access_token.clone();
-
-        let captured_log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
-        let app1 = app.clone();
-        let s1 = sanitized.clone();
-        let stdout_log = captured_log.clone();
-        let stdout_token = access_token_for_sanitizer.clone();
-        let stdout_task = child.stdout.take().map(|stdout| {
-            tokio::spawn(async move {
-                let mut reader = tokio::io::BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let sanitized = agora_core::log_sanitizer::sanitize_log_with_secrets(
-                        &line,
-                        &[&stdout_token],
-                    );
-                    append_bounded_launch_log(&stdout_log, &sanitized);
-                    let _ = app1.emit(
-                        "game-log",
-                        serde_json::json!({
-                            "line": sanitized,
-                            "stream": "stdout",
-                            "instance_id": s1,
-                        }),
-                    );
-                }
-            })
-        });
-
-        let app2 = app.clone();
-        let s2 = sanitized.clone();
-        let stderr_log = captured_log.clone();
-        let stderr_token = access_token_for_sanitizer.clone();
-        let stderr_task = child.stderr.take().map(|stderr| {
-            tokio::spawn(async move {
-                let mut reader = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let sanitized = agora_core::log_sanitizer::sanitize_log_with_secrets(
-                        &line,
-                        &[&stderr_token],
-                    );
-                    append_bounded_launch_log(&stderr_log, &sanitized);
-                    let _ = app2.emit(
-                        "game-log",
-                        serde_json::json!({
-                            "line": sanitized,
-                            "stream": "stderr",
-                            "instance_id": s2,
-                        }),
-                    );
-                }
-            })
-        });
-
-        let app3 = app.clone();
-        let state_on_exit = state.inner().clone();
-        let launch_instance_dir = instance_dir.clone();
-        tokio::spawn(async move {
-            let status = child.wait().await;
-            if let Some(task) = stdout_task {
-                let _ = task.await;
-            }
-            if let Some(task) = stderr_task {
-                let _ = task.await;
-            }
-            let exit_code = status
-                .as_ref()
-                .ok()
-                .and_then(agora_core::launch_planner::exit_code_for_classification);
-            let was_user_cancelled = {
-                let mut s = state_on_exit.lock().await;
-                s.user_cancelled_launches.remove(&launch_session_id)
-            };
-            let crash_report_found = has_new_crash_report(&launch_instance_dir, launched_at);
-            let log_crash_signature_matched = captured_log
-                .lock()
-                .map(|log| agora_core::crash_diagnostics::triage(&log).matched)
-                .unwrap_or(false);
-            // Classify launch and promote to LKG if applicable.
-            let runtime_ms = launch_start.elapsed().as_millis() as u64;
-            let outcome = agora_core::lkg::classify_launch(&agora_core::lkg::LaunchEvents {
-                exit_code,
-                runtime_ms,
-                was_user_cancelled,
-                crash_report_found,
-                log_crash_signature_matched,
-            });
-            let launch_label = format!("direct-{launch_session_id}");
-            let lkg_outcome = outcome.clone();
-            let lkg_dir = launch_instance_dir.clone();
-            let lkg_snap = pre_launch_snapshot_id.clone();
-            let lkg_java_path = java_path_for_receipt.clone();
-            let lkg_runtimes_root = app_data.join("runtimes");
-            let lkg_was_success = matches!(lkg_outcome, agora_core::lkg::LaunchOutcome::Success);
-            let lkg_lock = {
-                let mut shared = state_on_exit.lock().await;
-                shared
-                    .lkg_locks
-                    .entry(inst_id.clone())
-                    .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-                    .clone()
-            };
-            let _lkg_guard = lkg_lock.lock().await;
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Err(error) = agora_core::lkg::record_launch_outcome(
-                    &lkg_dir,
-                    Some(&lkg_snap),
-                    &launch_label,
-                    lkg_outcome,
-                ) {
-                    crate::auth::log_line(&format!("failed to record launch outcome: {error}"));
-                }
-                if let Err(error) = run_retention(&lkg_dir) {
-                    crate::auth::log_line(&format!(
-                        "snapshot retention failed after launch: {error}"
-                    ));
-                }
-                // Mark the managed runtime as successfully used after a
-                // success outcome. This supports the future patch-update
-                // retention policy: old builds are kept until successful use.
-                if lkg_was_success {
-                    if let Err(error) = agora_core::runtime_manager::mark_successful_use(
-                        &lkg_runtimes_root,
-                        &lkg_java_path,
-                    ) {
-                        crate::auth::log_line(&format!(
-                            "failed to mark runtime successful use: {error}"
-                        ));
-                    }
-                }
-            })
-            .await;
-            // Clear backend running process state on exit — only if this
-            // is still the tracked session (prevents a stale exit from
-            // clearing a newer launch's state).
-            {
-                let mut s = state_on_exit.lock().await;
-                if s.running_process.as_ref().map(|rp| rp.session_id) == Some(launch_session_id) {
-                    s.running_process = None;
-                    s.process_identity = None;
-                }
-            }
-            let _ = app3.emit(
-                "game-exited",
-                serde_json::json!({
-                    "instance_id": inst_id,
-                    "exit_code": exit_code,
-                    "outcome": outcome,
-                    "snapshot_id": pre_launch_snapshot_id,
-                }),
-            );
-
-            if let Some(win) = app3.get_webview_window("main") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-
-            if matches!(outcome, agora_core::lkg::LaunchOutcome::Crash) {
-                let _ = app3.emit(
-                    "crash-detected",
-                    serde_json::json!({
-                        "instance_id": inst_id,
-                        "exit_code": exit_code,
-                        "crash_report_found": crash_report_found,
-                        "log_crash_signature_matched": log_crash_signature_matched,
-                    }),
-                );
-            }
-        });
-
-        Ok(pid)
-    }
-    .await;
-
-    if launch_result.is_err() {
-        let mut s = state.lock().await;
-        if s.launch_reservation.as_ref().map(|r| r.session_id) == Some(launch_session_id) {
-            s.launch_reservation = None;
-        }
-    }
-    launch_result
-}
-
-const MAX_CAPTURED_LAUNCH_LOG_BYTES: usize = 1_048_576;
-
-fn append_bounded_launch_log(log: &std::sync::Mutex<String>, line: &str) {
-    if let Ok(mut captured) = log.lock() {
-        captured.push_str(line);
-        captured.push('\n');
-        if captured.len() > MAX_CAPTURED_LAUNCH_LOG_BYTES {
-            let mut drain_to = captured.len() - MAX_CAPTURED_LAUNCH_LOG_BYTES;
-            while !captured.is_char_boundary(drain_to) {
-                drain_to += 1;
-            }
-            captured.drain(..drain_to);
-        }
-    }
-}
-
-fn has_new_crash_report(instance_dir: &Path, launched_at: std::time::SystemTime) -> bool {
-    let crash_dir = instance_dir.join("crash-reports");
-    let entries = match std::fs::read_dir(crash_dir) {
-        Ok(entries) => entries,
-        Err(_) => return false,
+    let result = match started_rx.await {
+        Ok(Ok(pid)) => Ok(pid),
+        Ok(Err(error)) => Err(error),
+        Err(_) => match task.await {
+            Ok(Ok(_)) => Err(LauncherError::Generic {
+                code: "ERR_LAUNCH_START_SIGNAL".into(),
+                message: "Launch completed without a start signal.".into(),
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(LauncherError::Generic {
+                code: "ERR_LAUNCH_TASK".into(),
+                message: error.to_string(),
+            }),
+        },
     };
-    entries.flatten().any(|entry| {
-        entry
-            .metadata()
-            .ok()
-            .filter(|metadata| metadata.is_file())
-            .and_then(|metadata| metadata.modified().ok())
-            .map(|modified| modified >= launched_at)
-            .unwrap_or(false)
-    })
+    if result.is_err() {
+        let mut shared = state.lock().await;
+        shared.launch_reservation = None;
+    }
+    result
 }
 
-async fn monitor_delegated_launch(
+/// Direct Java spawn — Agora owns the launch process instead of delegating to Mojang launcher.
+/// Core assigns the session ID; desktop mirrors it for presentation only.
+#[tauri::command]
+pub async fn launch_instance_direct(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, LauncherState>,
+    instance_id: String,
+) -> LauncherResult<u32> {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    let sanitized = paths::sanitize_id(&instance_id);
+    if sanitized.is_empty() {
+        return Err(LauncherError::Generic {
+            code: "ERR_INVALID_INSTANCE".into(),
+            message: "Instance ID is empty or invalid.".into(),
+        });
+    }
+    {
+        let shared = state.lock().await;
+        if shared.running_process.is_some() || shared.launch_reservation.is_some() {
+            return Err(LauncherError::Generic {
+                code: "ERR_ALREADY_RUNNING".into(),
+                message: "Another direct launch is already running or starting.".into(),
+            });
+        }
+    }
+
+    let ctx = crate::core_context(&app)?;
+    let (started_tx, started_rx) = oneshot::channel::<LauncherResult<u32>>();
+    {
+        let mut shared = state.lock().await;
+        shared.launch_reservation = Some(agora_core::state::LaunchReservation {
+            instance_id: sanitized.clone(),
+        });
+    }
+    let progress = TauriLaunchProgress {
+        app: app.clone(),
+        state: state.inner().clone(),
+        instance_id: sanitized,
+        started: Mutex::new(Some(started_tx)),
+        session_id: Mutex::new(None),
+    };
+    let request = agora_core::launch_service::LaunchRequest {
+        instance_id: progress.instance_id.clone(),
+        mode: agora_core::launch_service::LaunchMode::Direct,
+        health_policy: agora_core::launch_service::HealthPolicy::BlockOnRed,
+    };
+    let task = tokio::spawn(async move {
+        agora_core::launch_service::LaunchService::new(ctx)
+            .launch(request, &progress)
+            .await
+    });
+
+    let result = match started_rx.await {
+        Ok(Ok(pid)) => Ok(pid),
+        Ok(Err(error)) => Err(error),
+        Err(_) => match task.await {
+            Ok(Ok(_)) => Err(LauncherError::Generic {
+                code: "ERR_LAUNCH_START_SIGNAL".into(),
+                message: "Launch completed without a start signal.".into(),
+            }),
+            Ok(Err(error)) => Err(error),
+            Err(error) => Err(LauncherError::Generic {
+                code: "ERR_LAUNCH_TASK".into(),
+                message: error.to_string(),
+            }),
+        },
+    };
+    if result.is_err() {
+        let mut shared = state.lock().await;
+        shared.launch_reservation = None;
+    }
+    result
+}
+
+struct TauriLaunchProgress {
     app: tauri::AppHandle,
     state: LauncherState,
     instance_id: String,
-    instance_dir: PathBuf,
-    pre_launch_snapshot_id: String,
-    session_id: u64,
-    launched_at: std::time::SystemTime,
-) {
-    use tauri::Emitter;
+    started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<LauncherResult<u32>>>>,
+    session_id: std::sync::Mutex<Option<u64>>,
+}
 
-    let started = std::time::Instant::now();
-    let outcome = loop {
-        // If a newer launch session has started (delegated or direct), this
-        // session is stale. Stop observing so we don't emit a `game-exited`
-        // event that would clobber the newer launch's UI state. Record the
-        // outcome as Unknown; the newer session owns outcome tracking now.
-        // `launch_session_counter` is the reliable signal here — delegated
-        // reservations are released immediately after handoff, so checking
-        // `launch_reservation.is_some()` would miss a newer delegated launch
-        // that has already handed off.
-        {
-            let shared = state.lock().await;
-            if shared.launch_session_counter > session_id {
-                break agora_core::lkg::LaunchOutcome::Unknown;
-            }
+impl agora_core::launch_service::LaunchProgress for TauriLaunchProgress {
+    fn phase(&self, phase: &str, message: &str) {
+        use tauri::Emitter;
+        let _ = self.app.emit(
+            "launch-progress",
+            serde_json::json!({
+                "instance_id": self.instance_id,
+                "phase": phase,
+                "message": message,
+            }),
+        );
+    }
+
+    fn started(&self, started: &agora_core::launch_service::LaunchStarted) {
+        use tauri::Emitter;
+        let sender = self.started.lock().ok().and_then(|mut value| value.take());
+        if let Ok(mut session_id) = self.session_id.lock() {
+            *session_id = Some(started.session_id);
         }
-
-        if has_new_crash_report(&instance_dir, launched_at) {
-            break agora_core::lkg::LaunchOutcome::Crash;
-        }
-
-        if let Some(log) = read_delegated_log_tail(&instance_dir, launched_at) {
-            if agora_core::crash_diagnostics::triage(&log).matched {
-                break agora_core::lkg::LaunchOutcome::Crash;
-            }
-            // The delegated launcher does not expose the game PID or exit code.
-            // A clean-shutdown log marker is the only safe success signal; mere
-            // log inactivity is never promoted.
-            if log.lines().any(|line| line.contains("Stopping!")) {
-                break agora_core::lkg::classify_launch(&agora_core::lkg::LaunchEvents {
-                    exit_code: Some(0),
-                    runtime_ms: started.elapsed().as_millis() as u64,
-                    was_user_cancelled: false,
-                    crash_report_found: false,
-                    log_crash_signature_matched: false,
+        let app = self.app.clone();
+        let state = self.state.clone();
+        let instance_id = self.instance_id.clone();
+        let started = started.clone();
+        tokio::spawn(async move {
+            let mut shared = state.lock().await;
+            // Reservation matched by instance_id — core assigns session_id.
+            if shared
+                .launch_reservation
+                .as_ref()
+                .map(|r| r.instance_id.as_str())
+                == Some(instance_id.as_str())
+            {
+                shared.launch_reservation = None;
+                shared.running_process = Some(agora_core::state::RunningProcess {
+                    instance_id: instance_id.clone(),
+                    pid: started.pid,
+                    session_id: started.session_id,
                 });
+                shared.process_identity = Some(started.process_identity);
             }
-        }
-
-        if started.elapsed() >= std::time::Duration::from_secs(12 * 60 * 60) {
-            break agora_core::lkg::LaunchOutcome::Unknown;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    };
-
-    let stale = {
-        let shared = state.lock().await;
-        shared.launch_session_counter > session_id
-    };
-
-    let launch_label = format!("delegated-{session_id}");
-    let delegated_outcome = outcome.clone();
-    let delegated_dir = instance_dir.clone();
-    let delegated_snap = pre_launch_snapshot_id.clone();
-    let lkg_lock = {
-        let mut shared = state.lock().await;
-        shared
-            .lkg_locks
-            .entry(instance_id.clone())
-            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-            .clone()
-    };
-    let _lkg_guard = lkg_lock.lock().await;
-    // Re-check staleness under the per-instance LKG lock.  A newer
-    // launch may have started while we were waiting for this lock; its
-    // outcome must not be overwritten by a stale session's promotion.
-    {
-        let shared = state.lock().await;
-        if shared.launch_session_counter <= session_id {
-            drop(shared);
-            let _ = tokio::task::spawn_blocking(move || {
-                if let Err(error) = agora_core::lkg::record_launch_outcome(
-                    &delegated_dir,
-                    Some(&delegated_snap),
-                    &launch_label,
-                    delegated_outcome,
-                ) {
-                    crate::auth::log_line(&format!(
-                        "failed to record delegated launch outcome: {error}"
-                    ));
-                }
-                if let Err(error) = run_retention(&delegated_dir) {
-                    crate::auth::log_line(&format!(
-                        "snapshot retention failed after delegated launch: {error}"
-                    ));
-                }
-            })
-            .await;
-        }
+            let _ = app.emit(
+                "game-started",
+                serde_json::json!({
+                    "instance_id": instance_id,
+                    "pid": started.pid,
+                    "session_id": started.session_id,
+                }),
+            );
+            if let Some(sender) = sender {
+                let _ = sender.send(Ok(started.pid));
+            }
+        });
     }
 
-    {
-        let mut shared = state.lock().await;
-        if shared.launch_reservation.as_ref().map(|r| r.session_id) == Some(session_id) {
-            shared.launch_reservation = None;
-        }
+    fn log(&self, stream: &str, line: &str) {
+        use tauri::Emitter;
+        let session_id = self.session_id.lock().ok().and_then(|value| *value);
+        let _ = self.app.emit(
+            "game-log",
+            serde_json::json!({
+                "line": line,
+                "stream": stream,
+                "instance_id": self.instance_id,
+                "session_id": session_id,
+            }),
+        );
     }
 
-    // Suppress the UI transition event when this session has been superseded by
-    // a newer launch — emitting `game-exited` here would prematurely knock the
-    // newer launch out of its running/delegated phase. LKG outcome recording
-    // above still runs regardless.
-    if stale {
-        return;
+    fn finished(&self, result: &agora_core::launch_service::LaunchResult) {
+        use tauri::Emitter;
+        let app = self.app.clone();
+        let state = self.state.clone();
+        let instance_id = self.instance_id.clone();
+        let result = result.clone();
+        tokio::spawn(async move {
+            let mut shared = state.lock().await;
+            if shared.running_process.as_ref().map(|p| p.session_id) == Some(result.session_id) {
+                shared.running_process = None;
+                shared.process_identity = None;
+            }
+            let _ = app.emit(
+                "game-exited",
+                serde_json::json!({
+                    "instance_id": instance_id,
+                    "pid": result.pid,
+                    "session_id": result.session_id,
+                    "outcome": result.outcome,
+                    "snapshot_id": result.snapshot_id,
+                }),
+            );
+        });
     }
-
-    let exit_code = if matches!(
-        outcome,
-        agora_core::lkg::LaunchOutcome::Success | agora_core::lkg::LaunchOutcome::Abandoned
-    ) {
-        Some(0)
-    } else {
-        None
-    };
-    let _ = app.emit(
-        "game-exited",
-        serde_json::json!({
-            "instance_id": instance_id,
-            "exit_code": exit_code,
-            "outcome": outcome,
-            "snapshot_id": pre_launch_snapshot_id,
-            "delegated": true,
-        }),
-    );
 }
 
-fn read_delegated_log_tail(
-    instance_dir: &Path,
-    launched_at: std::time::SystemTime,
-) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let path = instance_dir.join("logs").join("latest.log");
-    let metadata = std::fs::metadata(&path).ok()?;
-    if metadata.modified().ok()? < launched_at {
-        return None;
-    }
-    let mut file = std::fs::File::open(path).ok()?;
-    let keep = metadata.len().min(MAX_CAPTURED_LAUNCH_LOG_BYTES as u64);
-    file.seek(SeekFrom::End(-(keep as i64))).ok()?;
-    let mut bytes = Vec::with_capacity(keep as usize);
-    file.read_to_end(&mut bytes).ok()?;
-    Some(String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// Query the currently tracked direct-launch process, if any.
-///
-/// **Identity verification**: snapshots the identity from state, **drops the
-/// lock**, verifies the process identity against the live OS (fail‑closed),
-/// then returns `None` and clears the stale record if verification fails.
+/// Returns the currently tracked direct-launch process, if any, after
+/// verifying the OS still owns the PID.  Verifies identity via the core
+/// session manager, falling back to AppState for frontend presentation.
 /// Returns `None` if no direct launch is active or the process has exited.
 #[tauri::command]
 pub async fn query_launch_state(
+    app: tauri::AppHandle,
     state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Option<agora_core::state::RunningProcess>> {
-    // Phase 1 — snapshot identity under the lock, drop it.
-    let snapshot = {
+    let ctx = crate::core_context(&app)?;
+
+    // Phase 1 — snapshot session under AppState lock.
+    let app_snapshot = {
         let s = state.lock().await;
-        let rp = s.running_process.clone();
-        let identity = s.process_identity.clone();
-        (rp, identity)
+        (s.running_process.clone(), s.process_identity.clone())
     };
 
-    let (running, identity) = snapshot;
+    let (running, _identity) = app_snapshot;
     let running = match running {
         Some(rp) => rp,
         None => return Ok(None),
     };
 
-    // Phase 2 — verify identity OUTSIDE the lock.
-    if let Some(ref identity) = identity {
-        if let Err(_stale) = agora_core::state::verify_identity(identity) {
-            // Process is stale — clear the matching record only.
-            let mut s = state.lock().await;
-            if s.running_process.as_ref().map(|rp| rp.session_id) == Some(running.session_id) {
-                s.running_process = None;
-                s.process_identity = None;
-            }
-            return Ok(None);
+    // Phase 2 — consult authoritative manager.  If the session still exists
+    // the process is alive and tracked; if the manager removed it (e.g. via
+    // terminate or stale detection) return None.
+    if ctx
+        .process_session_manager
+        .get(running.session_id)
+        .is_none()
+    {
+        // Stale — clear AppState presentation fields.
+        let mut s = state.lock().await;
+        if s.running_process.as_ref().map(|rp| rp.session_id) == Some(running.session_id) {
+            s.running_process = None;
+            s.process_identity = None;
         }
+        return Ok(None);
     }
 
     Ok(Some(running))
@@ -1336,15 +747,19 @@ pub async fn query_launch_state(
 
 /// Kill the backend-owned direct-launch process, if any.
 ///
-/// **Identity verification**: snapshots the tracked session and identity from
-/// state, **drops the lock**, verifies the process identity against the live OS
-/// (fail‑closed), then re‑acquires the lock and confirms the same session is
-/// still current before signalling.  This prevents holding the async state
-/// mutex across blocking process‑table inspection.
+/// Delegates verification and signalling to the core-owned
+/// [`ProcessSessionManager`] and falls back to AppState for frontend
+/// presentation fields.
 #[tauri::command]
-pub async fn kill_process(state: tauri::State<'_, LauncherState>, pid: u32) -> LauncherResult<()> {
-    // Phase 1 — snapshot session & identity under the lock, then drop it.
-    let snapshot = {
+pub async fn kill_process(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, LauncherState>,
+    pid: u32,
+) -> LauncherResult<()> {
+    let ctx = crate::core_context(&app)?;
+
+    // Phase 1 — snapshot session_id from AppState.
+    let session_id = {
         let s = state.lock().await;
         let owned = s.running_process.as_ref().map(|rp| (rp.pid, rp.session_id));
         let Some((owned_pid, session_id)) = owned else {
@@ -1359,80 +774,36 @@ pub async fn kill_process(state: tauri::State<'_, LauncherState>, pid: u32) -> L
                 message: format!("PID {pid} is not owned by Agora (owned pid: {owned_pid})"),
             });
         }
-        (s.process_identity.clone(), session_id)
+        session_id
     };
 
-    let (identity_for_verify, session_id) = snapshot;
-
-    // Phase 2 — verify identity OUTSIDE the lock.  Uses the snapshot.
-    if let Some(ref identity) = identity_for_verify {
-        if let Err(stale_err) = agora_core::state::verify_identity(identity) {
-            // Process is stale — detach the matching record and return
-            // ERR_PROCESS_STALE.  Never signal a stale process.
+    // Phase 2 — delegate verify + kill to the authoritative manager.
+    match ctx.process_session_manager.terminate(session_id, pid) {
+        Ok(()) => {
+            // Phase 3 — clean up AppState presentation fields.
+            let mut s = state.lock().await;
+            if s.running_process.as_ref().map(|rp| rp.session_id) == Some(session_id) {
+                s.running_process = None;
+                s.process_identity = None;
+                s.user_cancelled_launches.insert(session_id);
+            }
+            Ok(())
+        }
+        Err(agora_core::error::LauncherError::ProcessStale { pid: stale_pid, .. }) => {
+            // Stale — clear AppState fields so frontend does not show a
+            // zombie process.
             let mut s = state.lock().await;
             if s.running_process.as_ref().map(|rp| rp.session_id) == Some(session_id) {
                 s.running_process = None;
                 s.process_identity = None;
             }
-            return Err(stale_err);
+            Err(agora_core::error::LauncherError::ProcessStale {
+                pid: stale_pid,
+                detail: "Stale process detected during kill".into(),
+            })
         }
+        Err(other) => Err(other),
     }
-    // If identity_for_verify is None (legacy / no identity captured), proceed
-    // with the kill — backward compatibility with sessions started before
-    // identity capture was introduced.
-
-    // Phase 3 — re‑acquire lock and verify the same session is still current.
-    let session_id = {
-        let mut s = state.lock().await;
-        let owned_session = s.running_process.as_ref().map(|rp| rp.session_id);
-        if owned_session != Some(session_id) {
-            return Err(LauncherError::Generic {
-                code: "ERR_SESSION_CHANGED".into(),
-                message: "The tracked process changed while identity was being verified.".into(),
-            });
-        }
-        // Mark cancellation before signalling so the exit waiter cannot race
-        // ahead and classify an app-requested stop as a crash.  On signal
-        // failure this marker is removed and process ownership is retained.
-        s.user_cancelled_launches.insert(session_id);
-        session_id
-    };
-
-    let kill_result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
-        #[cfg(target_os = "windows")]
-        let output = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
-            .output()
-            .map_err(|e| format!("Failed to spawn taskkill: {e}"))?;
-
-        #[cfg(not(target_os = "windows"))]
-        let output = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .output()
-            .map_err(|e| format!("Failed to spawn kill: {e}"))?;
-
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
-        }
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(error) => Err(format!("Process termination task failed: {error}")),
-    };
-
-    if let Err(error) = kill_result {
-        let mut s = state.lock().await;
-        s.user_cancelled_launches.remove(&session_id);
-        return Err(LauncherError::Generic {
-            code: "ERR_KILL_FAILED".into(),
-            message: format!("Could not terminate PID {pid}; Agora is still tracking it: {error}"),
-        });
-    }
-
-    Ok(())
 }
 
 /// Run the pre-launch health scan on an instance. Returns a [`HealthReport`]
@@ -1468,11 +839,13 @@ pub async fn check_instance_health(
 /// List pinned loader versions for a loader + Minecraft version.
 #[tauri::command]
 pub async fn list_loader_versions(
+    app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
     loader: String,
     mc_version: String,
 ) -> LauncherResult<Vec<LoaderVersionSummary>> {
-    Ok(instances::list_loader_versions(&loader, &mc_version))
+    let ctx = crate::core_context(&app)?;
+    Ok(agora_core::loader_service::LoaderService::new(ctx).list_versions(&loader, &mc_version))
 }
 
 /// Force-reinstall the loader for an instance (repair command).
@@ -1518,8 +891,9 @@ pub async fn get_setting(
     key: String,
 ) -> LauncherResult<Option<serde_json::Value>> {
     tokio::task::spawn_blocking(move || {
-        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-        db::get_setting(&conn, &key).map_err(|_| LauncherError::LocalStateFailed)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::settings::SettingsService::new(ctx);
+        svc.get(&key)
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
@@ -1534,8 +908,9 @@ pub async fn set_setting(
     value: serde_json::Value,
 ) -> LauncherResult<()> {
     tokio::task::spawn_blocking(move || {
-        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-        db::set_setting(&conn, &key, &value).map_err(|_| LauncherError::LocalStateFailed)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::settings::SettingsService::new(ctx);
+        svc.set(&key, &value)
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
@@ -1898,6 +1273,7 @@ pub async fn check_mod_compat(
 /// Reuse the current LKG archive when the tracked content is byte-for-byte
 /// unchanged. Stable instances should not produce a full duplicate zip before
 /// every launch, but every launch still retains an exact recovery pointer.
+#[allow(dead_code)]
 fn create_or_reuse_prelaunch_snapshot(instance_dir: &Path, label: &str) -> Result<String, String> {
     let lkg = agora_core::lkg::read_lkg_state(instance_dir)?;
     if let Some(snapshot_id) = lkg.current_lkg_snapshot_id {
@@ -1935,62 +1311,9 @@ pub async fn batch_check_compat(
         &std::fs::read(&manifest_path).map_err(|_| LauncherError::LocalStateFailed)?,
     )
     .map_err(|_| LauncherError::LocalStateFailed)?;
-    let connection = db::registry_connection(&app).map_err(|error| LauncherError::Generic {
-        code: "ERR_REGISTRY_DB".into(),
-        message: error.to_string(),
-    })?;
-    let mut result = std::collections::BTreeMap::new();
-    for item_id in item_ids {
-        let status = registry::get_item_by_id(&connection, &item_id)?
-            .and_then(|item| item.compatible_versions_json)
-            .map(|json| {
-                compatibility_from_registry_json(
-                    &json,
-                    &manifest.minecraft_version,
-                    &manifest.loader,
-                )
-            })
-            .unwrap_or_default();
-        result.insert(item_id, status);
-    }
-    Ok(result)
-}
-
-fn compatibility_from_registry_json(json: &str, minecraft_version: &str, loader: &str) -> String {
-    let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
-        return String::new();
-    };
-    let loader_matches = |entry: &serde_json::Value| {
-        entry
-            .get("loader")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| value.eq_ignore_ascii_case(loader))
-    };
-    if entries.iter().any(|entry| {
-        loader_matches(entry)
-            && entry.get("mc_version").and_then(serde_json::Value::as_str)
-                == Some(minecraft_version)
-    }) {
-        return "compatible".into();
-    }
-    let requested_major = minecraft_version
-        .split('.')
-        .take(2)
-        .collect::<Vec<_>>()
-        .join(".");
-    if entries.iter().any(|entry| {
-        loader_matches(entry)
-            && entry
-                .get("mc_version")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|version| {
-                    version.split('.').take(2).collect::<Vec<_>>().join(".") == requested_major
-                })
-    }) {
-        "major_match".into()
-    } else {
-        String::new()
-    }
+    let ctx = crate::core_context(&app)?;
+    let svc = agora_core::registry::RegistryService::new(ctx);
+    svc.batch_compat_lookup(&item_ids, &manifest.minecraft_version, &manifest.loader)
 }
 
 /// Disable a mod by renaming `mods/<filename>` to `mods/<filename>.disabled`.
@@ -2065,7 +1388,7 @@ fn toggle_mod_with_snapshot(
             },
         });
     }
-    run_retention(&instance_dir).map_err(|error| LauncherError::Generic {
+    agora_core::lkg::run_retention(&instance_dir).map_err(|error| LauncherError::Generic {
         code: "ERR_RETENTION".into(),
         message: error,
     })?;
@@ -2127,7 +1450,8 @@ pub async fn search_modrinth(
     _state: tauri::State<'_, LauncherState>,
     params: modrinth_raw::ModrinthSearchParams,
 ) -> LauncherResult<modrinth_raw::ModrinthSearchPage> {
-    modrinth_raw::search_modrinth(&app, &params).await
+    let ctx = crate::core_context(&app)?;
+    modrinth_raw::search_modrinth(&ctx.http_clients, &app, &params).await
 }
 
 /// List Modrinth category tags for the filter UI.
@@ -2136,7 +1460,8 @@ pub async fn list_modrinth_categories(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Vec<modrinth_raw::ModrinthCategoryInfo>> {
-    modrinth_raw::list_modrinth_categories(&app).await
+    let ctx = crate::core_context(&app)?;
+    modrinth_raw::list_modrinth_categories(&ctx.http_clients, &app).await
 }
 
 /// List Modrinth loader tags for the filter UI.
@@ -2145,7 +1470,8 @@ pub async fn list_modrinth_loaders(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Vec<modrinth_raw::ModrinthLoaderInfo>> {
-    modrinth_raw::list_modrinth_loaders(&app).await
+    let ctx = crate::core_context(&app)?;
+    modrinth_raw::list_modrinth_loaders(&ctx.http_clients, &app).await
 }
 
 /// List Modrinth game version tags for the filter UI.
@@ -2154,7 +1480,8 @@ pub async fn list_modrinth_game_versions(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Vec<modrinth_raw::ModrinthGameVersionInfo>> {
-    modrinth_raw::list_modrinth_game_versions(&app).await
+    let ctx = crate::core_context(&app)?;
+    modrinth_raw::list_modrinth_game_versions(&ctx.http_clients, &app).await
 }
 
 /// List raw Modrinth versions for a project, optionally scoped to an
@@ -2167,7 +1494,9 @@ pub async fn list_raw_modrinth_versions(
     project_id: String,
     project_type: Option<String>,
 ) -> LauncherResult<Vec<modrinth_raw::RawModrinthVersionCandidate>> {
+    let ctx = crate::core_context(&app)?;
     modrinth_raw::list_raw_modrinth_versions(
+        &ctx.http_clients,
         &app,
         instance_id.as_deref(),
         &project_id,
@@ -2182,7 +1511,8 @@ pub async fn fetch_modrinth_project(
     app: tauri::AppHandle,
     project_id: String,
 ) -> Result<modrinth_raw::ModrinthProjectFull, LauncherError> {
-    modrinth_raw::fetch_project_full(&app, &project_id).await
+    let ctx = crate::core_context(&app)?;
+    modrinth_raw::fetch_project_full(&ctx.http_clients, &app, &project_id).await
 }
 
 /// List registry items whose status is `under_review`, ordered by net_score.
@@ -2192,8 +1522,9 @@ pub async fn list_under_review_items(
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Vec<UnderReviewItem>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::list_under_review_items(&conn)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.list_under_review_items()
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -2211,8 +1542,9 @@ pub async fn list_recent_resolutions(
 ) -> LauncherResult<Vec<AuditLogEntry>> {
     let limit = limit.unwrap_or(50);
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::list_recent_resolutions(&conn, limit)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.list_recent_resolutions(limit)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -2229,8 +1561,9 @@ pub async fn list_mod_reviews(
     item_id: String,
 ) -> LauncherResult<Vec<ModReview>> {
     tokio::task::spawn_blocking(move || {
-        let conn = registry::open_registry(&app)?;
-        registry::list_mod_reviews(&conn, item_id)
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::registry::RegistryService::new(ctx);
+        svc.list_mod_reviews(item_id)
     })
     .await
     .map_err(|_| LauncherError::Generic {
@@ -2250,6 +1583,7 @@ pub async fn fetch_triage_poll(
 }
 
 /// Submit a comment-flag for a mod, creating a GitHub issue.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn flag_review(
     app: tauri::AppHandle,
@@ -2351,9 +1685,9 @@ pub async fn investigate_crash(
             }
         };
 
+        let ctx = crate::core_context(&app)?;
         let result = crash_investigator::continue_investigation(
-            &app,
-            &instance_id,
+            &ctx,
             &fingerprint,
             &manifest.mods,
             &crash_text,
@@ -2401,13 +1735,8 @@ pub async fn investigate_manual(
             }
         };
 
-        crash_investigator::continue_investigation(
-            &app,
-            &instance_id,
-            &fingerprint,
-            &manifest.mods,
-            &log_text,
-        )
+        let ctx = crate::core_context(&app)?;
+        crash_investigator::continue_investigation(&ctx, &fingerprint, &manifest.mods, &log_text)
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
@@ -2421,8 +1750,10 @@ pub async fn disable_mod_for_test(
     instance_id: String,
     filename: String,
 ) -> LauncherResult<()> {
+    let ctx = crate::core_context(&app)?;
     tokio::task::spawn_blocking(move || {
-        crash_investigator::disable_mod(&app, &instance_id, &filename)
+        let svc = agora_core::crash_service::CrashService::new(ctx);
+        svc.disable_mod(&instance_id, &filename)
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
@@ -2436,8 +1767,10 @@ pub async fn enable_mod_for_test(
     instance_id: String,
     filename: String,
 ) -> LauncherResult<()> {
+    let ctx = crate::core_context(&app)?;
     tokio::task::spawn_blocking(move || {
-        crash_investigator::enable_mod(&app, &instance_id, &filename)
+        let svc = agora_core::crash_service::CrashService::new(ctx);
+        svc.enable_mod(&instance_id, &filename)
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
@@ -2474,12 +1807,13 @@ pub async fn report_still_crashing(
         crash_investigator::rule_out(&app, &fingerprint, &ruled_out_mod_id)
             .map_err(|_| LauncherError::LocalStateFailed)?;
 
+        let ctx = crate::core_context(&app)?;
+
         // Reload the manifest and re-investigate.
         let manifest = load_manifest(&app, &instance_id)?;
 
         crash_investigator::continue_investigation(
-            &app,
-            &instance_id,
+            &ctx,
             &fingerprint,
             &manifest.mods,
             &crash_log_text,
@@ -2558,12 +1892,14 @@ pub async fn get_install_plan(
     item_id: String,
     jar_path: String,
 ) -> LauncherResult<dependency_ops::InstallPlan> {
+    let ctx = crate::core_context(&app)?;
+    let svc = agora_core::registry::RegistryService::new(ctx);
+
     tokio::task::spawn_blocking(move || {
         // Fetch the target mod's manifest-declared dependencies from the registry.
-        let conn = registry::open_registry(&app)?;
-        let manifest_deps = registry::get_manifest_dependencies(&conn, item_id)?;
+        let manifest_deps = svc.get_manifest_dependencies(&item_id)?;
 
-        // Parse the jar for declared dependencies (defensive: bad path â†’ empty deps).
+        // Parse the jar for declared dependencies (defensive: bad path → empty deps).
         let jar_metadata =
             agora_core::jar_metadata::parse_jar_metadata(std::path::Path::new(&jar_path));
 
@@ -2571,11 +1907,10 @@ pub async fn get_install_plan(
         let mut manifest = load_manifest(&app, &instance_id)?;
         dependency_ops::refresh_installed_jar_metadata(&app, &instance_id, &mut manifest.mods)?;
 
-        let aliases = registry::get_all_mod_aliases(&conn)?;
-        let jar_deps = jar_metadata;
+        let aliases = svc.get_all_mod_aliases()?;
         Ok(dependency_ops::build_install_plan_with_aliases(
             manifest_deps,
-            &jar_deps,
+            &jar_metadata,
             &manifest.mods,
             &dependency_ops::AliasMap::from_pairs(&aliases),
         ))
@@ -2688,13 +2023,9 @@ pub async fn start_mcp_server(
     app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<McpStatus> {
-    // The server is an opt-in integration; reject direct command invocations
-    // when the player has not enabled it in Settings.
-    let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-    let enabled = matches!(
-        db::get_setting(&conn, "ai_mcp_enabled"),
-        Ok(Some(serde_json::Value::Bool(true)))
-    );
+    let ctx = crate::core_context(&app)?;
+    let svc = agora_core::settings::SettingsService::new(ctx);
+    let enabled = svc.get_bool("ai_mcp_enabled").unwrap_or(false);
     if !enabled {
         return Ok(McpStatus {
             running: false,
@@ -2758,9 +2089,10 @@ pub async fn get_mcp_token(
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<serde_json::Value> {
     tokio::task::spawn_blocking(move || {
-        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-        match db::get_setting(&conn, "mcp_bearer_token") {
-            Ok(Some(v)) => {
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::settings::SettingsService::new(ctx);
+        match svc.get("mcp_bearer_token")? {
+            Some(v) => {
                 let token = v.as_str().unwrap_or("").to_string();
                 Ok(serde_json::json!({
                     "token": token,
@@ -2770,7 +2102,7 @@ pub async fn get_mcp_token(
                     ),
                 }))
             }
-            _ => Ok(serde_json::json!({"token": "", "config_snippet": ""})),
+            None => Ok(serde_json::json!({"token": "", "config_snippet": ""})),
         }
     }).await.map_err(|_| LauncherError::LocalStateFailed)?
 }
@@ -2786,9 +2118,9 @@ pub async fn regenerate_mcp_token(
         use rand::Rng;
         let bytes: [u8; 32] = rand::thread_rng().gen();
         let token = hex::encode(bytes);
-        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-        db::set_setting(&conn, "mcp_bearer_token", &serde_json::Value::String(token.clone()))
-            .map_err(|_| LauncherError::LocalStateFailed)?;
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::settings::SettingsService::new(ctx);
+        svc.set("mcp_bearer_token", &serde_json::Value::String(token.clone()))?;
         // Write the token file
         if let Ok(app_data) = paths::app_data_dir(&app) {
             let path = app_data.join("mcp_token");
@@ -2816,26 +2148,9 @@ pub async fn set_mcp_approval(
     instance_id: String,
     state: String,
 ) -> LauncherResult<()> {
+    let ctx = crate::core_context(&app).map_err(|_| LauncherError::LocalStateFailed)?;
     tokio::task::spawn_blocking(move || {
-        let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-        let now = chrono::Utc::now().to_rfc3339();
-        let expires_at = if state == "session" {
-            // Session grants expire after 24 hours.
-            Some((chrono::Utc::now() + chrono::Duration::hours(24)).to_rfc3339())
-        } else {
-            None
-        };
-        conn.execute(
-            "INSERT INTO mcp_approval_grants (tool_name, instance_id, state, granted_at, expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT(tool_name, instance_id) DO UPDATE SET
-                 state = excluded.state,
-                 granted_at = excluded.granted_at,
-                 expires_at = excluded.expires_at",
-            rusqlite::params![tool_name, instance_id, state, now, expires_at],
-        )
-        .map_err(|_| LauncherError::LocalStateFailed)?;
-        Ok(())
+        agora_core::mcp_dispatcher::set_approval_grant(&ctx, &tool_name, &instance_id, &state)
     })
     .await
     .map_err(|_| LauncherError::LocalStateFailed)?
@@ -2844,11 +2159,11 @@ pub async fn set_mcp_approval(
 /// Start the GitHub Copilot device code flow.
 #[tauri::command]
 pub async fn copilot_login(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<ai_assistant::CopilotDeviceFlowResponse> {
-    let client = reqwest::Client::new();
-    ai_assistant::start_copilot_flow(&client).await
+    let ctx = crate::core_context(&app)?;
+    ai_assistant::start_copilot_flow(&ctx.http_clients).await
 }
 
 /// Try to use the existing governance GitHub token for Copilot, skipping the
@@ -2864,8 +2179,8 @@ pub async fn copilot_try_governance_token(
         Some(t) => t,
         None => return Ok(None),
     };
-    let client = reqwest::Client::new();
-    match ai_assistant::resolve_copilot_endpoint(&client, &ghu_token).await {
+    let ctx = crate::core_context(&app)?;
+    match ai_assistant::resolve_copilot_endpoint(&ctx.http_clients, &ghu_token).await {
         Ok(copilot_token) => {
             ai_assistant::store_copilot_token(&copilot_token)?;
             Ok(Some(copilot_token))
@@ -2881,14 +2196,16 @@ pub async fn copilot_try_governance_token(
 /// Poll the Copilot device flow. On success, resolves endpoint + stores token.
 #[tauri::command]
 pub async fn copilot_login_poll(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
     device_code: String,
     interval: u64,
 ) -> LauncherResult<ai_assistant::CopilotToken> {
-    let client = reqwest::Client::new();
-    let ghu_token = ai_assistant::poll_copilot_flow(&client, &device_code, interval).await?;
-    let copilot_token = ai_assistant::resolve_copilot_endpoint(&client, &ghu_token).await?;
+    let ctx = crate::core_context(&app)?;
+    let ghu_token =
+        ai_assistant::poll_copilot_flow(&ctx.http_clients, &device_code, interval).await?;
+    let copilot_token =
+        ai_assistant::resolve_copilot_endpoint(&ctx.http_clients, &ghu_token).await?;
     ai_assistant::store_copilot_token(&copilot_token)?;
     Ok(copilot_token)
 }
@@ -3265,7 +2582,7 @@ pub async fn create_snapshot(
 
     tokio::task::spawn_blocking(move || {
         let result = agora_core::snapshot::create_snapshot(&instance_dir, label.as_deref())?;
-        run_retention(&instance_dir)?;
+        agora_core::lkg::run_retention(&instance_dir)?;
         Ok::<_, String>(result)
     })
     .await
@@ -3277,61 +2594,6 @@ pub async fn create_snapshot(
         code: "ERR_SNAPSHOT".into(),
         message: e,
     })
-}
-
-/// List all snapshot IDs for an instance, determine which are LKG and
-/// pre-restore, then evict those exceeding the retention policy.
-fn run_retention(instance_dir: &std::path::Path) -> Result<(), String> {
-    use agora_core::lkg::{RetentionEntry, RetentionPolicy};
-
-    let snapshots = agora_core::snapshot::list_snapshots(instance_dir)
-        .map_err(|e| format!("list_snapshots: {e}"))?;
-    if snapshots.is_empty() {
-        return Ok(());
-    }
-
-    let lkg = agora_core::lkg::read_lkg_state(instance_dir)?;
-    let entries: Vec<RetentionEntry> = snapshots
-        .iter()
-        .map(|snapshot| {
-            let archive_size = std::fs::metadata(
-                instance_dir
-                    .join(".agora_snapshots")
-                    .join(format!("{}.zip", snapshot.id)),
-            )
-            .map(|metadata| metadata.len())
-            .unwrap_or(snapshot.size_estimate);
-            RetentionEntry {
-                id: snapshot.id.clone(),
-                size_bytes: archive_size,
-                is_lkg: lkg.promoted_snapshot_ids.contains(&snapshot.id)
-                    || lkg.current_lkg_snapshot_id.as_ref() == Some(&snapshot.id),
-                is_current_lkg: lkg.current_lkg_snapshot_id.as_ref() == Some(&snapshot.id),
-                is_pre_restore: snapshot
-                    .label
-                    .as_deref()
-                    .map_or(false, |label| label.starts_with("pre-restore-")),
-            }
-        })
-        .collect();
-    let policy = RetentionPolicy::default();
-    let to_evict = agora_core::lkg::retention_plan_with_sizes(&entries, &policy);
-
-    let mut errors = Vec::new();
-    for id in &to_evict {
-        if let Err(error) = agora_core::snapshot::delete_snapshot(instance_dir, id) {
-            errors.push(format!("{id}: {error}"));
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "snapshot retention could not remove: {}",
-            errors.join("; ")
-        ))
-    }
 }
 
 #[tauri::command]
@@ -3373,7 +2635,7 @@ pub async fn restore_snapshot(
         agora_core::snapshot::create_snapshot(&instance_dir, Some(&pre_label))
             .map_err(|e| format!("Could not create undo snapshot: {e}"))?;
         agora_core::snapshot::restore_snapshot(&instance_dir, &snapshot_id)?;
-        run_retention(&instance_dir)?;
+        agora_core::lkg::run_retention(&instance_dir)?;
         Ok::<(), String>(())
     })
     .await
@@ -3402,7 +2664,7 @@ pub async fn delete_snapshot(
         })?;
     tokio::task::spawn_blocking(move || {
         agora_core::snapshot::delete_snapshot(&instance_dir, &snapshot_id)?;
-        run_retention(&instance_dir)
+        agora_core::lkg::run_retention(&instance_dir)
     })
     .await
     .map_err(|e| LauncherError::Generic {
@@ -3484,7 +2746,7 @@ pub async fn apply_loadout_profile(
                 },
             });
         }
-        run_retention(&instance_dir).map_err(|error| LauncherError::Generic {
+        agora_core::lkg::run_retention(&instance_dir).map_err(|error| LauncherError::Generic {
             code: "ERR_RETENTION".into(),
             message: error,
         })
@@ -3521,40 +2783,57 @@ pub async fn import_instance(
     source_path: String,
     symlink_saves: bool,
 ) -> LauncherResult<agora_core::import::ImportResult> {
+    let ctx = crate::core_context(&app)?;
     let source = std::path::PathBuf::from(&source_path);
-    let app_data = paths::app_data_dir(&app).map_err(|e| LauncherError::Generic {
-        code: "ERR_PATH".into(),
-        message: e.to_string(),
-    })?;
-    let instances_dir = app_data.join("instances");
-    std::fs::create_dir_all(&instances_dir).ok();
-
-    // The core importer owns synchronous filesystem work and, for .mrpack
-    // files, a small dedicated HTTP runtime. Run it off Tauri's async runtime
-    // so importing a pack never attempts to nest Tokio runtimes or freezes UI.
     let extension = source
         .extension()
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase);
-    tokio::task::spawn_blocking(move || match extension.as_deref() {
-        Some("mrpack") => agora_core::import::import_mrpack(&source, &instances_dir, symlink_saves),
-        Some("zip") => agora_core::import::import_prism_zip(&source, &instances_dir, symlink_saves),
-        _ => agora_core::import::import_directory(&source, &instances_dir, symlink_saves),
-    })
+    let import_source = match extension.as_deref() {
+        Some("mrpack") => agora_core::import_service::ImportSource::Mrpack(source),
+        Some("zip") => agora_core::import_service::ImportSource::PrismZip(source),
+        _ => agora_core::import_service::ImportSource::Directory(source),
+    };
+    let request = agora_core::import_service::ImportRequest {
+        source: import_source,
+        symlink_saves,
+    };
+    let svc = agora_core::import_service::ImportService::new(ctx);
+    let sink = std::sync::Arc::new(TauriCoreProgressSink { app });
+    svc.run_import_with_sink(
+        request,
+        sink,
+        agora_core::event_sink::CancellationToken::new(),
+    )
     .await
-    .map_err(|_| LauncherError::Generic {
-        code: "ERR_IMPORT_TASK".into(),
-        message: "The import task stopped unexpectedly. Your existing instances were not changed."
-            .into(),
-    })?
+}
+
+struct TauriCoreProgressSink {
+    app: tauri::AppHandle,
+}
+
+impl agora_core::event_sink::ProgressSink for TauriCoreProgressSink {
+    fn report(&self, event: agora_core::event_sink::ProgressEvent) {
+        use tauri::Emitter;
+        let _ = self.app.emit("operation-progress", event);
+    }
+}
+
+#[tauri::command]
+pub fn cancel_operation(app: tauri::AppHandle, operation_id: String) -> LauncherResult<bool> {
+    let ctx = crate::core_context(&app)?;
+    Ok(ctx
+        .operation_manager
+        .cancel(&agora_core::event_sink::OperationId::new(operation_id)))
 }
 
 #[tauri::command]
 pub fn detect_launchers(
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
     _state: tauri::State<'_, LauncherState>,
 ) -> LauncherResult<Vec<agora_core::import::DetectedLauncher>> {
-    Ok(agora_core::import::auto_detect_launchers())
+    let ctx = crate::core_context(&app)?;
+    Ok(agora_core::import_service::ImportService::new(ctx).auto_detect_launchers())
 }
 
 #[tauri::command]
@@ -3565,23 +2844,15 @@ pub async fn clone_instance_cmd(
     new_name: String,
     prefs: agora_core::clone::ClonePrefs,
 ) -> LauncherResult<String> {
-    let sanitized = paths::sanitize_id(&instance_id);
-    let src_dir = paths::instance_dir(&app, &sanitized).map_err(|e| LauncherError::Generic {
-        code: "ERR_PATH".into(),
-        message: e.to_string(),
-    })?;
-    let app_data = paths::app_data_dir(&app).map_err(|e| LauncherError::Generic {
-        code: "ERR_PATH".into(),
-        message: e.to_string(),
-    })?;
-    let new_id = paths::sanitize_id(&new_name);
-    let dest_dir = app_data.join("instances").join(&new_id);
-    agora_core::clone::clone_instance(&src_dir, &dest_dir, &prefs).map_err(|e| {
-        LauncherError::Generic {
-            code: "ERR_CLONE".into(),
-            message: e,
-        }
-    })
+    let request = agora_core::instance_service::CloneRequest {
+        source_instance_id: instance_id,
+        new_name,
+        prefs,
+    };
+    let ctx = crate::core_context(&app)?;
+    let service = agora_core::instance_service::InstanceService::new(ctx);
+    let row = service.clone(request).await?;
+    Ok(row.instance_id)
 }
 
 /// Export an instance as a server environment — filters client-only mods,
@@ -3615,6 +2886,8 @@ pub async fn export_server_environment(
 }
 
 /// Install a pack (Tier 1 or Tier 2) from a JSON manifest.
+///
+/// Delegates to core-owned [`agora_core::import_service::ImportService`].
 #[tauri::command]
 pub async fn install_pack(
     app: tauri::AppHandle,
@@ -3622,27 +2895,17 @@ pub async fn install_pack(
     manifest_json: String,
     instance_id: String,
 ) -> LauncherResult<agora_core::pack_install::PackInstallResult> {
-    let manifest =
-        pack_install::parse_pack_manifest(&manifest_json).map_err(|e| LauncherError::Generic {
-            code: "ERR_PACK_PARSE".into(),
-            message: e,
-        })?;
-    let client = reqwest::Client::new();
-    let sanitized = paths::sanitize_id(&instance_id);
-    let instance_dir =
-        paths::instance_dir(&app, &sanitized).map_err(|e| LauncherError::Generic {
-            code: "ERR_PATH".into(),
-            message: e.to_string(),
-        })?;
-    if manifest.override_source.is_some() {
-        pack_install::install_complex_pack(&client, &manifest, &instance_dir).await
-    } else {
-        pack_install::install_simple_pack(&client, &manifest, &instance_dir).await
-    }
-    .map_err(|e| LauncherError::Generic {
-        code: "ERR_PACK".into(),
-        message: e,
-    })
+    let ctx = crate::core_context(&app)?;
+    let import_source = agora_core::import_service::ImportSource::PackManifest {
+        manifest_json,
+        target_instance_id: instance_id,
+    };
+    let request = agora_core::import_service::ImportRequest {
+        source: import_source,
+        symlink_saves: false,
+    };
+    let svc = agora_core::import_service::ImportService::new(ctx);
+    svc.install_pack(request).await
 }
 
 /// Download a Modrinth .mrpack from a URL and import it as a new locked instance.
@@ -3653,7 +2916,8 @@ pub async fn import_modrinth_pack_by_url(
     _state: tauri::State<'_, LauncherState>,
     download_url: String,
 ) -> LauncherResult<String> {
-    let bytes = mod_install::download_mod_bytes(&download_url).await?;
+    let ctx = crate::core_context(&app)?;
+    let bytes = mod_install::download_mod_bytes(&ctx.http_clients, &download_url).await?;
     let ext = if download_url.ends_with(".mrpack") {
         "mrpack"
     } else {
@@ -3668,7 +2932,7 @@ pub async fn import_modrinth_pack_by_url(
         code: "ERR_FILE_WRITE".to_string(),
         message: format!("Failed to write temp pack file: {e}"),
     })?;
-    let instance_id = mod_install::import_instance_pack(&app, &temp_path.to_str().unwrap()).await?;
+    let instance_id = mod_install::import_instance_pack(&app, &temp_path.to_string_lossy()).await?;
     let _ = std::fs::remove_file(&temp_path);
     // Lock the instance so the pack stays intact
     instances::lock_instance(&app, &instance_id).await?;
@@ -3750,6 +3014,7 @@ pub fn get_windows_accent_color() -> Option<String> {
 // ---------------------------------------------------------------------------
 
 /// Search browse items — fetches registry + first Modrinth page, merges, caches in Rust, returns first page.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn browse_search(
     app: tauri::AppHandle,
@@ -3764,35 +3029,26 @@ pub async fn browse_search(
 ) -> LauncherResult<BrowsePage> {
     let s = state.lock().await;
     let (modrinth_enabled, registry_items) = {
-        let conn = db::local_state_connection(&app).map_err(|e| LauncherError::Generic {
-            code: "ERR_DB".into(),
-            message: e.to_string(),
-        })?;
-        let me = match agora_core::db::get_setting(&conn, "modrinth_enabled") {
-            Ok(Some(ref v)) => v == &serde_json::Value::Bool(true),
-            _ => false,
-        };
-        drop(conn);
-        let rconn = db::registry_connection(&app).map_err(|e| LauncherError::Generic {
-            code: "ERR_DB".into(),
-            message: e.to_string(),
-        })?;
+        let ctx = crate::core_context(&app)?;
+        let svc = agora_core::settings::SettingsService::new(ctx.clone());
+        let me = svc.get_bool("modrinth_enabled").unwrap_or(false);
+        let svc = agora_core::registry::RegistryService::new(ctx);
         let sort_enum = to_sort_option(sort.as_deref().unwrap_or("net_score"));
-        let items = registry::browse_items(
-            &rconn,
-            content_type.as_deref(),
-            category.as_deref(),
-            &sort_enum,
-            me,
-            mc_version.as_deref(),
-            loader.as_deref(),
-            query.as_deref(),
-            100,
-        )
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_REGISTRY".into(),
-            message: e.to_string(),
-        })?;
+        let items = svc
+            .browse_items(
+                content_type.as_deref(),
+                category.as_deref(),
+                &sort_enum,
+                me,
+                mc_version.as_deref(),
+                loader.as_deref(),
+                query.as_deref(),
+                100,
+            )
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_REGISTRY".into(),
+                message: e.to_string(),
+            })?;
         (me, items)
     };
 
@@ -3989,6 +3245,7 @@ impl agora_core::install_pipeline::ProgressReporter for InstallProgressEmitter {
 /// Uses `try_lock()` on the tokio mutex so it is safe to drop during unwind.
 struct InstallActivityGuard {
     state: std::sync::Arc<tokio::sync::Mutex<crate::state::AppState>>,
+    ctx: agora_core::ctx::Ctx,
     instance_id: String,
     plan_id: String,
 }
@@ -4004,33 +3261,26 @@ impl Drop for InstallActivityGuard {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.state.try_lock() {
             guard.active_install_instances.remove(&self.instance_id);
-            guard.install_cancellations.remove(&self.plan_id);
-            guard.resolved_install_plans.remove(&self.plan_id);
         }
+        self.ctx.operation_manager.remove_plan(&self.plan_id);
     }
 }
 
 /// Resolve an InstallIntent into a ResolvedInstallPlan (read-only, no mutation).
+///
+/// Uses the core-owned InstallService which handles curated, Modrinth,
+/// manual, batch, and remove planning through the Resolver.
 #[tauri::command]
 pub async fn resolve_install_plan(
     app: tauri::AppHandle,
-    state: tauri::State<'_, LauncherState>,
     intent: agora_core::install_pipeline::InstallIntent,
 ) -> LauncherResult<agora_core::install_pipeline::ResolvedInstallPlan> {
-    let prepared = crate::install_pipeline::prepare_plan(&app, &intent).await?;
+    let ctx = crate::core_context(&app)?;
+    let service = agora_core::install_service::InstallService::new(ctx.clone());
     let reporter = InstallProgressEmitter { app };
-    let plan = agora_core::install_pipeline::InstallPipeline
-        .resolve_plan(intent, &prepared.instance_dir, prepared.prepared, &reporter)
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_RESOLVE".into(),
-            message: e,
-        })?;
-    state
-        .lock()
-        .await
-        .resolved_install_plans
-        .insert(plan.fingerprint.clone(), plan.clone());
+    let plan = service.resolve(intent, &reporter).await?;
+    ctx.operation_manager
+        .insert_plan(plan.fingerprint.clone(), plan.clone());
     Ok(plan)
 }
 
@@ -4041,12 +3291,12 @@ pub async fn apply_install_plan(
     state: tauri::State<'_, LauncherState>,
     plan_id: String,
 ) -> LauncherResult<agora_core::install_pipeline::InstallOutcome> {
-    let plan = state
-        .lock()
-        .await
-        .resolved_install_plans
-        .get(&plan_id)
-        .cloned()
+    let ctx = crate::core_context(&app)?;
+
+    // Retrieve the plan from the core operation manager.
+    let plan = ctx
+        .operation_manager
+        .get_plan(&plan_id)
         .ok_or_else(|| LauncherError::Generic {
             code: "ERR_PLAN_NOT_FOUND".into(),
             message: "This install plan is no longer available. Resolve it again.".into(),
@@ -4058,13 +3308,16 @@ pub async fn apply_install_plan(
             message: "The plan targets an invalid instance ID.".into(),
         });
     }
-    let instance_dir =
-        paths::instance_dir(&app, &instance_id).map_err(|e| LauncherError::Generic {
-            code: "ERR_INSTANCE_PATH".into(),
-            message: e.to_string(),
+    // Get the shared cancellation token from the stored plan.
+    let cancel = ctx
+        .operation_manager
+        .token_for_plan(&plan_id)
+        .ok_or_else(|| LauncherError::Generic {
+            code: "ERR_PLAN_NOT_FOUND".into(),
+            message: "This install plan is no longer available. Resolve it again.".into(),
         })?;
-    let current_revision = crate::install_pipeline::registry_revision(&app)?;
-    let cancel = agora_core::install_pipeline::CancellationToken::new();
+    let service = agora_core::install_service::InstallService::new(ctx.clone());
+    let instance_dir = service.load_instance(&instance_id)?.instance_dir;
     {
         let mut shared = state.lock().await;
         if !shared.active_install_instances.insert(instance_id.clone()) {
@@ -4073,30 +3326,24 @@ pub async fn apply_install_plan(
                 message: "Another install transaction is already active for this instance.".into(),
             });
         }
-        shared
-            .install_cancellations
-            .insert(plan_id.clone(), cancel.clone());
     }
 
     let reporter = InstallProgressEmitter { app: app.clone() };
     // Register a panic-safe guard that always cleans up install markers.
     let guard = InstallActivityGuard {
         state: Arc::clone(&state),
+        ctx,
         instance_id: instance_id.clone(),
         plan_id: plan_id.clone(),
     };
-    let outcome = agora_core::install_pipeline::InstallPipeline
-        .execute_plan(&plan, &instance_dir, &current_revision, &reporter, &cancel)
-        .await;
+    let outcome = service.execute(&plan, &reporter, &cancel).await;
     // Manual cleanup on the normal path — the guard handles the panic path.
     {
         let mut shared = state.lock().await;
         shared.active_install_instances.remove(&instance_id);
-        shared.install_cancellations.remove(&plan_id);
-        shared.resolved_install_plans.remove(&plan_id);
     }
     guard.disarm();
-    if let Err(error) = run_retention(&instance_dir) {
+    if let Err(error) = agora_core::lkg::run_retention(&instance_dir) {
         crate::auth::log_line(&format!("snapshot retention after install failed: {error}"));
     }
     Ok(outcome)
@@ -4228,8 +3475,8 @@ pub async fn repair_lockfile(
     lockfile_json: String,
 ) -> LauncherResult<agora_core::install_pipeline::InstallOutcome> {
     use agora_core::install_pipeline::{
-        CancellationToken, InstallAction, InstallIntent, OptionalDepsPolicy, PlanOverrides,
-        PreparedPlan, RequestSource, ResolvedOperation,
+        InstallAction, InstallIntent, OptionalDepsPolicy, PlanOverrides, PreparedPlan,
+        RequestSource, ResolvedOperation,
     };
     use std::collections::BTreeSet;
 
@@ -4244,7 +3491,6 @@ pub async fn repair_lockfile(
         .map_err(|error| lockfile_error("ERR_LOCKFILE_INVALID", error))?;
     let instance_dir = paths::instance_dir(&app, &sanitized)
         .map_err(|error| lockfile_error("ERR_INSTANCE_PATH", error.to_string()))?;
-    let revision = crate::install_pipeline::registry_revision(&app)?;
 
     let repair_dir = instance_dir.clone();
     let repair_lockfile = lockfile.clone();
@@ -4374,23 +3620,27 @@ pub async fn repair_lockfile(
         requested_by: RequestSource::Interactive,
         overrides: PlanOverrides::default(),
     };
+    let ctx = crate::core_context(&app)?;
+    let service = agora_core::install_service::InstallService::new(ctx.clone());
     let reporter = InstallProgressEmitter { app: app.clone() };
-    let plan = agora_core::install_pipeline::InstallPipeline
-        .resolve_plan(
+    let plan = service
+        .resolve_prepared(
             intent,
-            &instance_dir,
             PreparedPlan {
                 operation: ResolvedOperation::Reconcile { operations },
                 dependencies: Vec::new(),
                 conflicts: Vec::new(),
-                registry_revision: revision.clone(),
+                registry_revision: String::new(),
             },
             &reporter,
         )
         .await
-        .map_err(|error| lockfile_error("ERR_LOCKFILE_PLAN", error))?;
+        .map_err(|error| lockfile_error("ERR_LOCKFILE_PLAN", error.to_string()))?;
 
-    let cancellation = CancellationToken::new();
+    // Store plan in core operation manager for cancellation tracking.
+    let cancellation = ctx
+        .operation_manager
+        .insert_plan(plan.fingerprint.clone(), plan.clone());
     {
         let mut shared = state.lock().await;
         if !shared.active_install_instances.insert(sanitized.clone()) {
@@ -4399,22 +3649,17 @@ pub async fn repair_lockfile(
                 "Another install transaction is already active for this instance.",
             ));
         }
-        shared
-            .install_cancellations
-            .insert(plan.fingerprint.clone(), cancellation.clone());
     }
     let guard = InstallActivityGuard {
         state: Arc::clone(&state),
+        ctx,
         instance_id: sanitized.clone(),
         plan_id: plan.fingerprint.clone(),
     };
-    let outcome = agora_core::install_pipeline::InstallPipeline
-        .execute_plan(&plan, &instance_dir, &revision, &reporter, &cancellation)
-        .await;
+    let outcome = service.execute(&plan, &reporter, &cancellation).await;
     {
         let mut shared = state.lock().await;
         shared.active_install_instances.remove(&sanitized);
-        shared.install_cancellations.remove(&plan.fingerprint);
     }
     guard.disarm();
     if let agora_core::install_pipeline::InstallOutcome::Success { snapshot_id, .. } = &outcome {
@@ -4448,7 +3693,7 @@ pub async fn repair_lockfile(
                     )),
                 };
             }
-            let _ = run_retention(&post_dir);
+            let _ = agora_core::lkg::run_retention(&post_dir);
             Ok(outcome.clone())
         })
         .await
@@ -4499,8 +3744,8 @@ fn export_lockfile_sync(
         &manifest.loader_version,
     );
     let locked_loader = LockedLoader {
-        source_url: loader.map(|entry| entry.source_url.clone()),
-        sha256: loader.map(|entry| {
+        source_url: loader.as_ref().map(|entry| entry.source_url.clone()),
+        sha256: loader.as_ref().map(|entry| {
             crate::loader_manifests::strip_sha_prefix(&entry.sha256).to_ascii_lowercase()
         }),
     };
@@ -4697,7 +3942,6 @@ pub async fn import_lockfile(
     };
     crate::instances::create_instance(app.clone(), request).await?;
 
-    let revision = crate::install_pipeline::registry_revision(&app)?;
     let mut operations = Vec::new();
     let mut request_items = Vec::new();
     for artifact in &lockfile.artifacts {
@@ -4752,33 +3996,32 @@ pub async fn import_lockfile(
         requested_by: RequestSource::Interactive,
         overrides: PlanOverrides::default(),
     };
-    let prepared = PreparedPlan {
-        operation: ResolvedOperation::BatchInstall { operations },
-        dependencies: Vec::new(),
-        conflicts: Vec::new(),
-        registry_revision: revision.clone(),
-    };
+    let ctx = crate::core_context(&app)?;
+    let service = agora_core::install_service::InstallService::new(ctx);
     let instance_dir = crate::paths::instance_dir(&app, &instance_id)
         .map_err(|error| lockfile_error("ERR_INSTANCE_PATH", error.to_string()))?;
     let reporter = InstallProgressEmitter { app: app.clone() };
-    let plan = match agora_core::install_pipeline::InstallPipeline
-        .resolve_plan(intent, &instance_dir, prepared, &reporter)
+    let plan = match service
+        .resolve_prepared(
+            intent,
+            PreparedPlan {
+                operation: ResolvedOperation::BatchInstall { operations },
+                dependencies: Vec::new(),
+                conflicts: Vec::new(),
+                registry_revision: String::new(),
+            },
+            &reporter,
+        )
         .await
     {
         Ok(plan) => plan,
         Err(error) => {
             let _ = crate::instances::delete_instance(&app, &instance_id);
-            return Err(lockfile_error("ERR_LOCKFILE_PLAN", error));
+            return Err(lockfile_error("ERR_LOCKFILE_PLAN", error.to_string()));
         }
     };
-    let outcome = agora_core::install_pipeline::InstallPipeline
-        .execute_plan(
-            &plan,
-            &instance_dir,
-            &revision,
-            &reporter,
-            &CancellationToken::new(),
-        )
+    let outcome = service
+        .execute(&plan, &reporter, &CancellationToken::new())
         .await;
     let snapshot_id = match outcome {
         agora_core::install_pipeline::InstallOutcome::Success { snapshot_id, .. } => snapshot_id,
@@ -4854,7 +4097,8 @@ pub async fn import_lockfile(
     }
     {
         let retention_dir = instance_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || run_retention(&retention_dir)).await;
+        let _ = tokio::task::spawn_blocking(move || agora_core::lkg::run_retention(&retention_dir))
+            .await;
     }
     Ok(instance_id)
 }
@@ -5081,16 +4325,10 @@ fn lockfile_error(code: impl Into<String>, message: impl Into<String>) -> Launch
 
 /// Cancel a running install.
 #[tauri::command]
-pub async fn cancel_install(
-    state: tauri::State<'_, LauncherState>,
-    plan_id: String,
-) -> LauncherResult<()> {
-    let mut shared = state.lock().await;
-    if let Some(token) = shared.install_cancellations.get(&plan_id).cloned() {
-        token.cancel();
-        return Ok(());
-    }
-    if shared.resolved_install_plans.remove(&plan_id).is_some() {
+pub async fn cancel_install(app: tauri::AppHandle, plan_id: String) -> LauncherResult<()> {
+    let ctx = crate::core_context(&app)?;
+
+    if ctx.operation_manager.cancel_plan(&plan_id) {
         return Ok(());
     }
     Err(LauncherError::Generic {
@@ -5121,6 +4359,7 @@ pub async fn check_instance_updates(
     use crate::models::InstanceManifest;
     use crate::paths;
 
+    let ctx = crate::core_context(&app)?;
     let sanitized = paths::sanitize_id(&instance_id);
     let manifest_path = paths::instance_manifest_path(&app, &sanitized)
         .map_err(|_| LauncherError::LocalStateFailed)?;
@@ -5144,6 +4383,7 @@ pub async fn check_instance_updates(
             .filter(|_| installed_mod.source == "modrinth_raw")
         {
             let candidates = modrinth_raw::list_raw_modrinth_versions(
+                &ctx.http_clients,
                 &app,
                 Some(&sanitized),
                 project_id,
@@ -5260,7 +4500,7 @@ pub fn test_launcher_path(
     #[cfg(target_os = "windows")]
     {
         let ext = p.extension().and_then(|e| e.to_str());
-        if !ext.map_or(false, |e| e.eq_ignore_ascii_case("exe")) {
+        if !ext.is_some_and(|e| e.eq_ignore_ascii_case("exe")) {
             return Err(LauncherError::Generic {
                 code: "ERR_LAUNCHER_PATH_NOT_EXE".to_string(),
                 message: "The selected file is not an executable (.exe).".to_string(),
@@ -5295,11 +4535,6 @@ static JAVA_RUNTIME_CANCELLATIONS: LazyLock<
         std::collections::HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>,
     >,
 > = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
-/// Generate a stable operation ID for a java runtime provisioning operation.
-fn java_runtime_op_id(instance_id: &str, major: u32) -> String {
-    format!("java-runtime-{}-{}", instance_id, major)
-}
 
 /// Register a cancellation flag for a java runtime operation.
 /// Returns the key and the shared flag.
@@ -5380,10 +4615,12 @@ pub async fn list_java_runtimes(app: tauri::AppHandle) -> LauncherResult<Vec<Jav
     let minecraft_dir = paths::minecraft_dir();
 
     // Read global java_path setting to prepend as Override source.
-    let global_java = db::local_state_connection(&app)
+    let global_java = crate::core_context(&app)
         .ok()
-        .and_then(|conn| db::get_setting(&conn, "java_path").ok().flatten())
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .and_then(|ctx| {
+            let svc = agora_core::settings::SettingsService::new(ctx);
+            svc.get_string("java_path").ok().flatten()
+        })
         .filter(|s| !s.trim().is_empty());
 
     let summaries = tokio::task::spawn_blocking(move || {
@@ -5447,14 +4684,10 @@ pub async fn ensure_java_runtime(
     // Stable operation ID when caller doesn't provide one.
     let op_id = operation_id.unwrap_or_else(|| format!("settings-{major}"));
 
-    let app_data = paths::app_data_dir(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-    let runtimes_root = app_data.join("runtimes");
-    let registry_conn = registry::open_registry(&app).ok();
-    let catalog = agora_core::runtime_catalog::RuntimeCatalog::effective(registry_conn.as_ref());
-
-    let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-    let policy = agora_core::network::NetworkPolicy::from_db(&conn);
-    drop(conn);
+    let ctx = crate::core_context(&app)?;
+    let runtimes_root = ctx.paths.java_runtimes_root();
+    let catalog = ctx.runtime_catalog.snapshot();
+    let policy = agora_core::network::NetworkPolicy::from_ctx(&ctx)?;
 
     // Check network policy.
     policy.check(agora_core::network::NetworkCategory::JavaRuntime)?;
@@ -5474,7 +4707,7 @@ pub async fn ensure_java_runtime(
     // Spawn a task to forward progress events to Tauri.
     let _progress_task = tokio::spawn(async move {
         while let Some((msg, pct)) = rx.recv().await {
-            let stage = if pct.map_or(false, |p| p >= 100.0) {
+            let stage = if pct.is_some_and(|p| p >= 100.0) {
                 "ready"
             } else {
                 "downloading"
@@ -5493,6 +4726,7 @@ pub async fn ensure_java_runtime(
     });
 
     let cancel_for_progress = cancel_flag.clone();
+    let lock_manager = ctx.lock_manager().clone();
     let ensured = tokio::task::spawn_blocking(move || {
         struct ChannelProgress {
             sender: tokio::sync::mpsc::UnboundedSender<(String, Option<f64>)>,
@@ -5516,6 +4750,7 @@ pub async fn ensure_java_runtime(
             &catalog,
             &policy,
             Some(&progress),
+            Some(&lock_manager),
         )
     })
     .await
@@ -5531,10 +4766,9 @@ pub async fn ensure_java_runtime(
 /// Returns the number of runtimes that were removed.
 #[tauri::command]
 pub async fn remove_unused_java_runtimes(app: tauri::AppHandle) -> LauncherResult<usize> {
-    let app_data = paths::app_data_dir(&app).map_err(|_| LauncherError::LocalStateFailed)?;
-    let runtimes_root = app_data.join("runtimes");
-    let registry_conn = registry::open_registry(&app).ok();
-    let catalog = agora_core::runtime_catalog::RuntimeCatalog::effective(registry_conn.as_ref());
+    let ctx = crate::core_context(&app)?;
+    let runtimes_root = ctx.paths.java_runtimes_root();
+    let catalog = ctx.runtime_catalog.snapshot();
 
     let removed = tokio::task::spawn_blocking(move || {
         agora_core::runtime_manager::remove_unused(&runtimes_root, &catalog, &[])
@@ -5582,67 +4816,38 @@ pub async fn update_instance_java(
     path: Option<String>,
     allow_incompatible: bool,
 ) -> LauncherResult<()> {
-    let sanitized = paths::sanitize_id(&instance_id);
-    let conn = db::local_state_connection(&app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let ctx = crate::core_context(&app)?;
+    let service = agora_core::instance_service::InstanceService::new(ctx);
+    service.update_java(&instance_id, path.as_deref(), allow_incompatible)
+}
 
-    // Verify instance exists.
-    let _row = db::get_instance(&conn, &sanitized)
-        .map_err(|_| LauncherError::LocalStateFailed)?
-        .ok_or_else(|| LauncherError::Generic {
-            code: "ERR_INSTANCE_NOT_FOUND".into(),
-            message: format!("Instance '{instance_id}' not found"),
-        })?;
+fn to_modrinth_sort(sort: &str) -> ModrinthSort {
+    match sort {
+        "downloads" => ModrinthSort::Downloads,
+        "follows" => ModrinthSort::Follows,
+        "newest" => ModrinthSort::Newest,
+        "updated" => ModrinthSort::Updated,
+        _ => ModrinthSort::Relevance,
+    }
+}
 
-    db::update_instance_java(&conn, &sanitized, path.as_deref(), allow_incompatible)
-        .map_err(|_| LauncherError::LocalStateFailed)?;
-
-    Ok(())
+fn to_sort_option(sort: &str) -> registry::SortOption {
+    match sort {
+        "net_score" => registry::SortOption::NetScore,
+        "velocity" => registry::SortOption::Velocity,
+        "most_downvoted" => registry::SortOption::MostDownvoted,
+        "newest" => registry::SortOption::Newest,
+        "most_upvoted" => registry::SortOption::MostUpvoted,
+        _ => registry::SortOption::NetScore,
+    }
 }
 
 #[cfg(test)]
 mod command_helper_tests {
     use super::{
-        apply_lockfile_metadata, compatibility_from_registry_json,
-        create_or_reuse_prelaunch_snapshot, installed_lockfile_identity, lockfile_identity,
-        normalize_lock_content_type,
+        apply_lockfile_metadata, create_or_reuse_prelaunch_snapshot, installed_lockfile_identity,
+        lockfile_identity, normalize_lock_content_type,
     };
-
-    const COMPAT: &str = r#"[
-        {"mc_version":"1.21.1","loader":"fabric"},
-        {"mc_version":"1.20.4","loader":"neoforge"}
-    ]"#;
-
-    #[test]
-    fn registry_compatibility_exact_match() {
-        assert_eq!(
-            compatibility_from_registry_json(COMPAT, "1.21.1", "fabric"),
-            "compatible"
-        );
-    }
-
-    #[test]
-    fn registry_compatibility_major_match_is_distinct() {
-        assert_eq!(
-            compatibility_from_registry_json(COMPAT, "1.21.4", "fabric"),
-            "major_match"
-        );
-    }
-
-    #[test]
-    fn registry_compatibility_requires_matching_loader() {
-        assert_eq!(
-            compatibility_from_registry_json(COMPAT, "1.21.1", "neoforge"),
-            ""
-        );
-    }
-
-    #[test]
-    fn registry_compatibility_malformed_metadata_fails_closed() {
-        assert_eq!(
-            compatibility_from_registry_json("not-json", "1.21.1", "fabric"),
-            ""
-        );
-    }
 
     #[test]
     fn unchanged_prelaunch_state_reuses_current_lkg_snapshot() {
@@ -5813,26 +5018,5 @@ mod command_helper_tests {
             optional_deps: vec![],
             incompatible_deps: vec![],
         }
-    }
-}
-
-fn to_modrinth_sort(sort: &str) -> ModrinthSort {
-    match sort {
-        "downloads" => ModrinthSort::Downloads,
-        "follows" => ModrinthSort::Follows,
-        "newest" => ModrinthSort::Newest,
-        "updated" => ModrinthSort::Updated,
-        _ => ModrinthSort::Relevance,
-    }
-}
-
-fn to_sort_option(sort: &str) -> registry::SortOption {
-    match sort {
-        "net_score" => registry::SortOption::NetScore,
-        "velocity" => registry::SortOption::Velocity,
-        "most_downvoted" => registry::SortOption::MostDownvoted,
-        "newest" => registry::SortOption::Newest,
-        "most_upvoted" => registry::SortOption::MostUpvoted,
-        _ => registry::SortOption::NetScore,
     }
 }

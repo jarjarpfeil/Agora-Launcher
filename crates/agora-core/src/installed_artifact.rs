@@ -644,40 +644,35 @@ pub fn adopt_asset_objects(
 
         // Try installed source
         let installed_path = source.asset_object(&object.hash);
-        if installed_path.is_file() {
-            if is_regular_file(&installed_path).is_ok() {
-                if verify_sha1(&installed_path, &object.hash).is_ok()
-                    && verify_size(&installed_path, object.size).is_ok()
-                {
-                    // Materialize
-                    hardlink_or_copy(&installed_path, &object_path).map_err(|e| {
-                        LauncherError::Generic {
-                            code: "ERR_ASSET_MATERIALIZE".into(),
-                            message: format!(
-                                "Failed to materialize asset {}: {e}",
-                                object_path.display()
-                            ),
-                        }
-                    })?;
+        if installed_path.is_file()
+            && is_regular_file(&installed_path).is_ok()
+            && verify_sha1(&installed_path, &object.hash).is_ok()
+            && verify_size(&installed_path, object.size).is_ok()
+        {
+            // Materialize
+            hardlink_or_copy(&installed_path, &object_path).map_err(|e| {
+                LauncherError::Generic {
+                    code: "ERR_ASSET_MATERIALIZE".into(),
+                    message: format!("Failed to materialize asset {}: {e}", object_path.display()),
+                }
+            })?;
 
-                    // Post-verify
-                    if let Ok(data) = std::fs::read(&object_path) {
-                        if sha1_hex(&data) != object.hash || data.len() as i64 != object.size {
-                            let _ = std::fs::remove_file(&object_path);
-                            return Err(LauncherError::Generic {
-                                code: "ERR_ASSET_CORRUPT".into(),
-                                message: format!(
-                                    "Post-materialization verification failed for asset {}",
-                                    object.hash
-                                ),
-                            });
-                        }
-                    }
-
-                    sync_virtual_asset(&index, &object_path, logical_name, assets_dir)?;
-                    continue;
+            // Post-verify
+            if let Ok(data) = std::fs::read(&object_path) {
+                if sha1_hex(&data) != object.hash || data.len() as i64 != object.size {
+                    let _ = std::fs::remove_file(&object_path);
+                    return Err(LauncherError::Generic {
+                        code: "ERR_ASSET_CORRUPT".into(),
+                        message: format!(
+                            "Post-materialization verification failed for asset {}",
+                            object.hash
+                        ),
+                    });
                 }
             }
+
+            sync_virtual_asset(&index, &object_path, logical_name, assets_dir)?;
+            continue;
         }
 
         // Not in cache, not in installed source — check network policy
@@ -832,10 +827,8 @@ pub fn adopt_trusted_unhashed_library(
         })?;
 
     // Cache hit: verify against receipt hash
-    if cache_path.is_file() {
-        if verify_sha256(cache_path, expected_sha256).is_ok() {
-            return Ok(ArtifactAdoptResult::CacheHit);
-        }
+    if cache_path.is_file() && verify_sha256(cache_path, expected_sha256).is_ok() {
+        return Ok(ArtifactAdoptResult::CacheHit);
     }
 
     // Installed source

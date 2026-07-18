@@ -1,20 +1,23 @@
-//! Raw (uncurated) Modrinth API integration (§6.3).
+//! Raw (uncurated) Modrinth API integration (Â§6.3).
 //!
 //! Pure HTTP functions that talk to the Modrinth v2 API.
 //! All functions take a `&rusqlite::Connection` for settings checks
 //! (e.g. `modrinth_enabled`) so the core crate stays free of `tauri` types.
 //!
 //! Install functions that write to an instance directory live in the
-//! desktop crate's `modrinth_raw` shim, which resolves `AppHandle` → paths
+//! desktop crate's `modrinth_raw` shim, which resolves `AppHandle` â†’ paths
 //! and delegates to these core functions.
 
+use crate::ctx::Ctx;
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
+use crate::http_client::{self, ClientCategory, HttpClients};
+use crate::install_service::InstallService;
+use crate::instance_service::InstanceService;
 use crate::models::{InstalledMod, InstanceManifest, InstanceRow};
-use crate::paths;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::Path;
 
 // --- Modrinth project full-details types ---
 
@@ -51,6 +54,7 @@ pub struct ModrinthProjectFull {
     pub description: String,
     pub body: Option<String>,
     pub icon_url: Option<String>,
+    pub project_type: String,
     pub page_url: Option<String>,
     pub license_id: Option<String>,
     pub source_updated_at: Option<String>,
@@ -126,20 +130,15 @@ pub struct ModrinthFileMetadata {
 }
 
 /// Valid Modrinth sort indexes for the search endpoint.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModrinthSort {
+    #[default]
     Relevance,
     Downloads,
     Follows,
     Newest,
     Updated,
-}
-
-impl Default for ModrinthSort {
-    fn default() -> Self {
-        Self::Relevance
-    }
 }
 
 impl ModrinthSort {
@@ -245,6 +244,8 @@ pub(crate) struct ModrinthVersion {
     pub(crate) loaders: Option<Vec<String>>,
     pub(crate) files: Vec<ModrinthVersionFile>,
     #[serde(default)]
+    pub(crate) dependencies: Vec<RawModrinthDependency>,
+    #[serde(default)]
     pub(crate) changelog: Option<String>,
 }
 
@@ -254,9 +255,11 @@ pub(crate) struct ModrinthVersionFile {
     pub(crate) filename: String,
     pub(crate) primary: bool,
     /// Modrinth publishes both sha1 and sha512 hashes for each file.
-    /// Per §6.3 the launcher verifies against the SHA-1 hash published by
+    /// Per Â§6.3 the launcher verifies against the SHA-1 hash published by
     /// Modrinth's API.
     pub(crate) hashes: Option<ModrinthFileHashes>,
+    #[serde(default)]
+    pub(crate) size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -290,6 +293,15 @@ pub(crate) struct ModrinthVersionRaw {
     files: Vec<ModrinthVersionFileRaw>,
 }
 
+/// A dependency declared in a raw Modrinth version.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawModrinthDependency {
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub dependency_type: String,
+}
+
 /// A candidate version returned to the frontend for the raw Modrinth picker.
 ///
 /// Carries the SHA-1 hash from the Modrinth API so the frontend can pass it
@@ -302,6 +314,9 @@ pub struct RawModrinthVersionCandidate {
     pub filename: String,
     pub download_url: String,
     pub sha1: Option<String>,
+    pub sha512: Option<String>,
+    pub size: Option<u64>,
+    pub dependencies: Vec<RawModrinthDependency>,
     pub mc_versions: Vec<String>,
     pub loaders: Vec<String>,
     pub release_date: Option<String>,
@@ -312,9 +327,9 @@ pub struct RawModrinthVersionCandidate {
 /// Live Modrinth search with facets, sorting and offset pagination.
 ///
 /// Facets are built to mirror Modrinth's native search semantics:
-///   - multiple categories → AND (the mod must have every category)
-///   - multiple loaders    → OR  (mod supports any selected loader)
-///   - multiple game versions → OR
+///   - multiple categories â†’ AND (the mod must have every category)
+///   - multiple loaders    â†’ OR  (mod supports any selected loader)
+///   - multiple game versions â†’ OR
 ///   - If `project_type` is set it is applied as a facet; when `None` the facet is omitted (all project types).
 ///
 /// Returns a [`ModrinthSearchPage`] including `total_hits` so the frontend
@@ -323,7 +338,7 @@ pub async fn search_modrinth(
     conn: &rusqlite::Connection,
     params: &ModrinthSearchParams,
 ) -> LauncherResult<ModrinthSearchPage> {
-    // Sync DB checks — connection only needed here
+    // Sync DB checks â€” connection only needed here
     {
         if !db::is_network_enabled(conn, "network_modrinth_enabled") {
             return Err(LauncherError::Generic {
@@ -333,11 +348,11 @@ pub async fn search_modrinth(
         }
         require_modrinth_enabled(conn)?;
     }
-    // Proceed with async HTTP — connection no longer borrowed
+    // Proceed with async HTTP â€” connection no longer borrowed
     search_modrinth_http(params).await
 }
 
-/// Async HTTP-only search — no DB connection needed. Callers that already
+/// Async HTTP-only search â€” no DB connection needed. Callers that already
 /// validated the modrinth_enabled + network_enabled settings can call this
 /// directly to avoid holding a `!Send` Connection across `.await` points.
 pub async fn search_modrinth_http(
@@ -404,30 +419,9 @@ pub async fn search_modrinth_http(
         facets = urlencoding::encode(&facets_json),
     );
 
-    let client = reqwest::Client::builder()
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Failed to build HTTP client: {e}"),
-        })?;
-
-    let resp: ModrinthSearchResponse = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?
-        .error_for_status()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Modrinth search request failed: {e}"),
-        })?
-        .json()
-        .await
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: "Failed to parse Modrinth search response.".to_string(),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp: ModrinthSearchResponse =
+        http_client::checked_get_json(&clients, ClientCategory::Modrinth, &url).await?;
 
     let total_hits = resp.total_hits;
     let returned_offset = resp.offset;
@@ -539,54 +533,17 @@ pub async fn list_modrinth_game_versions(
 /// Internal: GET a JSON endpoint from the Modrinth v2 API with the standard
 /// user agent and the project's error mapping.
 async fn modrinth_get_json<T: serde::de::DeserializeOwned>(url: &str) -> LauncherResult<T> {
-    let client = reqwest::Client::builder()
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Failed to build HTTP client: {e}"),
-        })?;
-
-    client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?
-        .error_for_status()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Modrinth request failed: {e}"),
-        })?
-        .json::<T>()
-        .await
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: "Failed to parse Modrinth response.".to_string(),
-        })
+    let clients = HttpClients::new()?;
+    http_client::checked_get_json(&clients, ClientCategory::Modrinth, url).await
 }
 
 /// Internal: GET a JSON endpoint using a caller-provided client.
 /// Used by the catalog source to share the host's HTTP client.
 pub(crate) async fn modrinth_get_json_with_client<T: serde::de::DeserializeOwned>(
-    client: &reqwest::Client,
+    clients: &HttpClients,
     url: &str,
 ) -> LauncherResult<T> {
-    client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?
-        .error_for_status()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Modrinth request failed: {e}"),
-        })?
-        .json::<T>()
-        .await
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: "Failed to parse Modrinth response.".to_string(),
-        })
+    http_client::checked_get_json(clients, ClientCategory::Modrinth, url).await
 }
 
 /// Fetch a single Modrinth project's full details including the body (markdown
@@ -603,35 +560,14 @@ pub async fn fetch_project_full(
     }
     require_modrinth_enabled(conn)?;
 
-    let client = reqwest::Client::builder()
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Failed to build HTTP client: {e}"),
-        })?;
-
     let url = format!(
         "https://api.modrinth.com/v2/project/{pid}",
         pid = urlencoding::encode(project_id),
     );
 
-    let resp: ModrinthProjectFullRaw = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?
-        .error_for_status()
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_MODRINTH_FETCH".to_string(),
-            message: format!("Failed to fetch project '{project_id}' from Modrinth.").to_string(),
-        })?
-        .json()
-        .await
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_MODRINTH_FETCH".to_string(),
-            message: "Failed to parse Modrinth project response.".to_string(),
-        })?;
+    let clients = HttpClients::new()?;
+    let resp: ModrinthProjectFullRaw =
+        http_client::checked_get_json(&clients, ClientCategory::Modrinth, &url).await?;
 
     let page_url = resp
         .slug
@@ -644,6 +580,7 @@ pub async fn fetch_project_full(
         description: resp.description,
         body: resp.body,
         icon_url: resp.icon_url,
+        project_type: resp.project_type,
         page_url,
         license_id: resp.license.and_then(|l| l.id),
         source_updated_at: resp.updated,
@@ -668,10 +605,7 @@ pub async fn resolve_modrinth_file_metadata(
     project_id: &str,
     filename: &str,
 ) -> Option<ModrinthFileMetadata> {
-    let client = reqwest::Client::builder()
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .ok()?;
+    let clients = HttpClients::new().ok()?;
 
     let url = format!(
         "https://api.modrinth.com/v2/project/{pid}/version",
@@ -679,7 +613,9 @@ pub async fn resolve_modrinth_file_metadata(
     );
 
     let versions: Vec<ModrinthVersionRaw> =
-        client.get(&url).send().await.ok()?.json().await.ok()?;
+        http_client::checked_get_json(&clients, ClientCategory::Modrinth, &url)
+            .await
+            .ok()?;
 
     for version in &versions {
         // Prefer the primary file matching filename.
@@ -724,26 +660,16 @@ pub async fn resolve_modrinth_file_metadata(
     None
 }
 
-/// List versions for a raw Modrinth project (by project ID or slug).
+/// Internal HTTP-only version of list_raw_modrinth_versions.
 ///
-/// Optionally filters by the target instance's Minecraft version + loader
-/// when instance info is supplied. Without instance info, all versions are
-/// returned sorted newest-first.
-pub async fn list_raw_modrinth_versions(
-    conn: &rusqlite::Connection,
+/// Same as the public [`list_raw_modrinth_versions`] but without the DB connection
+/// parameter. Callers must validate `network_modrinth_enabled` and
+/// `modrinth_enabled` before calling this function.
+pub(crate) async fn list_raw_modrinth_versions_http(
     instance: Option<&InstanceRow>,
     project_id: &str,
+    project_type: Option<&str>,
 ) -> LauncherResult<Vec<RawModrinthVersionCandidate>> {
-    if !db::is_network_enabled(conn, "network_modrinth_enabled") {
-        return Err(LauncherError::Generic {
-            code: "ERR_NETWORK_DISABLED".into(),
-            message: "Modrinth catalog API is disabled in Privacy settings.".into(),
-        });
-    }
-    require_modrinth_enabled(conn)?;
-
-    // If an instance is provided, scope the request to its MC version + loader
-    // so the API does not return incompatible noise.
     let mut url = format!(
         "https://api.modrinth.com/v2/project/{pid}/version",
         pid = urlencoding::encode(project_id),
@@ -752,39 +678,20 @@ pub async fn list_raw_modrinth_versions(
     if let Some(inst) = instance {
         let gv = serde_json::to_string(&[inst.minecraft_version.as_str()])
             .unwrap_or_else(|_| "[]".to_string());
-        let lv =
-            serde_json::to_string(&[inst.loader.as_str()]).unwrap_or_else(|_| "[]".to_string());
-        // Modrinth expects query params game_versions=[...]&loaders=[...]
         url.push_str("?game_versions=");
         url.push_str(&urlencoding::encode(&gv));
-        url.push_str("&loaders=");
-        url.push_str(&urlencoding::encode(&lv));
+        let pt = project_type.unwrap_or("mod");
+        if pt == "mod" || pt == "modpack" {
+            let lv =
+                serde_json::to_string(&[inst.loader.as_str()]).unwrap_or_else(|_| "[]".to_string());
+            url.push_str("&loaders=");
+            url.push_str(&urlencoding::encode(&lv));
+        }
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Failed to build HTTP client: {e}"),
-        })?;
-
-    let versions: Vec<ModrinthVersion> = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?
-        .error_for_status()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Modrinth version request failed: {e}"),
-        })?
-        .json()
-        .await
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: "Failed to parse Modrinth version response.".to_string(),
-        })?;
+    let clients = HttpClients::new()?;
+    let versions: Vec<ModrinthVersion> =
+        http_client::checked_get_json(&clients, ClientCategory::Modrinth, &url).await?;
 
     Ok(versions
         .into_iter()
@@ -794,13 +701,15 @@ pub async fn list_raw_modrinth_versions(
                 .iter()
                 .find(|f| f.primary)
                 .or_else(|| v.files.first());
-            let (filename, download_url, sha1) = match primary_file {
+            let (filename, download_url, sha1, sha512, size) = match primary_file {
                 Some(f) => (
                     f.filename.clone(),
                     f.url.clone(),
                     f.hashes.as_ref().and_then(|h| h.sha1.clone()),
+                    f.hashes.as_ref().and_then(|h| h.sha512.clone()),
+                    f.size,
                 ),
-                None => (String::new(), String::new(), None),
+                None => (String::new(), String::new(), None, None, None),
             };
             RawModrinthVersionCandidate {
                 version: v.version_number,
@@ -809,6 +718,17 @@ pub async fn list_raw_modrinth_versions(
                 filename,
                 download_url,
                 sha1,
+                sha512,
+                size,
+                dependencies: v
+                    .dependencies
+                    .into_iter()
+                    .map(|d| RawModrinthDependency {
+                        project_id: d.project_id,
+                        version_id: d.version_id,
+                        dependency_type: d.dependency_type,
+                    })
+                    .collect(),
                 mc_versions: v.game_versions.unwrap_or_default(),
                 loaders: v
                     .loaders
@@ -830,23 +750,23 @@ pub async fn list_raw_modrinth_versions(
 /// Downloads the file from Modrinth's CDN (host-allowlist enforced by
 /// `download_mod_bytes`) and verifies the SHA-1 hash published by the
 /// Modrinth API before writing it to the appropriate instance directory
-/// based on `project_type` (mods → `mods/`, shaders → `shaderpacks/`,
-/// resourcepacks → `resourcepacks/`, datapacks → `datapacks/`).
-/// The manifest entry uses `source: "modrinth_raw"` per the spec (§6.3 / §6.5).
+/// based on `project_type` (mods â†’ `mods/`, shaders â†’ `shaderpacks/`,
+/// resourcepacks â†’ `resourcepacks/`, datapacks â†’ `datapacks/`).
+/// The manifest entry uses `source: "modrinth_raw"` per the spec (Â§6.3 / Â§6.5).
 ///
 /// Parameters:
-/// - `instance_dir` — the instance root directory (e.g. `instances/my-instance`)
-/// - `instance_id` — the instance ID for manifest path resolution
-/// - `project_id` — the Modrinth project ID
-/// - `candidate` — version candidate with download URL and SHA-1
-/// - `project_type` — "mod", "shader", "resourcepack", or "datapack"
-/// - `download_mod_bytes` — async closure to download bytes from a URL
-/// - `available_disk_space_bytes` — sync closure to check free disk space
-/// - `parse_jar_metadata` — sync closure to extract JAR metadata for the manifest
-/// - `app_data_dir` — the app data directory (for manifest path resolution)
+/// - `instance_dir` â€” the instance root directory (e.g. `instances/my-instance`)
+/// - `instance_id` â€” the instance ID for manifest path resolution
+/// - `project_id` â€” the Modrinth project ID
+/// - `candidate` â€” version candidate with download URL and SHA-1
+/// - `project_type` â€” "mod", "shader", "resourcepack", or "datapack"
+/// - `download_mod_bytes` â€” async closure to download bytes from a URL
+/// - `available_disk_space_bytes` â€” sync closure to check free disk space
+/// - `parse_jar_metadata` â€” sync closure to extract JAR metadata for the manifest
+/// - `app_data_dir` â€” the app data directory (for manifest path resolution)
 #[allow(clippy::too_many_arguments)]
 pub async fn install_raw_modrinth(
-    instance_dir: &PathBuf,
+    instance_dir: &Path,
     instance_id: &str,
     project_id: &str,
     candidate: &RawModrinthVersionCandidate,
@@ -859,7 +779,7 @@ pub async fn install_raw_modrinth(
         + Sync,
     available_disk_space_bytes: impl Fn(&std::path::Path) -> Option<u64> + Send + Sync,
     parse_jar_metadata: impl Fn(&std::path::Path) -> crate::dependency_ops::JarDeps + Send + Sync,
-    app_data_dir: &PathBuf,
+    app_data_dir: &Path,
 ) -> LauncherResult<InstalledMod> {
     // Modpacks must use the pack import flow, not single-file install.
     if project_type == "modpack" {
@@ -883,7 +803,7 @@ pub async fn install_raw_modrinth(
         }
     };
 
-    // Pre-check free disk space (§7.1.2).
+    // Pre-check free disk space (Â§7.1.2).
     if let Some(free) = available_disk_space_bytes(instance_dir) {
         const MIN_DISK_SPACE_BYTES: u64 = 500_000_000;
         if free < MIN_DISK_SPACE_BYTES {
@@ -913,7 +833,7 @@ pub async fn install_raw_modrinth(
     std::fs::write(&mod_path, &bytes).map_err(|_| LauncherError::InstanceCreateFailed)?;
 
     // Update the instance manifest atomically.
-    let manifest_path = paths::instance_manifest_path(app_data_dir, instance_id)
+    let manifest_path = crate::paths::instance_manifest_path(app_data_dir, instance_id)
         .map_err(|_| LauncherError::InstanceCreateFailed)?;
     let mut manifest: InstanceManifest = if manifest_path.exists() {
         let text = std::fs::read_to_string(&manifest_path)
@@ -966,4 +886,402 @@ pub async fn install_raw_modrinth(
     std::fs::rename(&tmp_path, &manifest_path).map_err(|_| LauncherError::InstanceCreateFailed)?;
 
     Ok(installed_mod)
+}
+
+// ---------------------------------------------------------------------------
+// ModrinthService — setting-gated facade
+// ---------------------------------------------------------------------------
+
+/// Core-owned service that gates every Modrinth API call behind the
+/// `modrinth_enabled` toggle and the `network_modrinth_enabled` privacy
+/// setting.
+///
+/// Desktop and CLI adapters should use this service rather than calling
+/// the free functions directly, to avoid duplicating settings checks or
+/// building Modrinth HTTP requests on their own.
+#[derive(Clone)]
+pub struct ModrinthService {
+    ctx: Ctx,
+}
+
+impl ModrinthService {
+    pub fn new(ctx: Ctx) -> Self {
+        Self { ctx }
+    }
+
+    fn connection(&self) -> LauncherResult<rusqlite::Connection> {
+        crate::db::local_state_connection(&self.ctx.paths.local_state_db()).map_err(|e| {
+            LauncherError::Generic {
+                code: "ERR_LOCAL_STATE_FAILED".into(),
+                message: e.to_string(),
+            }
+        })
+    }
+
+    /// Check both the `network_modrinth_enabled` privacy setting and the
+    /// `modrinth_enabled` feature toggle. Returns `Err(ModrinthDisabled)` when
+    /// the toggle is off or the DB cannot be read (secure default: closed).
+    pub fn check_enabled(&self) -> LauncherResult<()> {
+        let conn = self.connection()?;
+        if !db::is_network_enabled(&conn, "network_modrinth_enabled") {
+            return Err(LauncherError::Generic {
+                code: "ERR_NETWORK_DISABLED".into(),
+                message: "Modrinth catalog API is disabled in Privacy settings.".into(),
+            });
+        }
+        require_modrinth_enabled(&conn)
+    }
+
+    /// Whether the `modrinth_enabled` toggle is currently on.
+    /// Returns `false` on any read failure (secure default: closed).
+    pub fn is_modrinth_enabled(&self) -> bool {
+        self.connection()
+            .ok()
+            .and_then(|conn| {
+                db::get_setting(&conn, "modrinth_enabled")
+                    .ok()
+                    .flatten()
+                    .and_then(|v| {
+                        if v.as_bool() == Some(true) {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Live Modrinth search (see [`search_modrinth_http`]).
+    pub async fn search_modrinth(
+        &self,
+        params: &ModrinthSearchParams,
+    ) -> LauncherResult<ModrinthSearchPage> {
+        self.check_enabled()?;
+        search_modrinth_http(params).await
+    }
+
+    /// List Modrinth category tags.
+    pub async fn list_modrinth_categories(&self) -> LauncherResult<Vec<ModrinthCategoryInfo>> {
+        self.check_enabled()?;
+        modrinth_get_json::<Vec<ModrinthCategoryTag>>("https://api.modrinth.com/v2/tag/category")
+            .await
+            .map(|tags| {
+                tags.into_iter()
+                    .filter(|t| t.project_type == "mod")
+                    .map(|t| ModrinthCategoryInfo {
+                        name: t.name,
+                        project_type: t.project_type,
+                        header: t.header,
+                    })
+                    .collect()
+            })
+    }
+
+    /// List Modrinth loader tags.
+    pub async fn list_modrinth_loaders(&self) -> LauncherResult<Vec<ModrinthLoaderInfo>> {
+        self.check_enabled()?;
+        modrinth_get_json::<Vec<ModrinthLoaderTag>>("https://api.modrinth.com/v2/tag/loader")
+            .await
+            .map(|tags| {
+                tags.into_iter()
+                    .filter(|t| t.supported_project_types.iter().any(|p| p == "mod"))
+                    .map(|t| ModrinthLoaderInfo {
+                        name: t.name,
+                        supported_project_types: t.supported_project_types,
+                    })
+                    .collect()
+            })
+    }
+
+    /// List Modrinth game version tags.
+    pub async fn list_modrinth_game_versions(
+        &self,
+    ) -> LauncherResult<Vec<ModrinthGameVersionInfo>> {
+        self.check_enabled()?;
+        modrinth_get_json::<Vec<ModrinthGameVersionTag>>(
+            "https://api.modrinth.com/v2/tag/game_version",
+        )
+        .await
+        .map(|tags| {
+            tags.into_iter()
+                .map(|t| ModrinthGameVersionInfo {
+                    version: t.version,
+                    version_type: t.version_type,
+                    date: t.date,
+                    major: t.major,
+                })
+                .collect()
+        })
+    }
+
+    /// Fetch full project details.
+    pub async fn fetch_project_full(
+        &self,
+        project_id: &str,
+    ) -> LauncherResult<ModrinthProjectFull> {
+        self.check_enabled()?;
+
+        let url = format!(
+            "https://api.modrinth.com/v2/project/{pid}",
+            pid = urlencoding::encode(project_id),
+        );
+
+        let clients = HttpClients::new()?;
+        let resp: ModrinthProjectFullRaw =
+            http_client::checked_get_json(&clients, ClientCategory::Modrinth, &url).await?;
+
+        let page_url = resp
+            .slug
+            .as_ref()
+            .map(|slug| format!("https://modrinth.com/{}/{}", resp.project_type, slug));
+
+        Ok(ModrinthProjectFull {
+            id: resp.id,
+            title: resp.title,
+            description: resp.description,
+            body: resp.body,
+            icon_url: resp.icon_url,
+            project_type: resp.project_type,
+            page_url,
+            license_id: resp.license.and_then(|l| l.id),
+            source_updated_at: resp.updated,
+            gallery_urls: resp
+                .gallery
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|g| g.url.filter(|u| u.starts_with("https://")))
+                .collect(),
+        })
+    }
+
+    /// Resolve Modrinth-published per-file metadata (URL + sha1 + sha512 + size).
+    pub async fn resolve_modrinth_file_metadata(
+        &self,
+        project_id: &str,
+        filename: &str,
+    ) -> Option<ModrinthFileMetadata> {
+        resolve_modrinth_file_metadata(project_id, filename).await
+    }
+
+    /// List versions for a raw Modrinth project, optionally scoped to an
+    /// instance's MC version and loader.
+    pub async fn list_raw_modrinth_versions(
+        &self,
+        instance_id: Option<&str>,
+        project_id: &str,
+        project_type: Option<&str>,
+    ) -> LauncherResult<Vec<RawModrinthVersionCandidate>> {
+        self.check_enabled()?;
+
+        let instance = match instance_id {
+            Some(iid) => {
+                let svc = InstanceService::new(self.ctx.clone());
+                Some(
+                    svc.get(iid)?
+                        .ok_or_else(|| LauncherError::Generic {
+                            code: "ERR_INSTANCE_NOT_FOUND".to_string(),
+                            message: format!("Instance '{iid}' not found."),
+                        })?
+                        .row,
+                )
+            }
+            None => None,
+        };
+
+        list_raw_modrinth_versions_http(instance.as_ref(), project_id, project_type).await
+    }
+
+    /// Install a raw Modrinth mod file into an instance.
+    ///
+    /// Validates the gate, rejects modpack installs, requires SHA-1, then
+    /// delegates to [`InstallService::install_artifact`].
+    pub async fn install_raw_modrinth(
+        &self,
+        instance_id: &str,
+        project_id: &str,
+        candidate: &RawModrinthVersionCandidate,
+        project_type: &str,
+    ) -> LauncherResult<InstalledMod> {
+        self.check_enabled()?;
+
+        if project_type == "modpack" {
+            return Err(LauncherError::Generic {
+                code: "ERR_USE_PACK_IMPORT".to_string(),
+                message: "Modpacks must be imported via the pack import flow, not installed as a single file."
+                    .to_string(),
+            });
+        }
+
+        let expected_sha1 = match candidate.sha1.as_deref() {
+            Some(h) if !h.trim().is_empty() => h.trim().to_lowercase(),
+            _ => {
+                return Err(LauncherError::Generic {
+                    code: "ERR_HASH_UNAVAILABLE".to_string(),
+                    message: "Modrinth did not publish a SHA-1 hash for this file. Install refused for integrity safety."
+                        .to_string(),
+                });
+            }
+        };
+
+        let content_type = if project_type.is_empty() || project_type == "modpack" {
+            "mod"
+        } else {
+            project_type
+        };
+
+        let svc = InstallService::new(self.ctx.clone());
+        svc.install_artifact(
+            instance_id,
+            &candidate.filename,
+            content_type,
+            &candidate.download_url,
+            None,
+            Some(project_id),
+            "modrinth_raw",
+            Some(&candidate.version),
+            Some(&expected_sha1),
+            None,
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_ctx() -> (Ctx, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "agora-modrinth-svc-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::for_testing(root.clone());
+        crate::db::init_local_state_db(&ctx.paths.local_state_db()).unwrap();
+        let conn = crate::db::local_state_connection(&ctx.paths.local_state_db()).unwrap();
+        // modrinth_enabled must be explicitly true (default is off)
+        crate::db::set_setting(&conn, "modrinth_enabled", &serde_json::Value::Bool(true)).unwrap();
+        // network_modrinth_enabled defaults to true; ensure it's on
+        crate::db::set_setting(
+            &conn,
+            "network_modrinth_enabled",
+            &serde_json::Value::Bool(true),
+        )
+        .unwrap();
+        conn.close().unwrap();
+        (ctx, root)
+    }
+
+    #[test]
+    fn service_check_enabled_ok_when_both_on() {
+        let (ctx, root) = temp_ctx();
+        let svc = ModrinthService::new(ctx);
+        assert!(svc.check_enabled().is_ok());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_check_enabled_fails_when_modrinth_disabled() {
+        let root = std::env::temp_dir().join(format!(
+            "agora-modrinth-disabled-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::for_testing(root.clone());
+        crate::db::init_local_state_db(&ctx.paths.local_state_db()).unwrap();
+        // Never set modrinth_enabled -> defaults to off
+        let svc = ModrinthService::new(ctx);
+        assert!(svc.check_enabled().is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_check_enabled_fails_when_network_disabled() {
+        let root = std::env::temp_dir().join(format!(
+            "agora-modrinth-netoff-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::for_testing(root.clone());
+        crate::db::init_local_state_db(&ctx.paths.local_state_db()).unwrap();
+        let conn = crate::db::local_state_connection(&ctx.paths.local_state_db()).unwrap();
+        crate::db::set_setting(&conn, "modrinth_enabled", &serde_json::Value::Bool(true)).unwrap();
+        crate::db::set_setting(
+            &conn,
+            "network_modrinth_enabled",
+            &serde_json::Value::Bool(false),
+        )
+        .unwrap();
+        conn.close().unwrap();
+        let svc = ModrinthService::new(ctx);
+        let err = svc.check_enabled().unwrap_err();
+        assert_eq!(err.code(), "ERR_NETWORK_DISABLED");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_is_modrinth_enabled_returns_true() {
+        let (ctx, root) = temp_ctx();
+        let svc = ModrinthService::new(ctx);
+        assert!(svc.is_modrinth_enabled());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn service_is_modrinth_enabled_returns_false_when_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "agora-modrinth-off-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let ctx = Ctx::for_testing(root.clone());
+        crate::db::init_local_state_db(&ctx.paths.local_state_db()).unwrap();
+        let svc = ModrinthService::new(ctx);
+        assert!(!svc.is_modrinth_enabled());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn raw_modrinth_dependency_serde_roundtrip() {
+        let dep = RawModrinthDependency {
+            project_id: Some("abc".into()),
+            version_id: None,
+            dependency_type: "required".into(),
+        };
+        let json = serde_json::to_string(&dep).unwrap();
+        let parsed: RawModrinthDependency = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.project_id, Some("abc".into()));
+        assert_eq!(parsed.version_id, None);
+        assert_eq!(parsed.dependency_type, "required");
+    }
+
+    #[test]
+    fn raw_modrinth_version_candidate_deserialize() {
+        let json = r#"{
+            "version": "1.0.0",
+            "version_id": "v1",
+            "name": "Test Mod",
+            "filename": "test-mod.jar",
+            "download_url": "https://cdn.modrinth.com/test.jar",
+            "sha1": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            "sha512": "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+            "size": 12345,
+            "dependencies": [{"projectId": "dep1", "dependencyType": "required"}],
+            "mc_versions": ["1.21"],
+            "loaders": ["fabric"],
+            "release_date": "2024-01-01",
+            "primary": true,
+            "changelog": "Initial release"
+        }"#;
+        let candidate: RawModrinthVersionCandidate = serde_json::from_str(json).unwrap();
+        assert_eq!(candidate.version, "1.0.0");
+        assert_eq!(candidate.sha512.as_deref(), Some("cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"));
+        assert_eq!(candidate.size, Some(12345));
+        assert_eq!(candidate.dependencies.len(), 1);
+        assert_eq!(
+            candidate.dependencies[0].project_id.as_deref(),
+            Some("dep1")
+        );
+    }
 }

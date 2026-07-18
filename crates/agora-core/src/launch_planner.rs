@@ -40,6 +40,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 // No managed-installer re-exports — Forge/NeoForge uses installed-profile adoption only.
 
@@ -744,6 +745,7 @@ pub async fn materialize(
 /// Every artifact is cache-first, then installed-source, then (for non-adopted
 /// paths) network. For adopted profiles, missing installed source for a
 /// required artifact returns an error rather than silently downloading.
+#[allow(clippy::too_many_arguments)]
 async fn materialize_adopted_profile(
     resolved: ResolvedLaunchPlan,
     adopted_profile: crate::installed_profile::AdoptedProfile,
@@ -1364,19 +1366,98 @@ pub async fn wait_and_classify(
     game_dir: &Path,
     secrets: &[&str],
 ) -> LauncherResult<crate::lkg::LaunchOutcome> {
+    wait_and_classify_with_progress(child, game_dir, secrets, None).await
+}
+
+/// Bounded line count retained for crash-triage after streaming.
+const MAX_CAPTURED_LINES: usize = 200;
+
+/// Wait for a child while streaming stdout/stderr lines in real-time to an
+/// optional callback. Each line is sanitised (secrets redacted, paths masked)
+/// **before** it reaches the callback, so adapters never see raw secrets.
+///
+/// The two output streams are read concurrently via biased `tokio::select!`:
+/// stdout lines have slightly higher priority. Memory is bounded to the last
+/// [`MAX_CAPTURED_LINES`] lines, which is sufficient for crash-signature
+/// matching. Process cleanup (reaping) is guaranteed after exit.
+///
+/// # Compatibility
+/// The signature and return type are identical to the pre-streaming version.
+#[allow(clippy::type_complexity)]
+pub async fn wait_and_classify_with_progress(
+    mut child: tokio::process::Child,
+    game_dir: &Path,
+    secrets: &[&str],
+    on_line: Option<&(dyn Fn(&str, &str) + Send + Sync)>,
+) -> LauncherResult<crate::lkg::LaunchOutcome> {
     let started = std::time::Instant::now();
     let launched_at = std::time::SystemTime::now();
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|error| LauncherError::Generic {
-            code: "ERR_WAIT".into(),
-            message: format!("Failed while waiting for Java: {error}"),
-        })?;
-    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
-    captured.push_str(&String::from_utf8_lossy(&output.stderr));
-    // Redact known secrets before triage or any further processing.
-    let sanitized = crate::log_sanitizer::sanitize_log_with_secrets(&captured, secrets);
+
+    let stdout = child.stdout.take().ok_or_else(|| LauncherError::Generic {
+        code: "ERR_STDOUT_PIPE".into(),
+        message: "Failed to take stdout pipe from child process".into(),
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| LauncherError::Generic {
+        code: "ERR_STDERR_PIPE".into(),
+        message: "Failed to take stderr pipe from child process".into(),
+    })?;
+
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let mut captured: Vec<String> = Vec::with_capacity(MAX_CAPTURED_LINES);
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    loop {
+        tokio::select! {
+            biased;
+
+            result = stdout_reader.next_line(), if !stdout_done => {
+                match result {
+                    Ok(Some(text)) => {
+                        let sanitized = crate::log_sanitizer::sanitize_log_with_secrets(&text, secrets);
+                        if let Some(cb) = on_line {
+                            cb("stdout", &sanitized);
+                        }
+                        if captured.len() >= MAX_CAPTURED_LINES {
+                            captured.remove(0);
+                        }
+                        captured.push(sanitized);
+                    }
+                    _ => { stdout_done = true; }
+                }
+            }
+
+            result = stderr_reader.next_line(), if !stderr_done => {
+                match result {
+                    Ok(Some(text)) => {
+                        let sanitized = crate::log_sanitizer::sanitize_log_with_secrets(&text, secrets);
+                        if let Some(cb) = on_line {
+                            cb("stderr", &sanitized);
+                        }
+                        if captured.len() >= MAX_CAPTURED_LINES {
+                            captured.remove(0);
+                        }
+                        captured.push(sanitized);
+                    }
+                    _ => { stderr_done = true; }
+                }
+            }
+        }
+
+        if stdout_done && stderr_done {
+            break;
+        }
+    }
+
+    let exit_status = child.wait().await.map_err(|error| LauncherError::Generic {
+        code: "ERR_WAIT".into(),
+        message: format!("Failed while waiting for Java: {error}"),
+    })?;
+
+    let captured_text = captured.join("\n");
+
     let crash_report_found = game_dir
         .join("crash-reports")
         .read_dir()
@@ -1391,12 +1472,13 @@ pub async fn wait_and_classify(
                 .and_then(|metadata| metadata.modified().ok())
                 .is_some_and(|modified| modified >= launched_at)
         });
+
     Ok(crate::lkg::classify_launch(&crate::lkg::LaunchEvents {
-        exit_code: exit_code_for_classification(&output.status),
+        exit_code: exit_code_for_classification(&exit_status),
         runtime_ms: started.elapsed().as_millis() as u64,
         was_user_cancelled: false,
         crash_report_found,
-        log_crash_signature_matched: crate::crash_diagnostics::triage(&sanitized).matched,
+        log_crash_signature_matched: crate::crash_diagnostics::triage(&captured_text).matched,
     }))
 }
 
@@ -2432,7 +2514,7 @@ fn rule_matches(rule: &launch::LibraryRule, features: &BTreeMap<String, bool>) -
             }
         }
     }
-    rule.features.as_ref().map_or(true, |required| {
+    rule.features.as_ref().is_none_or(|required| {
         required
             .iter()
             .all(|(name, expected)| features.get(name).copied().unwrap_or(false) == *expected)
@@ -2660,9 +2742,7 @@ async fn download_library_with_pin(
     if let Some(ref sha256) = artifact.sha256 {
         if let Ok(bytes) = std::fs::read(path) {
             if download::sha256_hex(&bytes) == sha256.as_str()
-                && artifact
-                    .size
-                    .map_or(true, |s| s as u64 == bytes.len() as u64)
+                && artifact.size.is_none_or(|s| s as u64 == bytes.len() as u64)
             {
                 return Ok(());
             }
@@ -3141,10 +3221,10 @@ mod tests {
         // filename_len(2) + extra_len(2) + comment_len(2) + disk_start(2) +
         // internal_attrs(2) = 38 bytes before external_attrs.
         let mut pos = cd_offset;
-        for i in 0..cd_entries {
+        for entry in entries.iter().take(cd_entries) {
             let fn_len = u16::from_le_bytes(buf[pos + 28..pos + 30].try_into().unwrap()) as usize;
 
-            let mode = entries[i].2;
+            let mode = entry.2;
             // Upper 16 bits = Unix mode; bits 8-15 = system (3 = Unix).
             let ext = (mode << 16) | (3u32 << 8);
             buf[pos + 38..pos + 42].copy_from_slice(&ext.to_le_bytes());
@@ -3816,7 +3896,7 @@ mod tests {
     fn make_adopt_fixture(tmp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
         let minecraft_dir = tmp.path().join("minecraft");
         let receipts_root = tmp.path().join("receipts");
-        std::fs::create_dir_all(&minecraft_dir.join("versions")).unwrap();
+        std::fs::create_dir_all(minecraft_dir.join("versions")).unwrap();
         std::fs::create_dir_all(&receipts_root).unwrap();
         (minecraft_dir, receipts_root)
     }
@@ -4555,5 +4635,107 @@ mod tests {
         }"#;
         let art: launch::LibraryArtifact = serde_json::from_str(json).unwrap();
         assert!(art.sha256.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Real-time streaming: callback delivery, redaction, bounded buffer
+    // -----------------------------------------------------------------------
+
+    /// Spawn `cmd /c <command>` (Windows) or `sh -c <command>` (Unix) with
+    /// piped stdio for streaming tests.
+    fn spawn_cmd(command: &str) -> tokio::process::Child {
+        let (program, arg0) = if cfg!(target_os = "windows") {
+            ("cmd", "/c")
+        } else {
+            ("sh", "-c")
+        };
+        tokio::process::Command::new(program)
+            .args([arg0, command])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn_cmd should succeed")
+    }
+
+    #[tokio::test]
+    async fn streaming_delivers_stdout_lines_to_callback() {
+        let child = spawn_cmd("echo hello-stream-world");
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cb_lines = lines.clone();
+        let on_line = move |stream: &str, line: &str| {
+            cb_lines
+                .lock()
+                .unwrap()
+                .push((stream.to_owned(), line.to_owned()));
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let _outcome = wait_and_classify_with_progress(child, tmp.path(), &[], Some(&on_line))
+            .await
+            .unwrap();
+
+        let collected = lines.lock().unwrap();
+        assert!(
+            collected
+                .iter()
+                .any(|(s, l)| s == "stdout" && l.contains("hello-stream-world")),
+            "Expected stdout line with hello-stream-world, got {collected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_redacts_secrets_in_callback() {
+        let child = spawn_cmd("echo super-sensitive-value");
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cb_lines = lines.clone();
+        let on_line = move |_stream: &str, line: &str| {
+            cb_lines.lock().unwrap().push(line.to_owned());
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let _outcome = wait_and_classify_with_progress(
+            child,
+            tmp.path(),
+            &["super-sensitive-value"],
+            Some(&on_line),
+        )
+        .await
+        .unwrap();
+
+        let collected = lines.lock().unwrap();
+        for line in collected.iter() {
+            assert!(
+                !line.contains("super-sensitive-value"),
+                "secret leaked in callback: {line}"
+            );
+        }
+        assert!(
+            collected.iter().any(|l| l.contains("[REDACTED]")),
+            "Expected at least one line containing [REDACTED], got {collected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_handles_both_stdout_and_stderr() {
+        let child = spawn_cmd("echo stdout-only");
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cb_lines = lines.clone();
+        let on_line = move |stream: &str, line: &str| {
+            cb_lines
+                .lock()
+                .unwrap()
+                .push((stream.to_owned(), line.to_owned()));
+        };
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let _outcome = wait_and_classify_with_progress(child, tmp.path(), &[], Some(&on_line))
+            .await
+            .unwrap();
+
+        let collected = lines.lock().unwrap();
+        assert!(
+            collected.iter().any(|(s, _)| s == "stdout"),
+            "Expected at least one stdout entry, got {collected:?}"
+        );
     }
 }

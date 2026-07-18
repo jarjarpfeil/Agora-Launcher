@@ -163,18 +163,18 @@ class TestAuditLogPopulated(_CompileFixtures):
 
 
 class TestSchemaVersion(_CompileFixtures):
-    """Test 9: schema_version is 5."""
+    """Test 9: schema_version is 6."""
 
     def test_schema_version(self):
-        """SELECT version FROM schema_version should return 5."""
+        """SELECT version FROM schema_version should return 6."""
         conn = self._open_db()
         try:
             row = conn.execute(
                 "SELECT version FROM schema_version"
             ).fetchone()
             self.assertIsNotNone(row, "schema_version table has no rows")
-            self.assertEqual(row[0], 5,
-                             f"Expected schema_version=5, got {row[0]}")
+            self.assertEqual(row[0], 6,
+                             f"Expected schema_version=6, got {row[0]}")
         finally:
             conn.close()
 

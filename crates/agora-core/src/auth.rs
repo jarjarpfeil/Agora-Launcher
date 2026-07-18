@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::error::{LauncherError, LauncherResult};
+use crate::http_client::{self, ClientCategory, HttpClients};
 
 pub const AGORA_OAUTH_CLIENT_ID: &str = match option_env!("AGORA_OAUTH_CLIENT_ID") {
     Some(v) => v,
@@ -59,29 +60,21 @@ pub async fn start_device_flow() -> LauncherResult<DeviceFlowResponse> {
         });
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent("agora-launcher")
-        .build()
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_AUTH_HTTP_CLIENT".to_string(),
-            message: "Failed to build HTTP client for device flow.".to_string(),
-        })?;
+    let clients = HttpClients::new()?;
 
     let params = [("client_id", AGORA_OAUTH_CLIENT_ID)];
 
-    let resp = client
-        .post("https://github.com/login/device/code")
-        .header("Accept", "application/json")
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            eprintln!("[auth] device-code request network error: {e}");
-            LauncherError::NetworkOffline
-        })?;
+    let resp = http_client::checked_post_form(
+        &clients,
+        ClientCategory::GitHub,
+        "https://github.com/login/device/code",
+        &params,
+        &[("Accept".into(), "application/json".into())],
+    )
+    .await?;
 
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = http_client::checked_response_text(resp, ClientCategory::GitHub).await?;
     // Device-flow responses contain a device code. Do not emit response
     // bodies to logs, which are often collected by launchers and support
     // tools outside the OS credential boundary.
@@ -112,16 +105,7 @@ pub async fn poll_device_flow(
         device_code.len(),
         interval
     );
-    let client = reqwest::Client::builder()
-        .user_agent("agora-launcher")
-        .build()
-        .map_err(|e| {
-            eprintln!("[auth] poll HTTP client build error: {e}");
-            LauncherError::Generic {
-                code: "ERR_AUTH_HTTP_CLIENT".to_string(),
-                message: "Failed to build HTTP client for token polling.".to_string(),
-            }
-        })?;
+    let clients = HttpClients::new()?;
 
     let deadline = std::time::Instant::now() + Duration::from_secs(1200);
 
@@ -132,21 +116,25 @@ pub async fn poll_device_flow(
 
         let params = [
             ("client_id", AGORA_OAUTH_CLIENT_ID),
-            ("device_code", &device_code),
+            ("device_code", device_code.as_str()),
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ];
 
-        let resp = client
-            .post("https://github.com/login/oauth/access_token")
-            .header("Accept", "application/json")
-            .form(&params)
-            .send()
-            .await;
+        let resp = http_client::checked_post_form(
+            &clients,
+            ClientCategory::GitHub,
+            "https://github.com/login/oauth/access_token",
+            &params,
+            &[("Accept".into(), "application/json".into())],
+        )
+        .await;
 
         match resp {
             Ok(r) => {
                 let status = r.status();
-                let body = r.text().await.unwrap_or_default();
+                let body = http_client::checked_response_text(r, ClientCategory::GitHub)
+                    .await
+                    .unwrap_or_default();
                 // Successful polling responses contain the OAuth access
                 // token. Log only status metadata, never the body.
                 eprintln!("[auth] poll status={status}");
@@ -379,7 +367,7 @@ pub(crate) fn clear_secret(
     Ok(())
 }
 
-/// Returns 	rue — the fallback is always available on all platforms.
+/// Returns true — the fallback is always available on all platforms.
 /// This signal is used by Settings to show the spec-mandated "less secure" warning.
 pub fn keyring_fallback_available() -> bool {
     true
@@ -460,21 +448,17 @@ pub fn is_authenticated() -> bool {
 }
 
 pub async fn get_github_user(token: String) -> LauncherResult<GithubProfile> {
-    let client = reqwest::Client::builder()
-        .user_agent("agora-launcher")
-        .build()
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_AUTH_HTTP_CLIENT".to_string(),
-            message: "Failed to build HTTP client for GitHub profile.".to_string(),
-        })?;
-
-    let resp = client
-        .get("https://api.github.com/user")
-        .header("Authorization", format!("Bearer {}", token))
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let clients = HttpClients::new()?;
+    let resp = http_client::checked_request_with_headers(
+        &clients,
+        ClientCategory::GitHub,
+        "https://api.github.com/user",
+        vec![
+            ("Authorization".into(), format!("Bearer {token}")),
+            ("Accept".into(), "application/json".into()),
+        ],
+    )
+    .await?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err(LauncherError::AuthExpired);
@@ -492,10 +476,9 @@ pub async fn get_github_user(token: String) -> LauncherResult<GithubProfile> {
         avatar_url: String,
     }
 
-    let parsed = resp
-        .json::<GithubUserJson>()
-        .await
-        .map_err(|_| LauncherError::Generic {
+    let body = http_client::checked_response_bytes(resp, ClientCategory::GitHub).await?;
+    let parsed =
+        serde_json::from_slice::<GithubUserJson>(&body).map_err(|_| LauncherError::Generic {
             code: "ERR_AUTH_PROFILE".to_string(),
             message: "Failed to parse GitHub profile response.".to_string(),
         })?;

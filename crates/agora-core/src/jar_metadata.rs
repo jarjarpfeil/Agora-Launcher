@@ -344,7 +344,7 @@ fn parse_from_archive<R: Read + Seek>(
     // ---- Validate and dedupe declared nested JAR paths ----
     let nested_paths: BTreeSet<String> = fabric_jars_strs
         .into_iter()
-        .chain(quilt_jars_strs.into_iter())
+        .chain(quilt_jars_strs)
         .filter(|p| is_safe_nested_path(p))
         .map(|p| p.replace('\\', "/"))
         .collect();
@@ -426,7 +426,7 @@ fn parse_from_archive<R: Read + Seek>(
         if let Some(ref id) = mod_jar_id {
             ids.insert(id.as_str());
         }
-        for (id, _) in &provided_mods_map {
+        for id in provided_mods_map.keys() {
             ids.insert(id.as_str());
         }
         ids
@@ -716,10 +716,8 @@ fn extract_forge_deps(
                         pending.mandatory = parse_toml_bool(&value);
                     }
                 }
-                "versionrange" => {
-                    if in_dep_block {
-                        pending.version_range = Some(value);
-                    }
+                "versionrange" if in_dep_block => {
+                    pending.version_range = Some(value);
                 }
                 _ => {}
             }
@@ -1345,7 +1343,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,
@@ -1372,7 +1370,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,
@@ -1397,7 +1395,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,
@@ -1422,7 +1420,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,
@@ -1454,7 +1452,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,
@@ -1480,7 +1478,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,
@@ -1503,7 +1501,7 @@ version="1.0"
         let mut mod_id = None;
         let mut mod_version = None;
         extract_forge_deps(
-            &toml,
+            toml,
             &mut required,
             &mut optional,
             &mut incompat_ids,

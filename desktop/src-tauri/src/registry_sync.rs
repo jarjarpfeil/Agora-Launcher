@@ -23,7 +23,22 @@ pub async fn check_and_download_update<R: tauri::Runtime>(
         }
     })?;
     let token = crate::auth::get_token(app);
-    agora_core::registry_sync::check_and_download_update(&base, &ls_path, force, token).await
+    let repo = agora_core::registry_sync::resolve_registry_repo(None);
+    let ctx = crate::core_context(app)?;
+    let status = agora_core::registry_sync::check_and_download_update(
+        &base,
+        &ls_path,
+        force,
+        token,
+        None,
+        &repo,
+        ctx.lock_manager(),
+    )
+    .await?;
+    for warning in ctx.reload_runtime_catalog()? {
+        eprintln!("[agora] {warning}");
+    }
+    Ok(status)
 }
 
 /// Return the current registry status without performing a network check.

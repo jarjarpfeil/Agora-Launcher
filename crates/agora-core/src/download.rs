@@ -1,16 +1,8 @@
 use crate::error::{LauncherError, LauncherResult};
+use crate::http_client::{self, ClientCategory, HttpClients};
 use crate::loader_manifests;
 use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::Sha256;
-
-const MOD_DOWNLOAD_ALLOWLIST: &[&str] = &[
-    "github.com",
-    "objects.githubusercontent.com",
-    "release-assets.githubusercontent.com",
-    "api.github.com",
-    "cdn.modrinth.com",
-    "api.modrinth.com",
-];
 
 /// Raw SHA-256 hex digest of a byte slice.
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -56,51 +48,31 @@ pub fn canonical_version_json(value: &serde_json::Value) -> String {
 
 /// Download a mod artifact using the dedicated GitHub/Modrinth allowlist.
 /// Both the initial URL and every redirect must remain HTTPS on port 443.
-pub async fn download_mod_bytes(url: &str) -> LauncherResult<Vec<u8>> {
+///
+/// Uses the [`HttpClients`] category system: Modrinth URLs use the Modrinth
+/// category; all others (GitHub, objects.githubusercontent, etc.) use GitHub.
+pub async fn download_mod_bytes(clients: &HttpClients, url: &str) -> LauncherResult<Vec<u8>> {
     let parsed = reqwest::Url::parse(url).map_err(|_| LauncherError::UntrustedSource)?;
-    ensure_allowed_mod_url(&parsed)?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if ensure_allowed_mod_url(attempt.url()).is_ok() {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .user_agent("AgoraLauncher/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".into(),
-            message: format!("Failed to build mod download client: {e}"),
-        })?;
-    let response = client
-        .get(parsed.clone())
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
-    if !response.status().is_success() {
-        return Err(LauncherError::Generic {
-            code: "ERR_NETWORK".into(),
-            message: format!("HTTP {} for {}", response.status(), parsed),
-        });
-    }
-    response
-        .bytes()
-        .await
-        .map(|bytes| bytes.to_vec())
-        .map_err(|_| LauncherError::NetworkOffline)
+    let category = if parsed
+        .host_str()
+        .is_some_and(|h| h.contains("modrinth.com"))
+    {
+        ClientCategory::Modrinth
+    } else {
+        ClientCategory::GitHub
+    };
+    http_client::checked_get_bytes(clients, category, url).await
 }
 
-fn ensure_allowed_mod_url(url: &reqwest::Url) -> LauncherResult<()> {
-    let host = url.host_str().ok_or(LauncherError::UntrustedSource)?;
-    if url.scheme() == "https"
-        && url.port_or_known_default() == Some(443)
-        && MOD_DOWNLOAD_ALLOWLIST.contains(&host)
-    {
-        Ok(())
-    } else {
-        Err(LauncherError::UntrustedSource)
-    }
+/// Convenience: download mod bytes without an explicit HttpClients instance.
+/// Creates a properly-configured [`HttpClients`] internally.
+/// Prefer [`download_mod_bytes`] when a shared clients instance is available.
+pub async fn download_mod_bytes_standalone(url: &str) -> LauncherResult<Vec<u8>> {
+    let clients = HttpClients::new().map_err(|e| LauncherError::Generic {
+        code: "ERR_HTTP_CLIENT_INIT".into(),
+        message: format!("Failed to initialize HTTP clients: {e}"),
+    })?;
+    download_mod_bytes(&clients, url).await
 }
 
 /// Deterministic SHA-256 of a JSON payload after stripping volatile keys.
@@ -136,61 +108,28 @@ pub fn compute_loader_hash(loader: &str, _file_name: &str, file_type: &str, data
 /// Redirects are only followed when the target host is on the embedded loader
 /// domain allowlist, preventing SSRF via compromised/malicious pinned hosts.
 pub async fn download_bytes(url: &str) -> LauncherResult<Vec<u8>> {
-    loader_manifests::ensure_allowed_domain(url).map_err(|error| {
+    loader_manifests::ensure_allowed_domain(url).inspect_err(|_error| {
         eprintln!(
             "[loader-download] rejected stage=initial-allowlist url={}",
             crate::network::sanitized_url_for_log(url)
         );
-        error
     })?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            let url = attempt.url();
-            if url.scheme() == "https" && url.port_or_known_default() == Some(443) {
-                if let Some(host) = url.host_str() {
-                    if loader_manifests::is_allowed_host(host) {
-                        return attempt.follow();
-                    }
-                }
-            }
-            eprintln!(
-                "[loader-download] rejected stage=redirect url={}",
-                crate::network::sanitized_url_for_log(url.as_str())
-            );
-            attempt.stop()
-        }))
-        .user_agent("AgoraLoaderManifestBot/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("Failed to build HTTP client: {e}"),
-        })?;
+    let clients = HttpClients::new()?;
+    http_client::checked_get_bytes(&clients, ClientCategory::Loader, url).await
+}
 
-    let resp = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
-
-    if !resp.status().is_success() {
-        return Err(LauncherError::Generic {
-            code: "ERR_NETWORK".to_string(),
-            message: format!("HTTP {} for {}", resp.status(), url),
-        });
-    }
-
-    loader_manifests::ensure_allowed_domain(resp.url().as_str()).map_err(|error| {
+/// Download bytes through an already initialized category-aware client set.
+pub async fn download_bytes_with_clients(
+    clients: &HttpClients,
+    url: &str,
+) -> LauncherResult<Vec<u8>> {
+    loader_manifests::ensure_allowed_domain(url).inspect_err(|_error| {
         eprintln!(
-            "[loader-download] rejected stage=final-url url={}",
-            crate::network::sanitized_url_for_log(resp.url().as_str())
+            "[loader-download] rejected stage=initial-allowlist url={}",
+            crate::network::sanitized_url_for_log(url)
         );
-        error
     })?;
-
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|_| LauncherError::NetworkOffline)
+    http_client::checked_get_bytes(clients, ClientCategory::Loader, url).await
 }
 
 /// Download a loader file and verify its hash against the pinned value.
@@ -201,16 +140,32 @@ pub async fn download_verified(
     url: &str,
     expected_sha: &str,
 ) -> LauncherResult<Vec<u8>> {
-    loader_manifests::ensure_allowed_domain(url).map_err(|error| {
+    loader_manifests::ensure_allowed_domain(url).inspect_err(|_error| {
         eprintln!(
             "[loader-download] rejected stage=verified-initial loader={loader} file={file_name} url={}",
             crate::network::sanitized_url_for_log(url)
         );
-        error
     })?;
     let data = download_bytes(url).await?;
     let actual = compute_loader_hash(loader, file_name, file_type, &data);
 
+    if actual != loader_manifests::strip_sha_prefix(expected_sha) {
+        return Err(LauncherError::HashMismatch);
+    }
+    Ok(data)
+}
+
+/// Download and verify a pinned loader file with shared core clients.
+pub async fn download_verified_with_clients(
+    clients: &HttpClients,
+    loader: &str,
+    file_name: &str,
+    file_type: &str,
+    url: &str,
+    expected_sha: &str,
+) -> LauncherResult<Vec<u8>> {
+    let data = download_bytes_with_clients(clients, url).await?;
+    let actual = compute_loader_hash(loader, file_name, file_type, &data);
     if actual != loader_manifests::strip_sha_prefix(expected_sha) {
         return Err(LauncherError::HashMismatch);
     }

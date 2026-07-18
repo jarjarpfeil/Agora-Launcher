@@ -1,0 +1,166 @@
+# Phase 13 CI Enforcement
+#
+# Comprehensive quality enforcement — formatting, linting, tests, builds,
+# and architecture-boundary checks — without modifying application code.
+# Reuses the same Rust toolchain, cache, and Python/Node setup patterns as
+# the existing launch-planner.yml, release-desktop.yml, and e2e.yml to keep
+# infrastructure consistent.
+#
+# Jobs:
+#   fmt          — cargo fmt --all --check (all workspace members)
+#   clippy       — strict clippy for core + CLI (no Tauri system libs needed)
+#   desktop-clippy — strict clippy for desktop (Windows, no libwebkit2gtk)
+#   rust-tests   — core unit + integration, CLI build, desktop check/tests (matrix)
+#   compiler     — compiler unit tests + script unit tests (pytest)
+#   frontend     — desktop TypeScript check + Vite build
+#   boundaries   — architecture boundary analysis (HARD FAILURES for violations)
+#   tauri-bindings — Tauri command binding name-manifest consistency (typed sigs waived)
+
+name: "Phase 13 CI Enforcement"
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "desktop/**"
+      - "compiler/**"
+      - "scripts/**"
+      - ".github/workflows/ci-enforcement.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**"
+      - "desktop/**"
+      - "compiler/**"
+      - "scripts/**"
+      - ".github/workflows/ci-enforcement.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/agora-core -> target
+            crates/agora -> target
+      - name: Clippy core and CLI (no Tauri system libs required)
+        run: cargo clippy -p agora-core -p agora-cli --all-targets --all-features -- -D warnings
+
+  desktop-clippy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+      - name: Clippy desktop
+        run: cargo clippy -p agora-desktop --all-targets -- -D warnings
+
+  rust-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates/agora-core -> target
+            crates/agora -> target
+            desktop/src-tauri -> target
+      - name: Core unit tests
+        run: cargo test -p agora-core --lib
+      - name: Core integration tests
+        run: cargo test -p agora-core --tests
+      - name: CLI tests
+        run: cargo test -p agora-cli
+      - name: Build CLI
+        run: cargo build -p agora-cli
+      - name: Check desktop Rust integration
+        if: matrix.os == 'windows-latest'
+        run: cargo check -p agora-desktop
+      - name: Desktop Rust lib tests (includes MCP HTTP transport tests)
+        if: matrix.os == 'windows-latest'
+        run: cargo test -p agora-desktop --lib
+
+  compiler:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install compiler dependencies
+        run: pip install -r compiler/requirements.txt
+      - name: Compiler unit tests
+        run: python compiler/test_compile.py -v
+      - name: Compiler integration tests
+        run: python compiler/test_compile_integration.py -v
+      - name: Script unit tests
+        run: python scripts/test_scripts.py -v
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: TypeScript type check
+        working-directory: desktop
+        run: npx tsc --noEmit
+      - name: Vite production build
+        working-directory: desktop
+        run: npx vite build
+
+  boundaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Architecture boundary analysis (hard failures)
+        run: python scripts/check_architecture.py
+
+  tauri-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Tauri command bindings are in sync (name-presence only; typed signatures waived)
+        run: python scripts/check_tauri_bindings.py --check

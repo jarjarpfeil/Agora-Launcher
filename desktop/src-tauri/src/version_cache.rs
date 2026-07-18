@@ -38,6 +38,7 @@ pub fn new_cache() -> SharedVersionCache {
 }
 
 /// Replace the cache entry with a fresh set of versions (first load).
+#[allow(clippy::too_many_arguments)]
 pub async fn load_versions(
     cache: &SharedVersionCache,
     item_id: &str,

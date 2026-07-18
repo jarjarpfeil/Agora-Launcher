@@ -231,10 +231,8 @@ fn load_db_signatures(conn: &rusqlite::Connection) -> Option<Vec<CrashSignatureR
         .ok()?;
 
     let mut out = Vec::new();
-    for r in rows {
-        if let Ok(sig) = r {
-            out.push(sig);
-        }
+    for sig in rows.flatten() {
+        out.push(sig);
     }
     Some(out)
 }
@@ -274,7 +272,7 @@ pub fn list_reports_from_dir(dir: &std::path::Path) -> Vec<CrashReportInfo> {
             mtime,
         ));
     }
-    out.sort_by(|a, b| b.1.cmp(&a.1));
+    out.sort_by_key(|b| std::cmp::Reverse(b.1));
     out.into_iter().map(|(info, _)| info).collect()
 }
 

@@ -8,7 +8,6 @@ use crate::db;
 use crate::download;
 use crate::error::{LauncherError, LauncherResult};
 use crate::modrinth;
-use crate::paths;
 
 /// A concrete [`CatalogSource`] backed by the live Modrinth API.
 ///
@@ -16,7 +15,7 @@ use crate::paths;
 /// Modrinth-specific types into the unified catalog types.
 ///
 /// Design: all DB work (settings checks) is done synchronously before
-/// any `.await`. HTTP calls use `ctx.client` via
+/// any `.await`. HTTP calls use `ctx.http_clients` via
 /// `modrinth_get_json_with_client` to avoid holding a
 /// `rusqlite::Connection` (which is `!Sync`) across an async boundary.
 pub struct ModrinthSource;
@@ -38,8 +37,7 @@ impl Default for ModrinthSource {
 // ---------------------------------------------------------------------------
 
 fn open_conn(ctx: &Ctx) -> Result<rusqlite::Connection, LauncherError> {
-    let path = paths::local_state_db_path(&ctx.app_data_dir)
-        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let path = ctx.paths.local_state_db();
     db::local_state_connection(&path).map_err(|_| LauncherError::LocalStateFailed)
 }
 
@@ -150,7 +148,7 @@ fn project_full_to_item(project_id: &str, full: &modrinth::ModrinthProjectFull) 
     let slug = full
         .page_url
         .as_ref()
-        .and_then(|url| url.split('/').last().map(|s| s.to_string()))
+        .and_then(|url| url.split('/').next_back().map(|s| s.to_string()))
         .unwrap_or_default();
 
     CatalogItem {
@@ -196,7 +194,7 @@ impl CatalogSource for ModrinthSource {
 
         let url = build_search_url(q);
         let resp: modrinth::ModrinthSearchResponse =
-            modrinth::modrinth_get_json_with_client(&ctx.client, &url).await?;
+            modrinth::modrinth_get_json_with_client(&ctx.http_clients, &url).await?;
 
         Ok(resp
             .hits
@@ -231,7 +229,7 @@ impl CatalogSource for ModrinthSource {
             ProjectRef::Modrinth(project_id) => {
                 let url = build_project_url(project_id);
                 let full: modrinth::ModrinthProjectFullRaw =
-                    modrinth::modrinth_get_json_with_client(&ctx.client, &url).await?;
+                    modrinth::modrinth_get_json_with_client(&ctx.http_clients, &url).await?;
 
                 let page_url = full
                     .slug
@@ -244,6 +242,7 @@ impl CatalogSource for ModrinthSource {
                     description: full.description,
                     body: full.body,
                     icon_url: full.icon_url,
+                    project_type: full.project_type,
                     page_url,
                     license_id: full.license.and_then(|l| l.id),
                     source_updated_at: full.updated,
@@ -265,7 +264,7 @@ impl CatalogSource for ModrinthSource {
                     ..Default::default()
                 });
                 let resp: modrinth::ModrinthSearchResponse =
-                    modrinth::modrinth_get_json_with_client(&ctx.client, &url).await?;
+                    modrinth::modrinth_get_json_with_client(&ctx.http_clients, &url).await?;
 
                 if let Some(hit) = resp.hits.into_iter().next() {
                     let result = modrinth::ModrinthSearchResult {
@@ -307,7 +306,7 @@ impl CatalogSource for ModrinthSource {
 
         let url = build_versions_url(&project_id, None, None);
         let versions: Vec<modrinth::ModrinthVersion> =
-            modrinth::modrinth_get_json_with_client(&ctx.client, &url).await?;
+            modrinth::modrinth_get_json_with_client(&ctx.http_clients, &url).await?;
 
         Ok(versions
             .into_iter()
@@ -376,25 +375,19 @@ impl CatalogSource for ModrinthSource {
 
     async fn download(&self, ctx: &Ctx, v: &Version, dest: &Path) -> Result<Hashes, LauncherError> {
         let url = &v.download_url;
-        let resp = ctx
-            .client
-            .get(url)
-            .send()
-            .await
-            .map_err(|_| LauncherError::NetworkOffline)?;
-
-        if !resp.status().is_success() {
-            return Err(LauncherError::Generic {
-                code: "ERR_NETWORK".to_string(),
-                message: format!("HTTP {} for {}", resp.status(), url),
-            });
-        }
-
-        let bytes = resp
-            .bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(|_| LauncherError::NetworkOffline)?;
+        let bytes = crate::http_client::checked_get_bytes(
+            &ctx.http_clients,
+            crate::http_client::ClientCategory::Modrinth,
+            url,
+        )
+        .await
+        .map_err(|e| {
+            if matches!(e, LauncherError::NetworkOffline) {
+                e
+            } else {
+                LauncherError::NetworkOffline
+            }
+        })?;
 
         // Verify SHA-1 first (Modrinth always publishes it).
         if let Some(ref expected_sha1) = v.hashes.sha1 {

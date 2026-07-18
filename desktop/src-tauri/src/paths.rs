@@ -2,7 +2,7 @@
 //! so no caller across the desktop crate needs to change.
 //!
 //! Internally this module resolves the app data directory from the handle
-//! once, then delegates to `agora_core::paths` for actual path construction.
+//! once, then delegates to `agora_core::paths` or `agora_core::app_paths::AppPaths`.
 
 use std::path::PathBuf;
 use tauri::Manager;
@@ -13,14 +13,56 @@ pub use agora_core::paths::{launcher_profiles_path, minecraft_dir, sanitize_id};
 /// Resolve the official app data directory from the Tauri `AppHandle`.
 ///
 /// This is the only Tauri-specific path resolution — everything else
-/// delegates to `agora_core::paths` once the base is known.
-pub fn app_data_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> anyhow::Result<PathBuf> {
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| anyhow::anyhow!("Failed to resolve app data dir: {}", e))?;
+/// delegates to `agora_core` once the base is known.
+pub fn app_data_dir<R: tauri::Runtime>(_app: &tauri::AppHandle<R>) -> anyhow::Result<PathBuf> {
+    // Keep desktop and CLI on the same core-owned root. Tauri remains an
+    // adapter for lifecycle and IPC, not a second data-directory authority.
+    let dir = agora_core::app_paths::AppPaths::platform_default()
+        .root()
+        .to_path_buf();
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+/// Move data from the pre-CoreContext Tauri app-data root when the new shared
+/// root has not been created yet. This is intentionally a rename, not a merge:
+/// partial copies could mix databases and registry state from two roots.
+pub fn migrate_legacy_data_dir<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> anyhow::Result<bool> {
+    let target = agora_core::app_paths::AppPaths::platform_default()
+        .root()
+        .to_path_buf();
+    let legacy = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| anyhow::anyhow!("Failed to resolve legacy app data dir: {}", e))?;
+
+    if legacy == target || !legacy.exists() || target.exists() {
+        return Ok(false);
+    }
+
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Shared app data root has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    std::fs::rename(&legacy, &target).map_err(|error| {
+        anyhow::anyhow!(
+            "Failed to migrate Agora data from {} to {}: {}",
+            legacy.display(),
+            target.display(),
+            error
+        )
+    })?;
+    Ok(true)
+}
+
+/// Build an `agora_core::app_paths::AppPaths` from the Tauri handle.
+pub fn app_paths<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> anyhow::Result<agora_core::app_paths::AppPaths> {
+    let root = app_data_dir(app)?;
+    Ok(agora_core::app_paths::AppPaths::from_root(root))
 }
 
 /// The root directory holding all user instances.
@@ -101,7 +143,7 @@ mod tests {
         let result = sanitize_id("foo!@#bar");
         assert!(result.contains("foo"));
         assert!(result.contains("bar"));
-        assert!(!result.contains(|c: char| matches!(c, '!' | '@' | '#')));
+        assert!(!result.contains(|c: char| ['!', '@', '#'].contains(&c)));
     }
 
     #[test]

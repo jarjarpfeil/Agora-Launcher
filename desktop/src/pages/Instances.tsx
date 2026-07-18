@@ -177,7 +177,7 @@ export function Instances({
           {instances.map((instance) => {
             const isRunning = processState.instanceId === instance.instance_id && processState.phase === 'running';
             const isCurrentFailed = processState.instanceId === instance.instance_id && processState.phase === 'failed';
-            const isLaunchBusy = processState.phase === 'launching' || processState.phase === 'checking-health';
+            const isLaunchBusy = processState.phase === 'launching';
             const isCurrentLaunchBusy = isLaunchBusy && processState.instanceId === instance.instance_id;
 
             const isCurrentThisInstance = processState.instanceId === instance.instance_id;

@@ -594,12 +594,12 @@ pub fn insert_crash_event(
     signature_name: Option<&str>,
 ) -> anyhow::Result<i64> {
     let now = chrono::Utc::now().to_rfc3339();
-    let rows = conn.execute(
+    conn.execute(
         "INSERT INTO crash_events (instance_id, fingerprint, exception_class, top_frames_json, signature_name, occurred_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![instance_id, fingerprint, exception_class, top_frames_json, signature_name, now],
     )?;
-    Ok(rows as i64)
+    Ok(conn.last_insert_rowid())
 }
 
 /// Insert a survival (successful launch) with associated mod ids.
@@ -715,6 +715,18 @@ pub fn get_pair_survival_count(conn: &Connection, a: &str, b: &str) -> anyhow::R
         |row| row.get(0),
     )
     .map_err(Into::into)
+}
+
+/// Return the co-crash count for a mod pair from local_crash_telemetry.
+/// Returns 0 when no row exists for the pair.
+pub fn get_pair_crash_count(conn: &Connection, a: &str, b: &str) -> anyhow::Result<i64> {
+    let (first, second) = normalize_pair(a, b);
+    let result: Result<i64, _> = conn.query_row(
+        "SELECT crash_count FROM local_crash_telemetry WHERE mod_a_id = ?1 AND mod_b_id = ?2",
+        rusqlite::params![first, second],
+        |row| row.get(0),
+    );
+    Ok(result.unwrap_or(0))
 }
 
 /// Return the total number of crash_survivals rows.
@@ -1149,5 +1161,27 @@ mod tests {
             .unwrap();
         assert_eq!(found.java_path.as_deref(), Some("/opt/java21/bin/java"));
         assert!(found.java_incompatible_override);
+    }
+
+    // ---- get_pair_crash_count ----
+
+    #[test]
+    fn test_get_pair_crash_count_basic() {
+        let (conn, _path) = test_db();
+        // No data yet
+        let count = get_pair_crash_count(&conn, "mod-a", "mod-b").unwrap();
+        assert_eq!(count, 0);
+
+        record_co_crash(&conn, "mod-a", "mod-b").unwrap();
+        let count = get_pair_crash_count(&conn, "mod-a", "mod-b").unwrap();
+        assert_eq!(count, 1);
+
+        // Symmetric lookup
+        let count = get_pair_crash_count(&conn, "mod-b", "mod-a").unwrap();
+        assert_eq!(count, 1);
+
+        // Non-existent pair
+        let count = get_pair_crash_count(&conn, "mod-a", "mod-z").unwrap();
+        assert_eq!(count, 0);
     }
 }

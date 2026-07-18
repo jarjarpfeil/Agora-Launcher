@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Agora launcher CLI — standalone command-line interface for instance management, health checks, and MCP server"
+description = "Agora launcher CLI â€” standalone command-line interface for instance management, health checks, and MCP server"
 
 [[bin]]
 name = "agora"
@@ -20,4 +20,6 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 anyhow = { workspace = true }
+
+[dev-dependencies]
 rusqlite = { workspace = true }

@@ -188,21 +188,21 @@ pub fn build_system_prompt(mcp_skill_content: &str) -> String {
 
 /// Start the GitHub Copilot device code flow.
 pub async fn start_copilot_flow(
-    client: &reqwest::Client,
+    clients: &crate::http_client::HttpClients,
 ) -> LauncherResult<CopilotDeviceFlowResponse> {
     check_network_enabled(
         "network_github_oauth_enabled",
         "GitHub Copilot is disabled in Privacy settings.",
     )?;
-    let params = [("client_id", COPILOT_CLIENT_ID), ("scope", "read:user")];
 
-    let resp = client
-        .post(COPILOT_DEVICE_CODE_URL)
-        .header("Accept", "application/json")
-        .form(&params)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let resp = crate::http_client::checked_post_form(
+        clients,
+        crate::http_client::ClientCategory::GitHub,
+        COPILOT_DEVICE_CODE_URL,
+        &[("client_id", COPILOT_CLIENT_ID), ("scope", "read:user")],
+        &[("Accept".into(), "application/json".into())],
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -212,17 +212,20 @@ pub async fn start_copilot_flow(
         });
     }
 
-    resp.json::<CopilotDeviceFlowResponse>()
-        .await
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_COPILOT_DEVICE_FLOW_PARSE".to_string(),
-            message: format!("Failed to parse device flow response: {}", e),
-        })
+    let body = crate::http_client::checked_response_bytes(
+        resp,
+        crate::http_client::ClientCategory::GitHub,
+    )
+    .await?;
+    serde_json::from_slice::<CopilotDeviceFlowResponse>(&body).map_err(|e| LauncherError::Generic {
+        code: "ERR_COPILOT_DEVICE_FLOW_PARSE".to_string(),
+        message: format!("Failed to parse device flow response: {}", e),
+    })
 }
 
 /// Poll the device flow until the user approves or it expires.
 pub async fn poll_copilot_flow(
-    client: &reqwest::Client,
+    clients: &crate::http_client::HttpClients,
     device_code: &str,
     interval: u64,
 ) -> LauncherResult<String> {
@@ -230,28 +233,34 @@ pub async fn poll_copilot_flow(
         "network_github_oauth_enabled",
         "GitHub Copilot is disabled in Privacy settings.",
     )?;
-    let params = [
-        ("client_id", COPILOT_CLIENT_ID),
-        ("device_code", device_code),
-        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-    ];
 
     let mut current_interval = interval;
 
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(current_interval)).await;
 
-        let resp = client
-            .post(COPILOT_TOKEN_URL)
-            .header("Accept", "application/json")
-            .form(&params)
-            .send()
-            .await
-            .map_err(|_| LauncherError::NetworkOffline)?;
+        let resp = crate::http_client::checked_post_form(
+            clients,
+            crate::http_client::ClientCategory::GitHub,
+            COPILOT_TOKEN_URL,
+            &[
+                ("client_id", COPILOT_CLIENT_ID),
+                ("device_code", device_code),
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+            ],
+            &[("Accept".into(), "application/json".into())],
+        )
+        .await?;
 
         let status = resp.status();
         if !status.is_success() {
-            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let body_text = crate::http_client::checked_response_text(
+                resp,
+                crate::http_client::ClientCategory::GitHub,
+            )
+            .await
+            .unwrap_or_default();
+            let body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or_default();
             let error = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
 
             match error {
@@ -282,10 +291,16 @@ pub async fn poll_copilot_flow(
             }
         }
 
-        let body: serde_json::Value = resp.json().await.map_err(|e| LauncherError::Generic {
-            code: "ERR_COPILOT_POLL_PARSE".to_string(),
-            message: format!("Failed to parse poll response: {}", e),
-        })?;
+        let body_bytes = crate::http_client::checked_response_bytes(
+            resp,
+            crate::http_client::ClientCategory::GitHub,
+        )
+        .await?;
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes).map_err(|e| LauncherError::Generic {
+                code: "ERR_COPILOT_POLL_PARSE".to_string(),
+                message: format!("Failed to parse poll response: {}", e),
+            })?;
 
         if let Some(token) = body.get("access_token").and_then(|v| v.as_str()) {
             return Ok(token.to_string());
@@ -340,22 +355,26 @@ pub async fn poll_copilot_flow(
 /// structure — if that happens, we fall back to the raw OAuth token against
 /// the account's own entitlement endpoint instead of failing outright.
 pub async fn resolve_copilot_endpoint(
-    client: &reqwest::Client,
+    clients: &crate::http_client::HttpClients,
     ghu_token: &str,
 ) -> LauncherResult<CopilotToken> {
     check_network_enabled(
         "network_github_oauth_enabled",
         "GitHub Copilot is disabled in Privacy settings.",
     )?;
-    let resp = client
-        .get(COPILOT_INTERNAL_USER_URL)
-        .header("Authorization", format!("Bearer {}", ghu_token))
-        .header("Accept", "application/json")
-        .header("User-Agent", "Agora-Launcher/1.0")
-        .header("Editor-Version", "vscode/1.95.0")
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+
+    let resp = crate::http_client::checked_request_with_headers(
+        clients,
+        crate::http_client::ClientCategory::GitHub,
+        COPILOT_INTERNAL_USER_URL,
+        vec![
+            ("Authorization".into(), format!("Bearer {ghu_token}")),
+            ("Accept".into(), "application/json".into()),
+            ("User-Agent".into(), "Agora-Launcher/1.0".into()),
+            ("Editor-Version".into(), "vscode/1.95.0".into()),
+        ],
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -368,8 +387,13 @@ pub async fn resolve_copilot_endpoint(
         });
     }
 
+    let internal_user_bytes = crate::http_client::checked_response_bytes(
+        resp,
+        crate::http_client::ClientCategory::GitHub,
+    )
+    .await?;
     let internal_user: serde_json::Value =
-        resp.json().await.map_err(|e| LauncherError::Generic {
+        serde_json::from_slice(&internal_user_bytes).map_err(|e| LauncherError::Generic {
             code: "ERR_COPILOT_INTERNAL_USER_PARSE".to_string(),
             message: format!("Failed to parse copilot_internal/user response: {}", e),
         })?;
@@ -407,27 +431,35 @@ pub async fn resolve_copilot_endpoint(
 
     // Always attempt the session-token exchange, regardless of plan — see
     // the doc comment above.
-    let exchange_resp = client
-        .post(COPILOT_TOKEN_EXCHANGE_URL)
-        .header("Authorization", format!("token {}", ghu_token))
-        .header("Accept", "application/json")
-        .header("User-Agent", "GitHubCopilotChat/1.95.0")
-        .header("Editor-Version", "vscode/1.95.0")
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let exchange_resp = crate::http_client::checked_send(
+        clients,
+        crate::http_client::ClientCategory::GitHub,
+        reqwest::Method::POST,
+        COPILOT_TOKEN_EXCHANGE_URL,
+        &[
+            ("Authorization".into(), format!("token {ghu_token}")),
+            ("Accept".into(), "application/json".into()),
+            ("User-Agent".into(), "GitHubCopilotChat/1.95.0".into()),
+            ("Editor-Version".into(), "vscode/1.95.0".into()),
+        ],
+        None,
+        None,
+    )
+    .await?;
 
     let exchange_status = exchange_resp.status();
     let (copilot_token, copilot_token_expires_at) = if exchange_status.is_success() {
         eprintln!("[copilot] token exchange OK — using Copilot session token");
+        let token_bytes = crate::http_client::checked_response_bytes(
+            exchange_resp,
+            crate::http_client::ClientCategory::GitHub,
+        )
+        .await?;
         let token_json: serde_json::Value =
-            exchange_resp
-                .json()
-                .await
-                .map_err(|e| LauncherError::Generic {
-                    code: "ERR_COPILOT_TOKEN_EXCHANGE_PARSE".to_string(),
-                    message: format!("Failed to parse token exchange response: {}", e),
-                })?;
+            serde_json::from_slice(&token_bytes).map_err(|e| LauncherError::Generic {
+                code: "ERR_COPILOT_TOKEN_EXCHANGE_PARSE".to_string(),
+                message: format!("Failed to parse token exchange response: {}", e),
+            })?;
 
         let session_token = token_json
             .get("token")
@@ -452,11 +484,21 @@ pub async fn resolve_copilot_endpoint(
 
         (Some(session_token), Some(expires_at))
     } else if exchange_status == reqwest::StatusCode::NOT_FOUND {
-        let body_text = exchange_resp.text().await.unwrap_or_default();
+        let body_text = crate::http_client::checked_response_text(
+            exchange_resp,
+            crate::http_client::ClientCategory::GitHub,
+        )
+        .await
+        .unwrap_or_default();
         eprintln!("[copilot] token exchange returned 404 body={}", body_text);
         (None, None)
     } else {
-        let body_text = exchange_resp.text().await.unwrap_or_default();
+        let body_text = crate::http_client::checked_response_text(
+            exchange_resp,
+            crate::http_client::ClientCategory::GitHub,
+        )
+        .await
+        .unwrap_or_default();
         eprintln!(
             "[copilot] token exchange returned {} body={}",
             exchange_status.as_u16(),
@@ -470,14 +512,17 @@ pub async fn resolve_copilot_endpoint(
 
     let endpoint = format!("{}/chat/completions", api_base);
 
-    let resp = client
-        .get(COPILOT_USER_URL)
-        .header("Authorization", format!("Bearer {}", ghu_token))
-        .header("Accept", "application/json")
-        .header("User-Agent", "Agora-Launcher/1.0")
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let resp = crate::http_client::checked_request_with_headers(
+        clients,
+        crate::http_client::ClientCategory::GitHub,
+        COPILOT_USER_URL,
+        vec![
+            ("Authorization".into(), format!("Bearer {ghu_token}")),
+            ("Accept".into(), "application/json".into()),
+            ("User-Agent".into(), "Agora-Launcher/1.0".into()),
+        ],
+    )
+    .await?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -487,10 +532,16 @@ pub async fn resolve_copilot_endpoint(
         });
     }
 
-    let user_json: serde_json::Value = resp.json().await.map_err(|e| LauncherError::Generic {
-        code: "ERR_COPILOT_USER_PARSE".to_string(),
-        message: format!("Failed to parse user response: {}", e),
-    })?;
+    let user_bytes = crate::http_client::checked_response_bytes(
+        resp,
+        crate::http_client::ClientCategory::GitHub,
+    )
+    .await?;
+    let user_json: serde_json::Value =
+        serde_json::from_slice(&user_bytes).map_err(|e| LauncherError::Generic {
+            code: "ERR_COPILOT_USER_PARSE".to_string(),
+            message: format!("Failed to parse user response: {}", e),
+        })?;
 
     let username = user_json
         .get("login")
@@ -596,13 +647,7 @@ pub async fn chat_completion(
         "GitHub Copilot is disabled in Privacy settings.",
     )?;
 
-    let client = reqwest::Client::builder()
-        .user_agent("GitHubCopilotChat/1.95.0") // Keep verified extension UA to ensure modern routing
-        .build()
-        .map_err(|_| LauncherError::Generic {
-            code: "ERR_AI_HTTP_CLIENT".to_string(),
-            message: "Failed to build HTTP client for Copilot.".to_string(),
-        })?;
+    let clients = crate::http_client::HttpClients::new()?;
 
     let mut token = token.clone();
     let needs_refresh = token.copilot_token.is_some()
@@ -612,7 +657,7 @@ pub async fn chat_completion(
             .unwrap_or(false);
 
     if needs_refresh {
-        if let Ok(refreshed) = resolve_copilot_endpoint(&client, &token.access_token).await {
+        if let Ok(refreshed) = resolve_copilot_endpoint(&clients, &token.access_token).await {
             let _ = store_copilot_token(&refreshed);
             token = refreshed;
         }
@@ -648,18 +693,20 @@ pub async fn chat_completion(
             .num_seconds(),
     );
 
-    let resp = client
-        .post(&token.endpoint)
-        .header("Authorization", format!("Bearer {}", auth_token))
-        .header("Editor-Version", "vscode/1.95.0")
-        .header("User-Agent", "GitHubCopilotChat/1.95.0")
-        .header("Openai-Intent", "conversation-edits")
-        .header("X-Initiator", "agent")
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let resp = crate::http_client::checked_post_json(
+        &clients,
+        crate::http_client::ClientCategory::AiAssistant,
+        &token.endpoint,
+        &body,
+        &[
+            ("Authorization".into(), format!("Bearer {auth_token}")),
+            ("Editor-Version".into(), "vscode/1.95.0".into()),
+            ("User-Agent".into(), "GitHubCopilotChat/1.95.0".into()),
+            ("Openai-Intent".into(), "conversation-edits".into()),
+            ("X-Initiator".into(), "agent".into()),
+        ],
+    )
+    .await?;
 
     let status = resp.status();
     eprintln!("[copilot] response status={}", status.as_u16());
@@ -682,13 +729,17 @@ pub async fn chat_completion(
     }
 
     if status.is_success() {
-        let parsed =
-            resp.json::<serde_json::Value>()
-                .await
-                .map_err(|_| LauncherError::Generic {
-                    code: "ERR_AI_PARSE".to_string(),
-                    message: "Failed to parse Copilot response.".to_string(),
-                })?;
+        let body_bytes = crate::http_client::checked_response_bytes(
+            resp,
+            crate::http_client::ClientCategory::AiAssistant,
+        )
+        .await?;
+        let parsed = serde_json::from_slice::<serde_json::Value>(&body_bytes).map_err(|_| {
+            LauncherError::Generic {
+                code: "ERR_AI_PARSE".to_string(),
+                message: "Failed to parse Copilot response.".to_string(),
+            }
+        })?;
 
         let content = parsed
             .get("choices")
@@ -712,7 +763,12 @@ pub async fn chat_completion(
     }
 
     // Handle generic failures cleanly without loop fallbacks
-    let body_text = resp.text().await.unwrap_or_default();
+    let body_text = crate::http_client::checked_response_text(
+        resp,
+        crate::http_client::ClientCategory::AiAssistant,
+    )
+    .await
+    .unwrap_or_default();
     eprintln!("[copilot] error body: {}", body_text);
 
     Err(LauncherError::Generic {

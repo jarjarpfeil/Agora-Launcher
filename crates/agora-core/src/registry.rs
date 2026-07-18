@@ -1,7 +1,216 @@
+use crate::ctx::Ctx;
 use crate::error::{LauncherError, LauncherResult};
+use crate::models::InstanceManifest;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashSet;
+
+// ---------------------------------------------------------------------------
+// RegistryService — core-owned typed service
+// ---------------------------------------------------------------------------
+
+/// Core-owned service for reading the curated registry database.
+///
+/// Every method opens a fresh read-only connection via `Ctx` paths; desktop
+/// adapters must use this service rather than opening the database directly.
+#[derive(Clone)]
+pub struct RegistryService {
+    ctx: Ctx,
+}
+
+impl RegistryService {
+    pub fn new(ctx: Ctx) -> Self {
+        Self { ctx }
+    }
+
+    fn connection(&self) -> LauncherResult<rusqlite::Connection> {
+        let path = self.ctx.paths.registry_db();
+        if !path.exists() {
+            return Err(LauncherError::RegistryMissing);
+        }
+        crate::db::registry_connection(&path).map_err(|_| LauncherError::RegistryMissing)
+    }
+
+    /// Fetch a single registry item by ID.
+    pub fn get_item_by_id(&self, item_id: &str) -> LauncherResult<Option<RegistryItem>> {
+        let conn = self.connection()?;
+        get_item_by_id(&conn, item_id)
+    }
+
+    /// Browse registry items with typed filters.
+    #[allow(clippy::too_many_arguments)]
+    pub fn browse_items(
+        &self,
+        content_type: Option<&str>,
+        category: Option<&str>,
+        sort: &SortOption,
+        modrinth_enabled: bool,
+        mc_version: Option<&str>,
+        loader: Option<&str>,
+        query: Option<&str>,
+        limit: i64,
+    ) -> LauncherResult<Vec<RegistryItem>> {
+        let conn = self.connection()?;
+        browse_items(
+            &conn,
+            content_type,
+            category,
+            sort,
+            modrinth_enabled,
+            mc_version,
+            loader,
+            query,
+            limit,
+        )
+    }
+
+    /// List all categories from the registry.
+    pub fn list_categories(&self) -> LauncherResult<Vec<CategoryInfo>> {
+        let conn = self.connection()?;
+        list_categories(&conn)
+    }
+
+    /// Look up a curated annotation for a Modrinth project.
+    pub fn get_curated_annotation(
+        &self,
+        modrinth_id: &str,
+    ) -> LauncherResult<Option<CuratedAnnotation>> {
+        let conn = self.connection()?;
+        get_curated_annotation(&conn, modrinth_id)
+    }
+
+    /// Batch compatibility lookup: for each item_id, resolve whether it declares
+    /// compatibility with the given minecraft_version + loader.
+    pub fn batch_compat_lookup(
+        &self,
+        item_ids: &[String],
+        minecraft_version: &str,
+        loader: &str,
+    ) -> LauncherResult<std::collections::BTreeMap<String, String>> {
+        let conn = self.connection()?;
+        let mut result = std::collections::BTreeMap::new();
+        for item_id in item_ids {
+            let status = get_item_by_id(&conn, item_id)?
+                .and_then(|item| item.compatible_versions_json)
+                .map(|json| compatibility_from_registry_json(&json, minecraft_version, loader))
+                .unwrap_or_default();
+            result.insert(item_id.clone(), status);
+        }
+        Ok(result)
+    }
+
+    /// List all mods in a pack, ordered by mod_id.
+    pub fn pack_mods_for_pack(&self, pack_id: &str) -> LauncherResult<Vec<PackModRow>> {
+        let conn = self.connection()?;
+        pack_mods_for_pack(&conn, pack_id)
+    }
+
+    /// List audit log entries (newest first); defensively returns `[]` if the
+    /// `audit_log` table does not exist in older registry builds.
+    pub fn list_audit_log(&self, limit: i64) -> LauncherResult<Vec<AuditLogEntry>> {
+        let conn = self.connection()?;
+        list_audit_log(&conn, limit)
+    }
+
+    /// List registry items whose status is `under_review`, ordered by net_score
+    /// ascending (lowest scores first for triage).
+    pub fn list_under_review_items(&self) -> LauncherResult<Vec<UnderReviewItem>> {
+        let conn = self.connection()?;
+        list_under_review_items(&conn)
+    }
+
+    /// List recent triage resolutions from the audit log.
+    pub fn list_recent_resolutions(&self, limit: u32) -> LauncherResult<Vec<AuditLogEntry>> {
+        let conn = self.connection()?;
+        list_recent_resolutions(&conn, limit)
+    }
+
+    /// Load parsed curator reviews for a single registry item.
+    pub fn list_mod_reviews(&self, item_id: String) -> LauncherResult<Vec<ModReview>> {
+        let conn = self.connection()?;
+        list_mod_reviews(&conn, item_id)
+    }
+
+    /// "For You" items (§6.2): boost uninstalled mods whose categories overlap
+    /// with the categories of the user's installed mods.
+    ///
+    /// Ranking: items matching MORE of the user's interest categories rank higher
+    /// (`COUNT(ic.category_id) DESC`), with `net_score DESC` as a tiebreak.
+    /// Already-installed items are excluded. Degrades to a plain `net_score`
+    /// ordering when the user has no installed mods with registry ids, or when
+    /// those items expose no resolvable categories.
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_you_items(
+        &self,
+        modrinth_enabled: bool,
+        mc_version: Option<&str>,
+        loader: Option<&str>,
+        limit: i64,
+        modrinth_categories: Option<&[String]>,
+        query: Option<&str>,
+    ) -> LauncherResult<Vec<RegistryItem>> {
+        let installed = collect_installed_registry_ids(&self.ctx.paths.instances_root())?;
+        let conn = self.connection()?;
+        for_you_items_query(
+            &conn,
+            &installed,
+            modrinth_enabled,
+            mc_version,
+            loader,
+            limit,
+            modrinth_categories,
+            query,
+        )
+    }
+
+    /// Fetch manifest-declared dependencies for a single registry item.
+    ///
+    /// Calls through to the free `get_manifest_dependencies` function using
+    /// an opened read-only connection from the service's context.
+    /// Returns `Ok(None)` when the item has no curated dependencies or the
+    /// `mod_manual_dependencies` table does not exist.
+    pub fn get_manifest_dependencies(&self, item_id: &str) -> LauncherResult<Option<ManifestDeps>> {
+        let conn = self.connection()?;
+        get_manifest_dependencies(&conn, item_id.to_string())
+    }
+
+    /// List all mod jar aliases as `(registry_id, alias)` pairs.
+    ///
+    /// Defensively returns an empty vec when the `mod_jar_aliases` table does
+    /// not exist (older registry.db builds predate this table).
+    pub fn get_all_mod_aliases(&self) -> LauncherResult<Vec<(String, String)>> {
+        let conn = self.connection()?;
+        get_all_mod_aliases(&conn)
+    }
+
+    /// List known conflicts from the curated `known_conflicts` table.
+    ///
+    /// Defensively returns an empty vec when the table does not exist (older
+    /// registry.db builds predate this table).
+    pub fn known_conflicts(&self) -> LauncherResult<Vec<KnownConflict>> {
+        let conn = self.connection()?;
+        get_known_conflicts(&conn)
+    }
+
+    /// Check whether a registry item has status `under_review`.
+    ///
+    /// Returns `false` when the item does not exist or when the registry DB
+    /// cannot be opened (graceful degradation).
+    pub fn is_under_review(&self, item_id: &str) -> LauncherResult<bool> {
+        let conn = match self.connection() {
+            Ok(c) => c,
+            Err(_) => return Ok(false),
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT 1 FROM registry_items WHERE id = ?1 AND status = 'under_review' LIMIT 1",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(false),
+        };
+        Ok(stmt.exists([item_id]).unwrap_or(false))
+    }
+}
 
 /// Canonical column list for `registry_items` selects that feed `row_to_item`.
 ///
@@ -64,20 +273,15 @@ pub struct RegistryItem {
 }
 
 /// Valid sort options for browsing (§6.2).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortOption {
+    #[default]
     NetScore,
     Velocity,
     MostDownvoted,
     Newest,
     MostUpvoted,
-}
-
-impl Default for SortOption {
-    fn default() -> Self {
-        Self::NetScore
-    }
 }
 
 impl SortOption {
@@ -97,6 +301,7 @@ impl SortOption {
 /// When `modrinth_enabled` is false, modrinth-sourced items are excluded.
 /// `mc_version` and `loader` filter against `compatible_versions_json` using
 /// SQLite's JSON1 functions (same approach as the web `browseItems`).
+#[allow(clippy::too_many_arguments)]
 pub fn browse_items(
     conn: &Connection,
     content_type: Option<&str>,
@@ -617,29 +822,20 @@ pub fn get_manifest_dependencies(
             let optional_json: Option<String> = row.get(1)?;
             let incompatible_json: Option<String> = row.get(2)?;
 
-            let required: Vec<String> = match required_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
+            let required: Vec<String> = required_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
-            let optional: Vec<String> = match optional_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
+            let optional: Vec<String> = optional_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
-            let incompatible: Vec<String> = match incompatible_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
+            let incompatible: Vec<String> = incompatible_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
             Ok(ManifestDeps {
                 required,
@@ -698,27 +894,18 @@ pub fn get_all_manifest_dependencies(
             let optional_json: Option<String> = row.get(2)?;
             let incompatible_json: Option<String> = row.get(3)?;
 
-            let required: Vec<String> = match required_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
-            let optional: Vec<String> = match optional_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
-            let incompatible: Vec<String> = match incompatible_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
+            let required: Vec<String> = required_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let optional: Vec<String> = optional_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+            let incompatible: Vec<String> = incompatible_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
 
             Ok((
                 item_id,
@@ -735,10 +922,8 @@ pub fn get_all_manifest_dependencies(
         })?;
 
     let mut out = std::collections::HashMap::new();
-    for r in rows {
-        if let Ok((item_id, deps)) = r {
-            out.insert(item_id, deps);
-        }
+    for (item_id, deps) in rows.flatten() {
+        out.insert(item_id, deps);
     }
     Ok(out)
 }
@@ -947,13 +1132,10 @@ pub fn get_known_conflicts(conn: &Connection) -> LauncherResult<Vec<KnownConflic
     let rows = stmt
         .query_map([], |row| {
             let mitigated_by_json: Option<String> = row.get(3)?;
-            let mitigated_by: Vec<String> = match mitigated_by_json {
-                Some(s) if !s.is_empty() => match serde_json::from_str(&s) {
-                    Ok(v) => v,
-                    Err(_) => Vec::new(),
-                },
-                _ => Vec::new(),
-            };
+            let mitigated_by: Vec<String> = mitigated_by_json
+                .filter(|s| !s.is_empty())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
             Ok(KnownConflict {
                 mod_a_id: row.get(0)?,
                 mod_b_id: row.get(1)?,
@@ -967,6 +1149,292 @@ pub fn get_known_conflicts(conn: &Connection) -> LauncherResult<Vec<KnownConflic
             message: e.to_string(),
         })?;
 
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?);
+    }
+    Ok(out)
+}
+
+/// Parse registry-item `compatible_versions_json` and return `"compatible"`,
+/// `"major_match"`, or `""` based on exact/major/absent match against the
+/// given Minecraft version + loader.
+///
+/// Used by both [`RegistryService::batch_compat_lookup`] and the desktop
+/// command layer for quick per-card compatibility badges.
+pub fn compatibility_from_registry_json(
+    json: &str,
+    minecraft_version: &str,
+    loader: &str,
+) -> String {
+    let Ok(entries) = serde_json::from_str::<Vec<serde_json::Value>>(json) else {
+        return String::new();
+    };
+    let loader_matches = |entry: &serde_json::Value| {
+        entry
+            .get("loader")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case(loader))
+    };
+    if entries.iter().any(|entry| {
+        loader_matches(entry)
+            && entry.get("mc_version").and_then(serde_json::Value::as_str)
+                == Some(minecraft_version)
+    }) {
+        return "compatible".into();
+    }
+    let requested_major = minecraft_version
+        .split('.')
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(".");
+    if entries.iter().any(|entry| {
+        loader_matches(entry)
+            && entry
+                .get("mc_version")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|version| {
+                    version.split('.').take(2).collect::<Vec<_>>().join(".") == requested_major
+                })
+    }) {
+        "major_match".into()
+    } else {
+        String::new()
+    }
+}
+
+/// Collect the set of installed-mod registry ids across all local instance
+/// manifests under the given instances root. Used by the "For You" ranking
+/// (§6.2) to suppress already-installed items and to derive the user's category
+/// interests. Best-effort: malformed manifests are silently skipped.
+fn collect_installed_registry_ids(
+    instances_root: &std::path::Path,
+) -> LauncherResult<HashSet<String>> {
+    let mut ids: HashSet<String> = HashSet::new();
+    let entries = match std::fs::read_dir(instances_root) {
+        Ok(e) => e,
+        Err(_) => return Ok(ids),
+    };
+    for entry in entries.flatten() {
+        let manifest_path = entry.path().join("instance_manifest.json");
+        if let Ok(text) = std::fs::read_to_string(&manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<InstanceManifest>(&text) {
+                for m in &manifest.mods {
+                    if let Some(rid) = &m.registry_id {
+                        let rid = rid.trim();
+                        if !rid.is_empty() {
+                            ids.insert(rid.to_string());
+                        }
+                    }
+                }
+                for m in &manifest.resourcepacks {
+                    if let Some(rid) = &m.registry_id {
+                        let rid = rid.trim();
+                        if !rid.is_empty() {
+                            ids.insert(rid.to_string());
+                        }
+                    }
+                }
+                for m in &manifest.shaders {
+                    if let Some(rid) = &m.registry_id {
+                        let rid = rid.trim();
+                        if !rid.is_empty() {
+                            ids.insert(rid.to_string());
+                        }
+                    }
+                }
+                for m in &manifest.datapacks {
+                    if let Some(rid) = &m.registry_id {
+                        let rid = rid.trim();
+                        if !rid.is_empty() {
+                            ids.insert(rid.to_string());
+                        }
+                    }
+                }
+                for m in &manifest.worlds {
+                    if let Some(rid) = &m.registry_id {
+                        let rid = rid.trim();
+                        if !rid.is_empty() {
+                            ids.insert(rid.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// "For You" ranking query — extracted from [`RegistryService::for_you_items`]
+/// so it can be unit-tested directly against a connection.
+#[allow(clippy::too_many_arguments)]
+fn for_you_items_query(
+    conn: &Connection,
+    installed: &HashSet<String>,
+    modrinth_enabled: bool,
+    mc_version: Option<&str>,
+    loader: Option<&str>,
+    limit: i64,
+    modrinth_categories: Option<&[String]>,
+    query: Option<&str>,
+) -> LauncherResult<Vec<RegistryItem>> {
+    // Derive interest categories from installed items.
+    let mut interest: Vec<String> = Vec::new();
+    if !installed.is_empty() {
+        let installed_ph = installed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let interest_sql = format!(
+            "SELECT DISTINCT category_id FROM item_categories WHERE item_id IN ({installed_ph})"
+        );
+        let mut stmt = conn
+            .prepare(&interest_sql)
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?;
+        let interest_params: Vec<Box<dyn rusqlite::ToSql>> = installed
+            .iter()
+            .map(|s| Box::new(s.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let interest_rows = stmt
+            .query_map(rusqlite::params_from_iter(interest_params.iter()), |row| {
+                let cat: String = row.get(0)?;
+                Ok(cat)
+            })
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?;
+        for r in interest_rows {
+            interest.push(r.map_err(|e| LauncherError::Generic {
+                code: "ERR_INVALID_QUERY".to_string(),
+                message: e.to_string(),
+            })?);
+        }
+    }
+
+    // Merge Modrinth category facets from the Browse page filter state.
+    if let Some(mr_cats) = modrinth_categories {
+        for cat in mr_cats {
+            if !interest.contains(cat) {
+                interest.push(cat.clone());
+            }
+        }
+    }
+
+    // No interest signal at all → degrade to net_score browse.
+    if interest.is_empty() {
+        let sort = SortOption::NetScore;
+        let mut items = browse_items(
+            conn,
+            None,
+            None,
+            &sort,
+            modrinth_enabled,
+            mc_version,
+            loader,
+            query,
+            limit,
+        )?;
+        if !installed.is_empty() {
+            items.retain(|item| !installed.contains(&item.id));
+        }
+        for item in &mut items {
+            item.recommendation_reason = Some(format!(
+                "Recommended by Agora's curated score (net score {}).",
+                item.net_score
+            ));
+            item.recommendation_overlap = Some(0);
+        }
+        return Ok(items);
+    }
+
+    let interest_ph = interest.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let mut where_parts: Vec<String> = Vec::new();
+    if !modrinth_enabled {
+        where_parts.push("ri.download_strategy != 'modrinth_id'".to_string());
+    }
+    if query.is_some_and(|q| !q.trim().is_empty()) {
+        where_parts.push("ri.name LIKE ?".to_string());
+    }
+    if mc_version.is_some() {
+        where_parts.push(
+            "ri.id IN (SELECT r.id FROM registry_items r, json_each(r.compatible_versions_json) cv \
+             WHERE json_extract(cv.value, '$.mc_version') = ?)"
+                .to_string(),
+        );
+    }
+    if let Some(ld) = loader {
+        if ld != "all" {
+            where_parts.push(
+                "ri.id IN (SELECT r.id FROM registry_items r, json_each(r.compatible_versions_json) cv \
+                 WHERE json_extract(cv.value, '$.loader') = ?)"
+                    .to_string(),
+            );
+        }
+    }
+    if !installed.is_empty() {
+        let installed_ph = installed.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        where_parts.push(format!("ri.id NOT IN ({installed_ph})"));
+    }
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    let sql = format!(
+        "SELECT {REGISTRY_ITEM_COLUMNS}, COUNT(ic.category_id) AS recommendation_overlap
+         FROM registry_items ri
+         LEFT JOIN item_categories ic ON ri.id = ic.item_id AND ic.category_id IN ({interest_ph})
+         {where_clause}
+         GROUP BY ri.id
+         ORDER BY COUNT(ic.category_id) DESC, ri.net_score DESC
+         LIMIT ?"
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    for cat in &interest {
+        params.push(Box::new(cat.clone()));
+    }
+    if let Some(q) = query.filter(|q| !q.trim().is_empty()) {
+        params.push(Box::new(format!("%{}%", q.trim())));
+    }
+    if let Some(mv) = mc_version {
+        params.push(Box::new(mv.to_string()));
+    }
+    if let Some(ld) = loader {
+        if ld != "all" {
+            params.push(Box::new(ld.to_string()));
+        }
+    }
+    for id in installed {
+        params.push(Box::new(id.clone()));
+    }
+    params.push(Box::new(limit));
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| LauncherError::Generic {
+        code: "ERR_INVALID_QUERY".to_string(),
+        message: e.to_string(),
+    })?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            let mut item = row_to_item(row)?;
+            let overlap: i64 = row.get(24)?;
+            item.recommendation_overlap = Some(overlap);
+            item.recommendation_reason = Some(if overlap == 1 {
+                "Shares 1 category with mods installed in your instances.".to_string()
+            } else {
+                format!("Shares {overlap} categories with mods installed in your instances.")
+            });
+            Ok(item)
+        })
+        .map_err(|e| LauncherError::Generic {
+            code: "ERR_INVALID_QUERY".to_string(),
+            message: e.to_string(),
+        })?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r.map_err(|e| LauncherError::Generic {
@@ -1394,5 +1862,415 @@ mod tests {
 
         let result = get_curated_annotation(&conn, "nonexistent-id").unwrap();
         assert!(result.is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // RegistryService tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn service_get_item_by_id_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE registry_items (
+                 id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                 download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                 upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                 velocity REAL, status TEXT, is_immune INTEGER,
+                 immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                 gallery_urls_json TEXT, date_added TEXT,
+                 compatible_versions_json TEXT, description TEXT,
+                 body_markdown TEXT, page_url TEXT, license_id TEXT,
+                 source_updated_at TEXT, modrinth_id TEXT
+             );
+             INSERT INTO registry_items VALUES (
+                 'svc-test-1', 'Svc Test Mod', 'mod', 'github_release',
+                 'owner/repo', 'abc', 10, 2, 8, 1.5, 'approved',
+                 0, NULL, 1, NULL, NULL,
+                 '2024-01-01T00:00:00Z', NULL,
+                 'A service test mod', NULL, NULL, NULL, NULL, NULL
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        // Move registry.db to the Ctx-managed path.
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        // Actually the ctx already has db_path = dir.path().join("registry.db")
+        // since we created it there.
+
+        let svc = RegistryService::new(ctx);
+        let item = svc.get_item_by_id("svc-test-1").unwrap().unwrap();
+        assert_eq!(item.name, "Svc Test Mod");
+        assert_eq!(item.content_type, "mod");
+    }
+
+    #[test]
+    fn service_get_item_by_id_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE registry_items (
+                 id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                 download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                 upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                 velocity REAL, status TEXT, is_immune INTEGER,
+                 immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                 gallery_urls_json TEXT, date_added TEXT,
+                 compatible_versions_json TEXT, description TEXT,
+                 body_markdown TEXT, page_url TEXT, license_id TEXT,
+                 source_updated_at TEXT, modrinth_id TEXT
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        let svc = RegistryService::new(ctx);
+        let item = svc.get_item_by_id("nonexistent").unwrap();
+        assert!(item.is_none());
+    }
+
+    #[test]
+    fn service_get_item_by_id_missing_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        // No registry.db created at all.
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        let svc = RegistryService::new(ctx);
+        let err = svc.get_item_by_id("anything").unwrap_err();
+        assert_eq!(err.code(), "ERR_REGISTRY_MISSING");
+    }
+
+    // -------------------------------------------------------------------
+    // compatibility_from_registry_json tests
+    // -------------------------------------------------------------------
+
+    const COMPAT: &str = r#"[
+        {"mc_version":"1.21.1","loader":"fabric"},
+        {"mc_version":"1.20.4","loader":"neoforge"}
+    ]"#;
+
+    #[test]
+    fn compat_exact_match() {
+        assert_eq!(
+            compatibility_from_registry_json(COMPAT, "1.21.1", "fabric"),
+            "compatible"
+        );
+    }
+
+    #[test]
+    fn compat_major_match() {
+        assert_eq!(
+            compatibility_from_registry_json(COMPAT, "1.21.4", "fabric"),
+            "major_match"
+        );
+    }
+
+    #[test]
+    fn compat_requires_loader_match() {
+        assert_eq!(
+            compatibility_from_registry_json(COMPAT, "1.21.1", "neoforge"),
+            ""
+        );
+    }
+
+    #[test]
+    fn compat_malformed_metadata_is_empty() {
+        assert_eq!(
+            compatibility_from_registry_json("not-json", "1.21.1", "fabric"),
+            ""
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // for_you_items_query tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn for_you_items_empty_interests_degrades_to_net_score() {
+        let dir = temp_registry_db();
+        let conn = registry_connection(&dir.path().join("registry.db")).unwrap();
+        let installed = HashSet::new();
+        let items =
+            for_you_items_query(&conn, &installed, true, None, None, 100, None, None).unwrap();
+        // test-mod-1 is the only item and net_score 8
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Test Mod 1");
+        assert_eq!(items[0].recommendation_overlap, Some(0));
+        assert!(items[0]
+            .recommendation_reason
+            .as_ref()
+            .unwrap()
+            .contains("net score"));
+    }
+
+    #[test]
+    fn for_you_items_suppresses_installed() {
+        let dir = temp_registry_db();
+        let conn = registry_connection(&dir.path().join("registry.db")).unwrap();
+        let mut installed = HashSet::new();
+        installed.insert("test-mod-1".to_string());
+        let items =
+            for_you_items_query(&conn, &installed, true, None, None, 100, None, None).unwrap();
+        // test-mod-1 should be filtered out, leaving none
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn for_you_items_with_modrinth_categories_merged() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE registry_items (
+                id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                velocity REAL, status TEXT, is_immune INTEGER,
+                immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                gallery_urls_json TEXT, date_added TEXT,
+                compatible_versions_json TEXT, description TEXT,
+                body_markdown TEXT, page_url TEXT, license_id TEXT,
+                source_updated_at TEXT, modrinth_id TEXT
+            );
+            CREATE TABLE item_categories (
+                item_id TEXT, category_id TEXT
+            );
+            INSERT INTO registry_items VALUES (
+                'rec-mod', 'Rec Mod', 'mod', 'github_release',
+                'owner/repo', 'abc', 10, 2, 8, 1.5, 'approved',
+                0, NULL, 1, NULL, NULL, '2024-01-01T00:00:00Z', NULL,
+                'A recommended mod', NULL, NULL, NULL, NULL, NULL
+            );
+            INSERT INTO item_categories VALUES ('rec-mod', 'adventure');
+            ",
+        )
+        .unwrap();
+        drop(conn);
+        let conn = registry_connection(&db_path).unwrap();
+        let installed = HashSet::new();
+        // No installed items → empty interest → degrad to browse.
+        // Provide Modrinth categories that are NOT in the db; they should
+        // still be merged (though they won't affect the result without items).
+        let modrinth_cats = vec!["adventure".to_string()];
+        let items = for_you_items_query(
+            &conn,
+            &installed,
+            true,
+            None,
+            None,
+            100,
+            Some(&modrinth_cats),
+            None,
+        )
+        .unwrap();
+        // With no installed items, interest is empty (no installed items
+        // to derive from), so the Modrinth cats are the only input → still
+        // interest.is_empty() because we only merge with modrinth_categories
+        // when the user has no installed mods. The fallback net_score path
+        // is used, which returns rec-mod.
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Rec Mod");
+    }
+
+    #[test]
+    fn collect_installed_registry_ids_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids = collect_installed_registry_ids(dir.path()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn collect_installed_registry_ids_from_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let inst_dir = dir.path().join("my-instance");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+        let manifest = r#"{
+            "instance_id": "my-instance",
+            "name": "My Instance",
+            "minecraft_version": "1.20.1",
+            "loader": "fabric",
+            "loader_version": "0.15.0",
+            "mods": [
+                {"filename": "a.jar", "source": "modrinth", "sha256": "a", "installed_at": "now", "registry_id": "mod-a"},
+                {"filename": "b.jar", "source": "modrinth", "sha256": "b", "installed_at": "now", "registry_id": "mod-b"}
+            ],
+            "resourcepacks": [],
+            "shaders": [],
+            "datapacks": [],
+            "worlds": [],
+            "user_preferences": {}
+        }"#;
+        std::fs::write(inst_dir.join("instance_manifest.json"), manifest).unwrap();
+        let ids = collect_installed_registry_ids(dir.path()).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains("mod-a"));
+        assert!(ids.contains("mod-b"));
+    }
+
+    #[test]
+    fn collect_installed_registry_ids_skips_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let inst_dir = dir.path().join("empty-instance");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+        // No manifest file — should not panic
+        let ids = collect_installed_registry_ids(dir.path()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn collect_installed_registry_ids_skips_malformed_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let inst_dir = dir.path().join("bad-instance");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+        std::fs::write(inst_dir.join("instance_manifest.json"), "not-json").unwrap();
+        let ids = collect_installed_registry_ids(dir.path()).unwrap();
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn for_you_items_query_with_interest_ranking() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE registry_items (
+                id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                velocity REAL, status TEXT, is_immune INTEGER,
+                immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                gallery_urls_json TEXT, date_added TEXT,
+                compatible_versions_json TEXT, description TEXT,
+                body_markdown TEXT, page_url TEXT, license_id TEXT,
+                source_updated_at TEXT, modrinth_id TEXT
+            );
+            CREATE TABLE item_categories (
+                item_id TEXT, category_id TEXT
+            );
+            -- Simulate installed items that expose 'fabric' and 'adventure' interests.
+            INSERT INTO item_categories VALUES ('installed-mod', 'fabric');
+            INSERT INTO item_categories VALUES ('installed-mod', 'adventure');
+            -- Item with 'fabric' category (will be matched by interest from installed)
+            INSERT INTO registry_items VALUES (
+                'rec-1', 'Rec One', 'mod', 'github_release',
+                'a/a', 'a', 10, 2, 8, 1.5, 'approved',
+                0, NULL, 1, NULL, NULL, '2024-01-01T00:00:00Z', NULL,
+                'A', NULL, NULL, NULL, NULL, NULL
+            );
+            -- Item with 'fabric' AND 'adventure' categories (higher overlap)
+            INSERT INTO registry_items VALUES (
+                'rec-2', 'Rec Two', 'mod', 'github_release',
+                'b/b', 'b', 10, 2, 5, 1.0, 'approved',
+                0, NULL, 1, NULL, NULL, '2024-01-01T00:00:00Z', NULL,
+                'B', NULL, NULL, NULL, NULL, NULL
+            );
+            INSERT INTO item_categories VALUES ('rec-1', 'fabric');
+            INSERT INTO item_categories VALUES ('rec-2', 'fabric');
+            INSERT INTO item_categories VALUES ('rec-2', 'adventure');
+            ",
+        )
+        .unwrap();
+        drop(conn);
+        let conn = registry_connection(&db_path).unwrap();
+
+        let mut installed = HashSet::new();
+        installed.insert("installed-mod".to_string());
+
+        let items =
+            for_you_items_query(&conn, &installed, true, None, None, 100, None, None).unwrap();
+
+        // rec-2 has overlap 2 (fabric + adventure), rec-1 has overlap 1 (fabric)
+        assert_eq!(items.len(), 2, "should return both uninstalled items");
+        // rec-2 should be first (higher overlap)
+        assert_eq!(items[0].name, "Rec Two");
+        assert_eq!(items[0].recommendation_overlap, Some(2));
+        assert!(items[0]
+            .recommendation_reason
+            .as_ref()
+            .unwrap()
+            .contains("2 categories"));
+        // rec-1 should be second
+        assert_eq!(items[1].name, "Rec One");
+        assert_eq!(items[1].recommendation_overlap, Some(1));
+        assert!(items[1]
+            .recommendation_reason
+            .as_ref()
+            .unwrap()
+            .contains("1 category"));
+    }
+
+    // -------------------------------------------------------------------
+    // RegistryService::known_conflicts / is_under_review tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn service_known_conflicts_found() {
+        let dir = temp_registry_db();
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        let svc = RegistryService::new(ctx);
+
+        let conflicts = svc.known_conflicts().unwrap();
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].mod_a_id, "mod-a");
+        assert_eq!(conflicts[0].mod_b_id, "mod-b");
+        assert_eq!(conflicts[0].severity, "hard");
+        assert_eq!(conflicts[0].mitigated_by, vec!["workaround".to_string()]);
+    }
+
+    #[test]
+    fn service_known_conflicts_missing_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        let svc = RegistryService::new(ctx);
+        let err = svc.known_conflicts().unwrap_err();
+        assert_eq!(err.code(), "ERR_REGISTRY_MISSING");
+    }
+
+    #[test]
+    fn service_is_under_review_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("registry.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE registry_items (
+                 id TEXT PRIMARY KEY, name TEXT, content_type TEXT,
+                 download_strategy TEXT, source_identifier TEXT, sha256 TEXT,
+                 upvotes INTEGER, downvotes INTEGER, net_score INTEGER,
+                 velocity REAL, status TEXT, is_immune INTEGER,
+                 immunity_reason TEXT, allow_comments INTEGER, icon_url TEXT,
+                 gallery_urls_json TEXT, date_added TEXT,
+                 compatible_versions_json TEXT, description TEXT,
+                 body_markdown TEXT, page_url TEXT, license_id TEXT,
+                 source_updated_at TEXT, modrinth_id TEXT
+             );
+             INSERT INTO registry_items VALUES (
+                 'review-mod', 'Review Mod', 'mod', 'github_release',
+                 'r/r', 'abc', 0, 0, 0, 0.0, 'under_review',
+                 0, NULL, 1, NULL, NULL, '2024-06-01T00:00:00Z', NULL,
+                 NULL, NULL, NULL, NULL, NULL, NULL
+             );",
+        )
+        .unwrap();
+        drop(conn);
+
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        let svc = RegistryService::new(ctx);
+
+        assert!(svc.is_under_review("review-mod").unwrap());
+        assert!(!svc.is_under_review("unknown-mod").unwrap());
+    }
+
+    #[test]
+    fn service_is_under_review_missing_registry_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::for_testing(dir.path().to_owned());
+        let svc = RegistryService::new(ctx);
+        // Graceful degradation: missing registry → false
+        let result = svc.is_under_review("anything").unwrap();
+        assert!(!result);
     }
 }

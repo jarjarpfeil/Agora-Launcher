@@ -5,11 +5,11 @@
 //! wrappers that resolve `AppHandle` to connections / auth tokens.
 
 use crate::auth;
-use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 
-pub use agora_core::governance::{TriagePoll, AGORA_ADMIN_ALERTS_REPO, AGORA_GOVERNANCE_REPO};
+pub use agora_core::governance::{governance_repo, TriagePoll, AGORA_ADMIN_ALERTS_REPO};
 
+use agora_core::governance::GovernanceService;
 use tauri::AppHandle;
 
 // --- Triage poll ---
@@ -24,10 +24,11 @@ pub async fn fetch_triage_poll(app: &AppHandle, mod_id: String) -> LauncherResul
     let _permit = agora_core::github_ratelimit::acquire_github_permit().await;
 
     // Step 1: search for the triage discussion by title pattern.
+    let governance_repo_str = governance_repo(None);
     let search_query = format!(
         "repo:{owner}/{repo} [Community Triage] {mod_id}",
-        owner = AGORA_GOVERNANCE_REPO.split('/').next().unwrap_or(""),
-        repo = AGORA_GOVERNANCE_REPO.split('/').nth(1).unwrap_or(""),
+        owner = governance_repo_str.split('/').next().unwrap_or(""),
+        repo = governance_repo_str.split('/').nth(1).unwrap_or(""),
         mod_id = mod_id,
     );
 
@@ -234,10 +235,10 @@ pub async fn flag_review(
     let token = auth::get_token(app).ok_or(LauncherError::AuthRequired)?;
 
     // Rate-limit check.
-    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
+    let ctx = crate::core_context(app)?;
+    let governance = GovernanceService::new(ctx);
     let now_unix = chrono::Utc::now().timestamp();
-    let rate_limit = db::get_flag_rate_limit_status(&conn, now_unix)
-        .map_err(|_| LauncherError::LocalStateFailed)?;
+    let rate_limit = governance.get_flag_rate_limit()?;
 
     if !rate_limit.can_flag {
         let reset_unix = if rate_limit.remaining_hour <= 0 {
@@ -261,10 +262,11 @@ pub async fn flag_review(
 
     let _permit = agora_core::github_ratelimit::acquire_github_permit().await;
 
+    let governance_repo_str = governance_repo(None);
     let tracking_url = format!(
         "https://github.com/{owner}/{repo}/issues/{num}",
-        owner = AGORA_GOVERNANCE_REPO.split('/').next().unwrap_or(""),
-        repo = AGORA_GOVERNANCE_REPO.split('/').nth(1).unwrap_or(""),
+        owner = governance_repo_str.split('/').next().unwrap_or(""),
+        repo = governance_repo_str.split('/').nth(1).unwrap_or(""),
         num = issue_number,
     );
 
@@ -311,7 +313,7 @@ pub async fn flag_review(
         agora_core::github_ratelimit::report_rate_limit(retry).await;
         return Err(LauncherError::Generic {
             code: "ERR_RATE_LIMITED".to_string(),
-            message: format!("GitHub rate limited the flag submission."),
+            message: "GitHub rate limited the flag submission.".to_string(),
         });
     }
 
@@ -335,8 +337,9 @@ pub async fn flag_review(
     })?;
 
     // Record the submission for rate-limit tracking.
-    if let Ok(conn) = db::local_state_connection(app) {
-        let _ = db::record_flag_submission(&conn, now_unix);
+    if let Ok(ctx) = crate::core_context(app) {
+        let governance = GovernanceService::new(ctx);
+        let _ = governance.record_flag_submission(now_unix);
     }
 
     Ok(issue_resp.html_url)
@@ -346,6 +349,7 @@ pub async fn flag_review(
 
 /// Return the current flag rate-limit status for the local state database.
 pub fn get_flag_rate_limit(app: &AppHandle) -> LauncherResult<agora_core::db::FlagRateLimit> {
-    let conn = db::local_state_connection(app).map_err(|_| LauncherError::LocalStateFailed)?;
-    agora_core::governance::get_flag_rate_limit(&conn)
+    let ctx = crate::core_context(app)?;
+    let governance = GovernanceService::new(ctx);
+    governance.get_flag_rate_limit()
 }

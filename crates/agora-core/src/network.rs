@@ -4,6 +4,7 @@
 //! which network endpoints the launch planner may contact. Every HTTP
 //! request in the planner is gated by a `NetworkPolicy::check()` call.
 
+use crate::ctx::Ctx;
 use crate::db;
 use crate::error::{LauncherError, LauncherResult};
 use crate::loader_manifests;
@@ -84,6 +85,20 @@ impl NetworkPolicy {
                 NetworkCategory::JavaRuntime => LauncherError::NetworkJavaDisabled,
             })
         }
+    }
+
+    /// Construct a policy from `local_state.db` settings via a core context.
+    ///
+    /// Opens the database through [`Ctx::paths`] and delegates to [`from_db`].
+    /// Returns a [`LauncherError`] if the database cannot be opened.
+    pub fn from_ctx(ctx: &Ctx) -> LauncherResult<Self> {
+        let db_path = ctx.paths.local_state_db();
+        let conn =
+            crate::db::local_state_connection(&db_path).map_err(|e| LauncherError::Generic {
+                code: "ERR_LOCAL_STATE_FAILED".into(),
+                message: format!("Failed to open local state database: {e}"),
+            })?;
+        Ok(Self::from_db(&conn))
     }
 
     /// Construct a policy from `local_state.db` settings.

@@ -24,8 +24,11 @@ use std::path::{Path, PathBuf};
 
 // Thread-local mock so parallel tests do not interfere with each other.
 #[cfg(test)]
+type MockInspectFn = Option<fn(&Path) -> Option<JavaInstallation>>;
+
+#[cfg(test)]
 thread_local! {
-    static MOCK_INSPECT: std::cell::RefCell<Option<fn(&Path) -> Option<JavaInstallation>>> =
+    static MOCK_INSPECT: std::cell::RefCell<MockInspectFn> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -60,7 +63,9 @@ pub fn set_mock_inspect(f: Option<fn(&Path) -> Option<JavaInstallation>>) -> Moc
 // ---------------------------------------------------------------------------
 
 /// Origin of a discovered Java installation.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub enum JavaSource {
     /// Explicit user override path.
     Override,
@@ -69,13 +74,8 @@ pub enum JavaSource {
     /// Bundled runtime under the official Mojang launcher directory.
     Mojang,
     /// OS-default / system-installed JRE.
+    #[default]
     System,
-}
-
-impl Default for JavaSource {
-    fn default() -> Self {
-        JavaSource::System
-    }
 }
 
 // ---------------------------------------------------------------------------

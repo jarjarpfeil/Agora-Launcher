@@ -58,20 +58,11 @@ pub struct LockedArtifact {
     pub unresolved_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LockfileConfigPolicy {
     pub included: bool,
     pub config_hash: Option<String>,
-}
-
-impl Default for LockfileConfigPolicy {
-    fn default() -> Self {
-        Self {
-            included: false,
-            config_hash: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -360,12 +351,100 @@ fn verify_signature(content_hash: &str, signature: &LockfileSignature) -> Result
         .map_err(|_| "Lockfile signature verification failed.".to_string())
 }
 
+/// Build an [`InstanceLockfile`] from an instance directory on disk.
+///
+/// Reads the instance manifest, walks content directories (mods, resourcepacks,
+/// shaderpacks, datapacks, saves/worlds), computes SHA-256 for every artifact,
+/// and produces a privacy-preserving lockfile (no config file contents).
+pub fn build_from_instance(instance_dir: &std::path::Path) -> Result<InstanceLockfile, String> {
+    use crate::models::InstanceManifest;
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    let manifest_path = instance_dir.join("instance_manifest.json");
+    let text = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Cannot read instance manifest: {e}"))?;
+    let manifest: InstanceManifest =
+        serde_json::from_str(&text).map_err(|e| format!("Cannot parse manifest: {e}"))?;
+
+    let content_dirs: BTreeMap<&str, &[crate::models::InstalledMod]> = BTreeMap::from([
+        ("mods", manifest.mods.as_slice()),
+        ("resourcepacks", manifest.resourcepacks.as_slice()),
+        ("shaderpacks", manifest.shaders.as_slice()),
+        ("datapacks", manifest.datapacks.as_slice()),
+        ("saves", manifest.worlds.as_slice()),
+    ]);
+
+    let mut artifacts = Vec::new();
+    for (dir_name, items) in &content_dirs {
+        for item in *items {
+            let file_path = instance_dir.join(dir_name).join(&item.filename);
+            let disabled_path = format!("{}.disabled", file_path.display());
+            let actual_path = if file_path.exists() {
+                file_path
+            } else if std::path::Path::new(&disabled_path).exists() {
+                std::path::PathBuf::from(&disabled_path)
+            } else {
+                continue;
+            };
+            let data = fs::read(&actual_path)
+                .map_err(|e| format!("Cannot read {}: {e}", item.filename))?;
+            let sha256 = crate::download::sha256_hex(&data);
+
+            let content_type = match *dir_name {
+                "resourcepacks" => "resourcepack",
+                "shaderpacks" => "shader",
+                "saves" => "world",
+                _ => *dir_name,
+            };
+
+            artifacts.push(LockedArtifact {
+                filename: item.filename.clone(),
+                content_type: content_type.to_string(),
+                registry_id: item.registry_id.clone(),
+                modrinth_id: item.modrinth_id.clone(),
+                source: item.source.clone(),
+                source_url: item.source_url.clone(),
+                version: item.version.clone(),
+                sha256,
+                enabled: item.enabled,
+                unresolved_reason: None,
+            });
+        }
+    }
+
+    let loader_entries =
+        crate::loader_manifests::list_versions(&manifest.loader, &manifest.minecraft_version);
+    let loader_entry = loader_entries
+        .iter()
+        .find(|e| e.loader_version == manifest.loader_version);
+
+    let lockfile = InstanceLockfile::new(
+        LockedInstance {
+            name: manifest.name.clone(),
+            minecraft_version: manifest.minecraft_version.clone(),
+            loader: manifest.loader.clone(),
+            loader_version: manifest.loader_version.clone(),
+            is_locked: manifest.is_locked,
+            user_preferences: manifest.user_preferences.clone(),
+        },
+        artifacts,
+        LockedLoader {
+            source_url: loader_entry.map(|e| e.source_url.clone()),
+            sha256: loader_entry.map(|e| e.sha256.clone()),
+        },
+        crate::download::sha256_hex(&serde_json::to_vec(&manifest).unwrap_or_default()),
+        None,
+    )?;
+    Ok(lockfile)
+}
+
 fn canonical_json(value: &serde_json::Value) -> Result<String, String> {
     fn sorted(value: &serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => {
                 let mut entries = map.iter().collect::<Vec<_>>();
-                entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+                entries.sort_by_key(|(left, _)| *left);
                 serde_json::Value::Object(
                     entries
                         .into_iter()

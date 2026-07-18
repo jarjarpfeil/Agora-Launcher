@@ -1,6 +1,5 @@
 use crate::browse_cache::SharedBrowseCache;
 use crate::error::LauncherResult;
-use crate::install_pipeline::{CancellationToken, ResolvedInstallPlan};
 use crate::msa::LoginFlow;
 use crate::process_identity::{self, ProcessIdentity};
 use std::collections::{HashMap, HashSet};
@@ -27,7 +26,6 @@ pub struct RunningProcess {
 #[derive(Debug, Clone)]
 pub struct LaunchReservation {
     pub instance_id: String,
-    pub session_id: u64,
 }
 
 /// Lightweight shared application state.
@@ -57,13 +55,6 @@ pub struct AppState {
     /// Sessions for which the user explicitly requested termination.  The exit
     /// classifier consumes these so a user stop is never reported as a crash.
     pub user_cancelled_launches: HashSet<u64>,
-    /// Session counter incremented on every direct launch.
-    pub launch_session_counter: u64,
-    /// Backend-owned plans keyed by fingerprint. Clients submit only the id for
-    /// execution, preventing plan-body tampering between resolve and apply.
-    pub resolved_install_plans: HashMap<String, ResolvedInstallPlan>,
-    /// Per-plan cancellation flags shared with active executors.
-    pub install_cancellations: HashMap<String, CancellationToken>,
     /// Instance IDs with an active install transaction.
     pub active_install_instances: HashSet<String>,
     /// Per-instance serialization for LKG read/modify/write promotion. Delegated
@@ -74,10 +65,21 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
+        // AppState client is used by Tauri-hosted commands.
+        // The timeout is short because the AppState client is for lightweight
+        // health checks and status queries. Heavy downloads use HttpClients
+        // from the managed CoreContext.
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("AgoraLauncher/1.0")
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|_| {
+                reqwest::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .expect("reqwest::Client::builder().build() must succeed")
+            });
         Self {
             client,
             login_flow: None,
@@ -86,9 +88,6 @@ impl AppState {
             process_identity: None,
             launch_reservation: None,
             user_cancelled_launches: HashSet::new(),
-            launch_session_counter: 0,
-            resolved_install_plans: HashMap::new(),
-            install_cancellations: HashMap::new(),
             active_install_instances: HashSet::new(),
             lkg_locks: HashMap::new(),
         }

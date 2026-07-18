@@ -675,37 +675,14 @@ pub enum ProgressPhase {
 }
 
 // ---------------------------------------------------------------------------
-// 23. CancellationToken — scoped per transaction
+// 23. CancellationToken — re-exported from canonical event_sink module
 // ---------------------------------------------------------------------------
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
-#[derive(Clone, Debug)]
-pub struct CancellationToken(Arc<AtomicBool>);
-
-impl CancellationToken {
-    pub fn new() -> Self {
-        Self(Arc::new(AtomicBool::new(false)))
-    }
-
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
-    }
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Re-exported from `crate::event_sink` — the canonical cancellation type.
+pub use crate::event_sink::CancellationToken;
 
 // ---------------------------------------------------------------------------
-// 24. ProgressReporter trait (Tauri-agnostic)
+// 24. ProgressReporter trait (Tauri-agnostic, uses legacy ProgressEvent)
 // ---------------------------------------------------------------------------
 
 pub trait ProgressReporter: Send + Sync {
@@ -1682,9 +1659,7 @@ fn artifact_matches_installed(
 }
 
 fn effective_installed_filename(item: &crate::models::InstalledMod) -> String {
-    if item.enabled {
-        item.filename.clone()
-    } else if item.filename.ends_with(".disabled") {
+    if item.enabled || item.filename.ends_with(".disabled") {
         item.filename.clone()
     } else {
         format!("{}.disabled", item.filename)
@@ -1855,9 +1830,11 @@ async fn stage_plan_artifacts(
         validate_filename(&file.staging_filename)?;
         let contents = match &file.artifact {
             ResolvedArtifact::Download(download) => match &download.source {
-                ArtifactSource::Download { url } => crate::download::download_mod_bytes(url)
-                    .await
-                    .map_err(|e| format!("failed to download {}: {e}", download.item_id))?,
+                ArtifactSource::Download { url } => {
+                    crate::download::download_mod_bytes_standalone(url)
+                        .await
+                        .map_err(|e| format!("failed to download {}: {e}", download.item_id))?
+                }
                 ArtifactSource::LocalFile { path } => std::fs::read(path).map_err(|e| {
                     format!("failed to read local artifact {}: {e}", download.item_id)
                 })?,
@@ -2212,7 +2189,7 @@ fn locate_live_file(
 ) -> std::path::PathBuf {
     for item in all_installed(manifest) {
         if (item.filename == filename || effective_installed_filename(item) == filename)
-            && content_type.map_or(true, |ct| {
+            && content_type.is_none_or(|ct| {
                 normalized_content_type(&item.content_type) == normalized_content_type(ct)
             })
         {

@@ -127,16 +127,12 @@ pub fn clone_instance(
 }
 
 fn copy_entry(src: &Path, dst: &Path, prefs: &ClonePrefs) -> Result<(), String> {
-    if prefs.use_sym_links {
-        if symlink_entry(src, dst) {
-            return Ok(());
-        }
+    if prefs.use_sym_links && symlink_entry(src, dst) {
+        return Ok(());
     }
 
-    if prefs.use_hard_links && src.is_file() {
-        if hardlink_entry(src, dst) {
-            return Ok(());
-        }
+    if prefs.use_hard_links && src.is_file() && hardlink_entry(src, dst) {
+        return Ok(());
     }
 
     if src.is_dir() {

@@ -323,7 +323,7 @@ pub fn parse_maven_descriptor(descriptor: &str) -> LauncherResult<MavenDescripto
     if parts.len() < 3 || parts.len() > 4 {
         return Err(LauncherError::MavenDescriptor);
     }
-    for (_i, part) in parts.iter().enumerate() {
+    for part in parts.iter() {
         if part.is_empty() {
             return Err(LauncherError::MavenDescriptor);
         }

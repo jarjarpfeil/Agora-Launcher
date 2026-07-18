@@ -58,7 +58,7 @@ pub fn export_server_environment(
                 code: "ERR_EXPORT_FILENAME".into(),
                 message: "Missing file name".into(),
             })?;
-            std::fs::copy(&path, dest_mods.join(&fname)).map_err(|e| LauncherError::Generic {
+            std::fs::copy(&path, dest_mods.join(fname)).map_err(|e| LauncherError::Generic {
                 code: "ERR_EXPORT_COPY".into(),
                 message: format!("Failed to copy mod: {e}"),
             })?;
@@ -120,7 +120,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> LauncherResult<()> {
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst.join(entry.file_name()))?;
         } else {
-            std::fs::copy(&entry.path(), &dst.join(entry.file_name())).map_err(|e| {
+            std::fs::copy(entry.path(), dst.join(entry.file_name())).map_err(|e| {
                 LauncherError::Generic {
                     code: "ERR_EXPORT_COPY".into(),
                     message: format!("copy {}: {e}", entry.path().display()),
@@ -163,8 +163,8 @@ fn is_client_only(jar_path: &Path) -> bool {
                     let t = line.trim();
                     if let Some(rest) = t.strip_prefix("side") {
                         let rest = rest.trim_start();
-                        if rest.starts_with('=') {
-                            let val = rest[1..].trim().trim_matches('"').trim_matches('\'');
+                        if let Some(stripped) = rest.strip_prefix('=') {
+                            let val = stripped.trim().trim_matches('"').trim_matches('\'');
                             if val.eq_ignore_ascii_case("CLIENT") {
                                 return true;
                             }
@@ -207,7 +207,7 @@ pub fn generate_start_script(loader: &str, mc_version: &str, heap_mb: i64) -> (S
 }
 
 pub fn download_server_loader(
-    client: &reqwest::Client,
+    _client: &reqwest::Client,
     dest_dir: &Path,
     loader: &str,
     mc_version: &str,
@@ -241,31 +241,12 @@ pub fn download_server_loader(
 
     let dest_path = dest_dir.join(jar_name);
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| LauncherError::Generic {
-        code: "ERR_EXPORT_RUNTIME".into(),
-        message: format!("Failed to create runtime: {e}"),
-    })?;
-
-    let bytes = rt.block_on(async {
-        let resp = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_EXPORT_DOWNLOAD".into(),
-                message: format!("Download failed: {e}"),
-            })?;
-        if !resp.status().is_success() {
-            return Err(LauncherError::Generic {
-                code: "ERR_EXPORT_HTTP".into(),
-                message: format!("Download returned {}", resp.status()),
-            });
-        }
-        resp.bytes().await.map_err(|e| LauncherError::Generic {
-            code: "ERR_EXPORT_READ_BODY".into(),
-            message: format!("Read body: {e}"),
-        })
-    })?;
+    let clients = crate::http_client::HttpClients::new()?;
+    let bytes = crate::http_client::blocking_checked_get_bytes(
+        &clients,
+        crate::http_client::ClientCategory::Loader,
+        &url,
+    )?;
 
     std::fs::write(&dest_path, &bytes).map_err(|e| LauncherError::Generic {
         code: "ERR_EXPORT_WRITE".into(),

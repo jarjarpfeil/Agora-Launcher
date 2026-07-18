@@ -1,6 +1,6 @@
 use crate::error::{LauncherError, LauncherResult};
+use crate::models::InstanceManifest;
 use crate::paths;
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
@@ -476,22 +476,28 @@ pub fn import_mrpack(
             }
         }
 
-        let manifest = serde_json::json!({
-            "instance_id": target.instance_id.clone(),
-            "name": name,
-            "minecraft_version": minecraft_version,
-            "loader": loader,
-            "loader_version": loader_version,
-            "is_modpack": true,
-            "is_locked": false,
-            "created_at": Utc::now().to_rfc3339(),
-        });
+        let manifest = InstanceManifest {
+            instance_id: target.instance_id.clone(),
+            name: name.clone(),
+            minecraft_version: minecraft_version.clone(),
+            loader: loader.clone(),
+            loader_version: loader_version.clone(),
+            is_locked: false,
+            created_from_pack: None,
+            mods: vec![],
+            resourcepacks: vec![],
+            shaders: vec![],
+            datapacks: vec![],
+            worlds: vec![],
+            user_preferences: serde_json::json!({}),
+        };
         let manifest_path = target_dir.join("instance_manifest.json");
-        fs::write(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .map_err(|e| LauncherError::Generic {
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|e| LauncherError::Generic {
+                code: "ERR_IMPORT_SERIALIZE".into(),
+                message: format!("Cannot serialize manifest: {e}"),
+            })?;
+        fs::write(&manifest_path, manifest_json).map_err(|e| LauncherError::Generic {
             code: "ERR_IMPORT_WRITE".into(),
             message: format!("Cannot write manifest: {e}"),
         })?;
@@ -554,69 +560,27 @@ fn parse_mrpack_deps(deps: &Option<serde_json::Value>) -> (String, String, Strin
 }
 
 fn download_bytes(url: &str) -> LauncherResult<Vec<u8>> {
-    let url = validate_mrpack_download_url(url)?;
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_IMPORT_RUNTIME".into(),
-            message: format!("Cannot build runtime: {e}"),
-        })?;
-    rt.block_on(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if let Some(host) = attempt.url().host_str() {
-                    if MRPACK_DOWNLOAD_ALLOWLIST.contains(&host)
-                        && attempt.url().scheme() == "https"
-                        && attempt.url().port_or_known_default() == Some(443)
-                    {
-                        return attempt.follow();
-                    }
-                }
-                attempt.stop()
-            }))
-            .build()
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_IMPORT_HTTP_CLIENT".into(),
-                message: format!("Could not create import download client: {e}"),
-            })?;
-        let mut resp = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|e| LauncherError::Generic {
-                code: "ERR_IMPORT_DOWNLOAD".into(),
-                message: format!("Download failed: {e}"),
-            })?;
-        if !resp.status().is_success() {
-            return Err(LauncherError::Generic {
-                code: "ERR_IMPORT_HTTP".into(),
-                message: format!("HTTP {}", resp.status()),
-            });
-        }
-        if resp.content_length().unwrap_or(0) > MAX_MRPACK_FILE_BYTES as u64 {
-            return Err(import_error(
-                "ERR_IMPORT_FILE_TOO_LARGE",
-                "Imported pack file exceeds the 500MB safety limit.",
-            ));
-        }
-
-        let mut bytes = Vec::new();
-        while let Some(chunk) = resp.chunk().await.map_err(|e| LauncherError::Generic {
-            code: "ERR_IMPORT_READ_BODY".into(),
-            message: format!("Read body failed: {e}"),
-        })? {
-            if bytes.len().saturating_add(chunk.len()) > MAX_MRPACK_FILE_BYTES {
-                return Err(import_error(
-                    "ERR_IMPORT_FILE_TOO_LARGE",
-                    "Imported pack file exceeds the 500MB safety limit.",
-                ));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(bytes)
-    })
+    let _validated = validate_mrpack_download_url(url)?;
+    // Create a local HttpClients for the download. Uses the Modrinth/GitHub
+    // category allowlists (which cover all MRPACK_DOWNLOAD_ALLOWLIST hosts)
+    // with the checked API's redirect re-validation and size enforcement.
+    let clients = crate::http_client::HttpClients::new().map_err(|e| LauncherError::Generic {
+        code: "ERR_IMPORT_HTTP_CLIENT".into(),
+        message: format!("Could not create download client: {e}"),
+    })?;
+    let category = if url.contains("modrinth.com") {
+        crate::http_client::ClientCategory::Modrinth
+    } else {
+        crate::http_client::ClientCategory::GitHub
+    };
+    let bytes = crate::http_client::blocking_checked_get_bytes(&clients, category, url)?;
+    if bytes.len() > MAX_MRPACK_FILE_BYTES {
+        return Err(import_error(
+            "ERR_IMPORT_FILE_TOO_LARGE",
+            "Imported pack file exceeds the 500MB safety limit.",
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Import an instance from a Prism/MMC instance zip.
@@ -727,22 +691,28 @@ pub fn import_prism_zip(
             }
         }
 
-        let manifest = serde_json::json!({
-            "instance_id": target.instance_id.clone(),
-            "name": name,
-            "minecraft_version": minecraft_version,
-            "loader": loader,
-            "loader_version": loader_version,
-            "is_modpack": false,
-            "is_locked": false,
-            "created_at": Utc::now().to_rfc3339(),
-        });
+        let manifest = InstanceManifest {
+            instance_id: target.instance_id.clone(),
+            name: name.clone(),
+            minecraft_version: minecraft_version.clone(),
+            loader: loader.clone(),
+            loader_version: loader_version.clone(),
+            is_locked: false,
+            created_from_pack: None,
+            mods: vec![],
+            resourcepacks: vec![],
+            shaders: vec![],
+            datapacks: vec![],
+            worlds: vec![],
+            user_preferences: serde_json::json!({}),
+        };
         let manifest_path = target_dir.join("instance_manifest.json");
-        fs::write(
-            &manifest_path,
-            serde_json::to_string_pretty(&manifest).unwrap(),
-        )
-        .map_err(|e| LauncherError::Generic {
+        let manifest_json =
+            serde_json::to_string_pretty(&manifest).map_err(|e| LauncherError::Generic {
+                code: "ERR_IMPORT_SERIALIZE".into(),
+                message: format!("Cannot serialize manifest: {e}"),
+            })?;
+        fs::write(&manifest_path, manifest_json).map_err(|e| LauncherError::Generic {
             code: "ERR_IMPORT_WRITE".into(),
             message: format!("Cannot write manifest: {e}"),
         })?;
@@ -899,21 +869,27 @@ pub fn import_directory(
 
         let manifest_path = target.staging_dir.join("instance_manifest.json");
         if !manifest_path.exists() {
-            let manifest = serde_json::json!({
-                "instance_id": target.instance_id.clone(),
-                "name": name,
-                "minecraft_version": "",
-                "loader": "",
-                "loader_version": "",
-                "is_modpack": false,
-                "is_locked": false,
-                "created_at": Utc::now().to_rfc3339(),
-            });
-            fs::write(
-                &manifest_path,
-                serde_json::to_string_pretty(&manifest).unwrap(),
-            )
-            .map_err(|e| LauncherError::Generic {
+            let manifest = InstanceManifest {
+                instance_id: target.instance_id.clone(),
+                name: name.clone(),
+                minecraft_version: String::new(),
+                loader: String::new(),
+                loader_version: String::new(),
+                is_locked: false,
+                created_from_pack: None,
+                mods: vec![],
+                resourcepacks: vec![],
+                shaders: vec![],
+                datapacks: vec![],
+                worlds: vec![],
+                user_preferences: serde_json::json!({}),
+            };
+            let manifest_json =
+                serde_json::to_string_pretty(&manifest).map_err(|e| LauncherError::Generic {
+                    code: "ERR_IMPORT_SERIALIZE".into(),
+                    message: format!("Cannot serialize manifest: {e}"),
+                })?;
+            fs::write(&manifest_path, manifest_json).map_err(|e| LauncherError::Generic {
                 code: "ERR_IMPORT_WRITE".into(),
                 message: format!("Cannot write manifest: {e}"),
             })?;
@@ -1306,5 +1282,81 @@ mod tests {
         assert!(mc.is_empty());
         assert!(loader.is_empty());
         assert!(lv.is_empty());
+    }
+
+    #[test]
+    fn test_import_produces_launchable_instance() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("launchable-instance");
+        fs::create_dir_all(src.join("mods")).unwrap();
+        fs::write(src.join("mods").join("mod.jar"), b"fake mod").unwrap();
+
+        let instances_root = tmp.path().join("instances");
+        let result = import_directory(&src, &instances_root, false).unwrap();
+        assert_eq!(result.instance_id, "launchable-instance");
+
+        let manifest_path = instances_root
+            .join("launchable-instance")
+            .join("instance_manifest.json");
+        assert!(manifest_path.exists());
+
+        let manifest: InstanceManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest.instance_id, "launchable-instance");
+        assert_eq!(manifest.name, "launchable-instance");
+        assert!(manifest.mods.is_empty());
+        assert!(manifest.resourcepacks.is_empty());
+        assert!(manifest.shaders.is_empty());
+        assert!(manifest.datapacks.is_empty());
+        assert!(manifest.worlds.is_empty());
+        assert!(!manifest.is_locked);
+        assert_eq!(manifest.created_from_pack, None);
+    }
+
+    #[test]
+    fn test_import_manifest_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mrpack_path = tmp.path().join("rt-pack.mrpack");
+        let file = fs::File::create(&mrpack_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        writer
+            .start_file("modrinth.index.json", zip::write::FileOptions::default())
+            .unwrap();
+        writer
+            .write_all(
+                br#"{"name":"rt-pack","dependencies":{"minecraft":"1.21","fabric-loader":"0.16.0"},"files":[]}"#,
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let instances_root = tmp.path().join("rt-instances");
+        let result = import_mrpack(&mrpack_path, &instances_root, false).unwrap();
+        assert_eq!(result.instance_id, "rt-pack");
+        assert_eq!(result.minecraft_version, "1.21");
+        assert_eq!(result.loader, "fabric");
+        assert_eq!(result.loader_version, "0.16.0");
+
+        let manifest_path = instances_root
+            .join("rt-pack")
+            .join("instance_manifest.json");
+        let manifest: InstanceManifest =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+
+        let serialized = serde_json::to_string_pretty(&manifest).unwrap();
+        let deserialized: InstanceManifest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.instance_id, manifest.instance_id);
+        assert_eq!(deserialized.name, manifest.name);
+        assert_eq!(deserialized.minecraft_version, manifest.minecraft_version);
+        assert_eq!(deserialized.loader, manifest.loader);
+        assert_eq!(deserialized.loader_version, manifest.loader_version);
+        assert_eq!(deserialized.is_locked, manifest.is_locked);
+        assert_eq!(deserialized.mods.len(), manifest.mods.len());
+        assert_eq!(
+            deserialized.resourcepacks.len(),
+            manifest.resourcepacks.len()
+        );
+        assert_eq!(deserialized.shaders.len(), manifest.shaders.len());
+        assert_eq!(deserialized.datapacks.len(), manifest.datapacks.len());
+        assert_eq!(deserialized.worlds.len(), manifest.worlds.len());
     }
 }

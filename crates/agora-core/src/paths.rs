@@ -1,3 +1,10 @@
+//! Path helpers for the Agora launcher.
+//!
+//! Most functions here are **delegating compatibility wrappers** that forward
+//! to [`crate::app_paths::AppPaths`]. New code should use `AppPaths` directly
+//! to avoid redundant root-path arguments.
+
+use crate::app_paths::AppPaths;
 use std::path::{Path, PathBuf};
 
 /// Resolve the official Minecraft data directory for the current OS.
@@ -26,6 +33,10 @@ pub fn minecraft_dir() -> Option<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Legacy wrappers delegating to AppPaths
+// ---------------------------------------------------------------------------
+
 /// Agora-owned Minecraft runtime root — shared content for direct launch.
 ///
 /// All shared artifacts (vanilla client JARs, Mojang version JSONs, loader
@@ -36,40 +47,37 @@ pub fn minecraft_dir() -> Option<PathBuf> {
 ///
 /// This is a pure path function — it does not create directories.
 pub fn minecraft_runtime_root(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("minecraft-runtime")
+    AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_runtime_root()
 }
 
 /// Path helper for `minecraft-runtime/versions/<version>/<version>.json`.
-pub fn minecraft_version_json(app_data_dir: &Path, version_id: &str) -> PathBuf {
-    minecraft_runtime_root(app_data_dir)
-        .join("versions")
-        .join(version_id)
-        .join(format!("{version_id}.json"))
+pub fn minecraft_version_json(app_data_dir: &Path, version_id: &str) -> anyhow::Result<PathBuf> {
+    Ok(AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_version_json(version_id)?)
 }
 
 /// Path helper for `minecraft-runtime/libraries/`.
 pub fn minecraft_libraries_dir(app_data_dir: &Path) -> PathBuf {
-    minecraft_runtime_root(app_data_dir).join("libraries")
+    AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_libraries_dir()
 }
 
 /// Path helper for `minecraft-runtime/assets/`.
 pub fn minecraft_assets_dir(app_data_dir: &Path) -> PathBuf {
-    minecraft_runtime_root(app_data_dir).join("assets")
+    AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_assets_dir()
 }
 
 /// Path helper for `minecraft-runtime/logging/`.
 pub fn minecraft_logging_dir(app_data_dir: &Path) -> PathBuf {
-    minecraft_runtime_root(app_data_dir).join("logging")
+    AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_logging_dir()
 }
 
 /// Path helper for `minecraft-runtime/natives/`.
 pub fn minecraft_natives_dir(app_data_dir: &Path) -> PathBuf {
-    minecraft_runtime_root(app_data_dir).join("natives")
+    AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_natives_dir()
 }
 
 /// Path helper for `minecraft-runtime/launcher_profiles.json`.
 pub fn minecraft_launcher_profiles_path(app_data_dir: &Path) -> PathBuf {
-    minecraft_runtime_root(app_data_dir).join("launcher_profiles.json")
+    AppPaths::from_root(app_data_dir.to_path_buf()).minecraft_launcher_profiles()
 }
 
 /// Path to `launcher_profiles.json` inside the official Minecraft directory.
@@ -78,38 +86,35 @@ pub fn launcher_profiles_path() -> Option<PathBuf> {
 }
 
 /// The root directory holding all user instances.
-pub fn instances_dir(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    let dir = app_data_dir.join("instances");
+pub fn instances_dir(app_data_dir: &Path) -> anyhow::Result<PathBuf> {
+    let dir = AppPaths::from_root(app_data_dir.to_path_buf()).instances_root();
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
 
 /// Directory for a single instance (e.g. `instances/<instance_id>`).
-pub fn instance_dir(app_data_dir: &PathBuf, instance_id: &str) -> anyhow::Result<PathBuf> {
-    Ok(instances_dir(app_data_dir)?.join(sanitize_id(instance_id)))
+pub fn instance_dir(app_data_dir: &Path, instance_id: &str) -> anyhow::Result<PathBuf> {
+    Ok(AppPaths::from_root(app_data_dir.to_path_buf()).instance_dir(instance_id)?)
 }
 
 /// Path to an instance's `instance_manifest.json`.
-pub fn instance_manifest_path(
-    app_data_dir: &PathBuf,
-    instance_id: &str,
-) -> anyhow::Result<PathBuf> {
-    Ok(instance_dir(app_data_dir, instance_id)?.join("instance_manifest.json"))
+pub fn instance_manifest_path(app_data_dir: &Path, instance_id: &str) -> anyhow::Result<PathBuf> {
+    Ok(AppPaths::from_root(app_data_dir.to_path_buf()).instance_manifest(instance_id)?)
 }
 
 /// Path to the cached read-only registry database.
-pub fn registry_db_path(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    Ok(app_data_dir.join("registry.db"))
+pub fn registry_db_path(app_data_dir: &Path) -> anyhow::Result<PathBuf> {
+    Ok(AppPaths::from_root(app_data_dir.to_path_buf()).registry_db())
 }
 
 /// Path to the cached registry.db Ed25519 signature file.
-pub fn registry_sig_path(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    Ok(app_data_dir.join("registry.db.sig"))
+pub fn registry_sig_path(app_data_dir: &Path) -> anyhow::Result<PathBuf> {
+    Ok(AppPaths::from_root(app_data_dir.to_path_buf()).registry_signature())
 }
 
 /// Path to the mutable local state database.
-pub fn local_state_db_path(app_data_dir: &PathBuf) -> anyhow::Result<PathBuf> {
-    Ok(app_data_dir.join("local_state.db"))
+pub fn local_state_db_path(app_data_dir: &Path) -> anyhow::Result<PathBuf> {
+    Ok(AppPaths::from_root(app_data_dir.to_path_buf()).local_state_db())
 }
 
 /// Normalize an instance id so it is safe to use as a directory name.

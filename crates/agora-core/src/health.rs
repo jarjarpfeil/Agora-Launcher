@@ -227,7 +227,7 @@ pub fn health(
                 let canonical = aliases.resolve_or_self(id).to_lowercase();
                 // Replace an unresolved placeholder, but never overwrite a
                 // concrete version with weaker metadata.
-                if m.get(&canonical).is_none()
+                if !m.contains_key(&canonical)
                     || matches!(m.get(&canonical), Some(existing) if existing.starts_with("${"))
                 {
                     m.insert(canonical, ver.clone());
@@ -238,7 +238,7 @@ pub fn health(
                     continue;
                 };
                 let canonical = aliases.resolve_or_self(&provided.mod_id).to_lowercase();
-                if m.get(&canonical).is_none()
+                if !m.contains_key(&canonical)
                     || matches!(m.get(&canonical), Some(existing) if existing.starts_with("${"))
                 {
                     m.insert(canonical, ver.clone());

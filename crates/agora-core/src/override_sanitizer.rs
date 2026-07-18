@@ -125,7 +125,7 @@ pub fn extract_overrides(zip_path: &Path, dest_dir: &Path) -> LauncherResult<Ext
             Some(name) => name,
             None => {
                 // Path traversal attempt — abort entire extraction.
-                cleanup_partial(&dest_dir, &extracted);
+                cleanup_partial(dest_dir, &extracted);
                 return Err(LauncherError::Generic {
                     code: "ERR_ZIP_SLIP".to_string(),
                     message: format!(
@@ -149,7 +149,7 @@ pub fn extract_overrides(zip_path: &Path, dest_dir: &Path) -> LauncherResult<Ext
 
         // Check banned extensions.
         if has_banned_extension(&safe_name) {
-            cleanup_partial(&dest_dir, &extracted);
+            cleanup_partial(dest_dir, &extracted);
             return Err(LauncherError::Generic {
                 code: "ERR_SECURITY_VIOLATION".to_string(),
                 message: format!(
@@ -164,7 +164,7 @@ pub fn extract_overrides(zip_path: &Path, dest_dir: &Path) -> LauncherResult<Ext
         // Build the destination path and verify it's inside the sandbox.
         let dest_path = dest_dir.join(&safe_name);
         if !dest_path.starts_with(dest_dir) {
-            cleanup_partial(&dest_dir, &extracted);
+            cleanup_partial(dest_dir, &extracted);
             return Err(LauncherError::Generic {
                 code: "ERR_ZIP_SLIP".to_string(),
                 message: format!(
@@ -196,7 +196,7 @@ pub fn extract_overrides(zip_path: &Path, dest_dir: &Path) -> LauncherResult<Ext
 
         // Mid-stream check: abort if actual bytes exceed limit.
         if bytes_written > MAX_EXTRACTED_SIZE {
-            cleanup_partial(&dest_dir, &extracted);
+            cleanup_partial(dest_dir, &extracted);
             return Err(LauncherError::Generic {
                 code: "ERR_ZIP_BOMB".to_string(),
                 message: "Actual extracted size exceeds the 2GB limit. Aborting.".to_string(),

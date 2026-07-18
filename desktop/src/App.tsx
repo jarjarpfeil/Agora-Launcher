@@ -257,7 +257,7 @@ export default function App() {
           onOpenCommandPalette={() => setCommandPaletteOpen(true)}
         />
 
-        {(processState.phase === 'awaiting-decision' || processState.phase === 'launching') && processState.healthReport && (
+        {processState.phase === 'failed' && processState.healthReport && (
           <HealthDialog
             instanceId={processState.instanceId!}
             instanceName={processState.instanceId!}

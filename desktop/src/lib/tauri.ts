@@ -479,6 +479,25 @@ export const launchInstance = (instanceId: string) =>
 export const launchInstanceDirect = (instanceId: string) =>
   invoke<number>('launch_instance_direct', { instanceId });
 
+/**
+ * Coarse recovery action for launch_instance_with_recovery.
+ * Mirrors Rust `LaunchRecoveryAction` serde (externally-tagged enum).
+ */
+export type LaunchRecoveryAction =
+  | { type: 'None' }
+  | { type: 'ProvisionJava'; major: number }
+  | { type: 'RepairLoader' };
+
+/**
+ * Launch an instance with an optional recovery action performed before the
+ * launch. The recovery action runs in the same backend operation; if it fails
+ * the launch is aborted. Returns the PID on success.
+ */
+export const launchInstanceWithRecovery = (
+  instanceId: string,
+  action: LaunchRecoveryAction,
+) => invoke<number>('launch_instance_with_recovery', { instanceId, action });
+
 export const killProcess = (pid: number) =>
   invoke<void>('kill_process', { pid });
 
@@ -1070,13 +1089,6 @@ export interface AiContext {
   suspects: string | null;
 }
 
-export interface AvailableModel {
-    id: string;
-    name: string;
-    description: string;
-    free_tier: boolean;
-}
-
 export const aiChat = (
   messages: ChatMessage[],
   context?: AiContext | null,
@@ -1085,12 +1097,6 @@ export const aiChat = (
     messages,
     context: context ?? null,
   });
-
-export const aiGetModels = () =>
-  invoke<AvailableModel[]>('ai_get_models');
-
-export const aiGetDefaultModel = () =>
-  invoke<string>('ai_get_default_model');
 
 export const getWindowsAccentColor = () =>
   invoke<string | null>('get_windows_accent_color');
@@ -1273,6 +1279,9 @@ export const deleteLoadoutProfile = (instanceId: string, profileName: string) =>
 
 export const importInstance = (sourcePath: string, symlinkSaves: boolean) =>
   invoke<ImportResult>('import_instance', { sourcePath, symlinkSaves });
+
+export const cancelOperation = (operationId: string) =>
+  invoke<boolean>('cancel_operation', { operationId });
 
 export const detectLaunchers = () =>
   invoke<DetectedLauncher[]>('detect_launchers');

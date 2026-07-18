@@ -357,8 +357,8 @@ mod tests {
             let result = resolve_launcher_path(Some(fake.to_str().unwrap()));
             // It should fall through to auto-discovery. In CI there's no launcher,
             // but on a dev machine there may be one. Either way it should not panic.
-            if result.is_err() {
-                match result.unwrap_err() {
+            if let Err(err) = result {
+                match err {
                     LauncherError::MojangNotFound => {} // expected in CI
                     _ => panic!("unexpected error variant"),
                 }

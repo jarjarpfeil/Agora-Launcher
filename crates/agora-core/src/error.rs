@@ -33,6 +33,8 @@ pub enum LauncherError {
     MojangNotFound,
     /// ERR_LAUNCH_FAILED — Could not start Minecraft.
     LaunchFailed,
+    /// ERR_GAME_CRASH — The game process exited abnormally.
+    GameCrash,
     /// ERR_LOCAL_STATE_FAILED — Local state database error.
     LocalStateFailed,
     /// ERR_INSTANCE_CREATE_FAILED — Could not create instance.
@@ -106,6 +108,10 @@ pub enum LauncherError {
     JavaRuntimeDownloadDisabled { major: u32, component: String },
     /// ERR_MAVEN_DESCRIPTOR — A Maven descriptor string is malformed or unsafe.
     MavenDescriptor,
+    /// ERR_MIGRATION_CONFLICT — Data migration aborted due to conflicting files or databases.
+    MigrationConflict { message: String },
+    /// ERR_MIGRATION_FAILED — Data migration failed during copy, backup, or promotion.
+    MigrationFailed { message: String },
     /// ERR_PROCESS_CAPTURE_FAILED — Could not capture OS identity for a just‑spawned
     /// process. The child was killed and the launch aborted.
     ProcessCaptureFailed { pid: u32, detail: String },
@@ -113,6 +119,9 @@ pub enum LauncherError {
     /// identity (PID was reused, the process died, or the executable changed).
     /// The stale record has been detached and the caller should treat it as idle.
     ProcessStale { pid: u32, detail: String },
+    /// ERR_USER_DECISION_REQUIRED — Noninteractive CLI has unresolved choices
+    /// requiring user input (conflicts, optional dependencies, etc.).
+    UserDecisionRequired,
     /// Catch-all for errors that do not yet have a dedicated code.
     Generic { code: String, message: String },
 }
@@ -138,6 +147,7 @@ impl LauncherError {
             LauncherError::SandboxUnavailable => "ERR_SANDBOX_UNAVAILABLE".to_string(),
             LauncherError::MojangNotFound => "ERR_MOJANG_NOT_FOUND".to_string(),
             LauncherError::LaunchFailed => "ERR_LAUNCH_FAILED".to_string(),
+            LauncherError::GameCrash => "ERR_GAME_CRASH".to_string(),
             LauncherError::LocalStateFailed => "ERR_LOCAL_STATE_FAILED".to_string(),
             LauncherError::InstanceCreateFailed => "ERR_INSTANCE_CREATE_FAILED".to_string(),
             LauncherError::ProfileWriteFailed => "ERR_PROFILE_WRITE_FAILED".to_string(),
@@ -172,8 +182,11 @@ impl LauncherError {
             LauncherError::NetworkMsaDisabled => "ERR_NETWORK_MSA_DISABLED".to_string(),
             LauncherError::NetworkJavaDisabled => "ERR_NETWORK_JAVA_DISABLED".to_string(),
             LauncherError::MavenDescriptor => "ERR_MAVEN_DESCRIPTOR".to_string(),
+            LauncherError::MigrationConflict { .. } => "ERR_MIGRATION_CONFLICT".to_string(),
+            LauncherError::MigrationFailed { .. } => "ERR_MIGRATION_FAILED".to_string(),
             LauncherError::ProcessCaptureFailed { .. } => "ERR_PROCESS_CAPTURE_FAILED".to_string(),
             LauncherError::ProcessStale { .. } => "ERR_PROCESS_STALE".to_string(),
+            LauncherError::UserDecisionRequired => "ERR_USER_DECISION_REQUIRED".to_string(),
             LauncherError::JavaRuntimeCancelled { .. } => "ERR_JAVA_RUNTIME_CANCELLED".to_string(),
             LauncherError::JavaRuntimeDownloadDisabled { .. } => {
                 "ERR_JAVA_RUNTIME_DOWNLOAD_DISABLED".to_string()
@@ -255,6 +268,12 @@ impl std::fmt::Display for LauncherError {
             }
             LauncherError::LaunchFailed => {
                 write!(f, "Could not start Minecraft. Check the logs for details.")
+            }
+            LauncherError::GameCrash => {
+                write!(
+                    f,
+                    "The game exited with a crash. Check crash reports for details."
+                )
             }
             LauncherError::LocalStateFailed => {
                 write!(f, "Local state database error. The app may be misconfigured or out of disk space.")
@@ -384,11 +403,20 @@ impl std::fmt::Display for LauncherError {
             LauncherError::MavenDescriptor => {
                 write!(f, "Invalid Maven descriptor string.")
             }
+            LauncherError::MigrationConflict { message } => {
+                write!(f, "Migration conflict: {message}")
+            }
+            LauncherError::MigrationFailed { message } => {
+                write!(f, "Migration failed: {message}")
+            }
             LauncherError::ProcessCaptureFailed { pid, detail } => {
                 write!(f, "Could not capture OS identity for PID {pid}: {detail}")
             }
             LauncherError::ProcessStale { pid, detail } => {
                 write!(f, "Process PID {pid} is stale: {detail}")
+            }
+            LauncherError::UserDecisionRequired => {
+                write!(f, "This operation requires user input (conflicts, optional dependencies). Use --yes, --replace-conflicts, or --include-optional to resolve noninteractively.")
             }
             LauncherError::JavaRuntimeCancelled { major, component } => {
                 write!(
@@ -612,6 +640,7 @@ mod tests {
             LauncherError::SandboxUnavailable,
             LauncherError::MojangNotFound,
             LauncherError::LaunchFailed,
+            LauncherError::GameCrash,
             LauncherError::LocalStateFailed,
             LauncherError::InstanceCreateFailed,
             LauncherError::ProfileWriteFailed,

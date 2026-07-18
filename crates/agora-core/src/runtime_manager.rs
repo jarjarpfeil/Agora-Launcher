@@ -24,7 +24,9 @@
 
 use crate::error::{LauncherError, LauncherResult};
 use crate::java::{self, JavaInstallation, JavaSource};
+use crate::lock_manager::{LockManager, LockResource};
 use crate::network::{NetworkCategory, NetworkPolicy};
+use crate::operation_manager::OpHandle;
 use crate::runtime_catalog::{RuntimeCatalog, RuntimeCatalogEntry};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -85,12 +87,7 @@ const AGGREGATE_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
 // --- Download timeouts ---
 
-/// Maximum time to wait for a response headers.
-const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Maximum time for the full download stream.
-const DOWNLOAD_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-
+// Maximum time to wait for response headers and full download stream.
 // --- Redirect allowlist for runtime downloads ---
 
 const ALLOWED_DOWNLOAD_HOSTS: &[&str] = &[
@@ -257,6 +254,32 @@ impl RuntimeProgress for NoopProgress {
     }
 }
 
+/// Adapter that bridges an [`OpHandle`] to the [`RuntimeProgress`] trait.
+///
+/// Maps the handle's [`CancellationToken`] for cancellation and forwards
+/// percentage updates to [`OpHandle::set_progress`].
+pub struct OpHandleProgress<'a> {
+    handle: &'a OpHandle,
+}
+
+impl<'a> OpHandleProgress<'a> {
+    pub fn new(handle: &'a OpHandle) -> Self {
+        Self { handle }
+    }
+}
+
+impl RuntimeProgress for OpHandleProgress<'_> {
+    fn on_progress(&self, _message: &str, percent: Option<f64>) {
+        if let Some(p) = percent {
+            self.handle.set_progress(p / 100.0);
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.handle.token().is_cancelled()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -312,7 +335,16 @@ pub fn ensure_runtime(
     catalog: &RuntimeCatalog,
     network_policy: &NetworkPolicy,
     progress: Option<&dyn RuntimeProgress>,
+    lock_manager: Option<&LockManager>,
 ) -> LauncherResult<JavaInstallation> {
+    // Acquire cross-process JavaMajor lock to prevent concurrent provisioning
+    // of the same major version from multiple processes.
+    let _java_lock = if let Some(lm) = lock_manager {
+        Some(lm.acquire(LockResource::JavaMajor(major), "java-provision")?)
+    } else {
+        None
+    };
+
     let progress = progress.unwrap_or(&NoopProgress);
 
     // 1. Look up catalog entry for current platform.
@@ -422,15 +454,15 @@ pub fn ensure_runtime(
     };
 
     // Locate the java executable in the staging directory.
-    let staged_java = if extraction_result.is_ok() {
+    let staged_java = if let Err(e) = extraction_result {
+        return Err(e);
+    } else {
         // Search for the java binary inside staging.
         find_java_in_staging(&staging, &entry).ok_or_else(|| LauncherError::Generic {
             code: "ERR_JAVA_BINARY_NOT_FOUND".into(),
             message: "Extracted archive does not contain a Java executable at the expected path."
                 .into(),
         })?
-    } else {
-        return Err(extraction_result.unwrap_err());
     };
 
     // 6. Verify the extracted java works and matches major version.
@@ -706,30 +738,12 @@ fn download_archive_verified(
     // Validate URL first.
     validate_runtime_url(url)?;
 
-    let client = reqwest::blocking::Client::builder()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() > 10 {
-                return attempt.stop();
-            }
-            if is_allowed_redirect_target(attempt.url()) {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        }))
-        .timeout(DOWNLOAD_STREAM_TIMEOUT)
-        .user_agent("AgoraRuntimeManager/1.0")
-        .build()
-        .map_err(|e| LauncherError::Generic {
-            code: "ERR_NETWORK".into(),
-            message: format!("Failed to build download client: {e}"),
-        })?;
-
-    let response = client
-        .get(url)
-        .timeout(DOWNLOAD_TIMEOUT)
-        .send()
-        .map_err(|_| LauncherError::NetworkOffline)?;
+    let clients = crate::http_client::HttpClients::new()?;
+    let response = crate::http_client::blocking_checked_request(
+        &clients,
+        crate::http_client::ClientCategory::JavaRuntime,
+        url,
+    )?;
 
     if !response.status().is_success() {
         return Err(LauncherError::Generic {
@@ -1816,7 +1830,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> LauncherResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_catalog::RuntimeCatalog;
+    use crate::runtime_catalog::{normalize_arch, normalize_os, RuntimeCatalog};
 
     /// A valid catalog for testing (loaded at compile time).
     fn test_catalog() -> RuntimeCatalog {
@@ -2330,7 +2344,7 @@ mod tests {
         let policy =
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result.is_ok(), "ensure_runtime failed: {:?}", result.err());
 
         let inst = result.unwrap();
@@ -2363,7 +2377,7 @@ mod tests {
         let policy =
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result.is_ok(), "ensure_runtime failed: {:?}", result.err());
 
         let inst = result.unwrap();
@@ -2410,12 +2424,12 @@ mod tests {
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
         // First call: extract and install.
-        let result1 = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result1 = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result1.is_ok(), "first install failed: {:?}", result1.err());
         let inst1 = result1.unwrap();
 
         // Second call: should be a cache hit.
-        let result2 = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result2 = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result2.is_ok(), "cache hit failed: {:?}", result2.err());
         let inst2 = result2.unwrap();
         assert_eq!(inst1.path, inst2.path);
@@ -2441,7 +2455,7 @@ mod tests {
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
         // Install once successfully.
-        let _ = ensure_runtime(dir.path(), 21, &catalog, &policy, None).unwrap();
+        let _ = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None).unwrap();
 
         // Now corrupt the archive cache file.
         let cache_dir = dir.path().join(ARCHIVE_CACHE_DIR);
@@ -2450,7 +2464,7 @@ mod tests {
 
         // Second call: cache hash won't match, but the existing runtime is
         // still healthy (receipt + java hash check). Should recover.
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(
             result.is_ok(),
             "should recover from corrupt cache: {:?}",
@@ -2469,7 +2483,7 @@ mod tests {
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
         // Install once.
-        let _ = ensure_runtime(dir.path(), 21, &catalog, &policy, None).unwrap();
+        let _ = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None).unwrap();
 
         // Tamper the java binary.
         let entry_path = managed_entry_path(dir.path(), &entry);
@@ -2483,7 +2497,7 @@ mod tests {
         // but extraction + mock succeeds.
         // However the extraction removes the old runtime dir first.
         // Let's just verify it can reinstall.
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(
             result.is_ok(),
             "reinstall after tamper failed: {:?}",
@@ -2755,8 +2769,8 @@ mod tests {
             write_octal(&mut h, 136, 12, 0); // mtime
                                              // chksum at 148 (set to spaces first)
                                              // chksum at 148 (7 octal digits + NUL)
-            for i in 148..156 {
-                h[i] = b' ';
+            for byte in h[148..156].iter_mut() {
+                *byte = b' ';
             }
             // typeflag at 156: '0' for regular
             h[156] = b'0';
@@ -2781,7 +2795,7 @@ mod tests {
         // File content (padded to 512 block)
         tar_bytes.extend_from_slice(b"data");
         // Pad to 512
-        let pad = 512 - (4 % 512);
+        let pad = 512 - 4;
         if pad != 512 {
             tar_bytes.resize(tar_bytes.len() + pad, 0);
         }
@@ -2832,7 +2846,7 @@ mod tests {
 
         let entry_path = managed_entry_path(dir.path(), &entry);
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result.is_err(), "version mismatch should error");
         assert_no_staging_siblings(&entry_path);
     }
@@ -2852,7 +2866,7 @@ mod tests {
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
         let entry_path = managed_entry_path(dir.path(), &entry);
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result.is_err(), "inspection failure should error");
         assert_no_staging_siblings(&entry_path);
     }
@@ -2886,7 +2900,7 @@ mod tests {
         let marker = entry_path.join("previous-runtime-marker");
         std::fs::write(&marker, b"working previous runtime").unwrap();
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result.is_err(), "post-promotion verification should fail");
         assert!(marker.is_file(), "previous runtime must be restored");
         assert_no_staging_siblings(&entry_path);
@@ -2906,7 +2920,7 @@ mod tests {
         let policy =
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None);
+        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, None, None);
         assert!(result.is_ok(), "install failed: {:?}", result.err());
         let inst = result.unwrap();
 
@@ -3117,7 +3131,14 @@ mod tests {
         let policy =
             NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
 
-        let result = ensure_runtime(dir.path(), 21, &catalog, &policy, Some(&CancelledProgress));
+        let result = ensure_runtime(
+            dir.path(),
+            21,
+            &catalog,
+            &policy,
+            Some(&CancelledProgress),
+            None,
+        );
         assert!(
             matches!(result, Err(LauncherError::JavaRuntimeCancelled { .. })),
             "expected JavaRuntimeCancelled, got {:?}",
@@ -3183,5 +3204,148 @@ mod tests {
             "expected JavaRuntimeCancelled during tar.gz extract, got {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_op_handle_progress_adapter() {
+        let mgr = crate::operation_manager::OperationManager::new();
+        let handle = mgr.register("runtime-provision");
+
+        assert!(!handle.token().is_cancelled());
+
+        let adapter = OpHandleProgress::new(&handle);
+        assert!(!adapter.is_cancelled());
+
+        adapter.on_progress("downloading", Some(50.0));
+        let info = mgr.info(handle.id()).unwrap();
+        assert!((info.progress.unwrap() - 0.5).abs() < 1e-6);
+
+        handle.cancel();
+        assert!(adapter.is_cancelled());
+
+        // Progress after cancel should still update.
+        adapter.on_progress("done", Some(100.0));
+        let info = mgr.info(handle.id()).unwrap();
+        assert!((info.progress.unwrap() - 1.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Java 25 provisioning with local archive fixture
+    // -----------------------------------------------------------------------
+
+    /// Platform-appropriate Java 25 test entry.
+    fn make_java25_entry(sha256: &str, size: u64) -> RuntimeCatalogEntry {
+        RuntimeCatalogEntry {
+            vendor: "eclipse-temurin".into(),
+            major: 25,
+            full_version: "25.0.1+9".into(),
+            openjdk_version: "25.0.1".into(),
+            os: normalize_os(std::env::consts::OS).unwrap_or("linux").into(),
+            arch: normalize_arch(std::env::consts::ARCH).unwrap_or("x64").into(),
+            image_type: "jre".into(),
+            jvm_impl: "hotspot".into(),
+            archive_type: test_archive_extension().into(),
+            url: "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.1%2B9/OpenJDK25U-jre_x64_linux_hotspot_25.0.1_9.tar.gz".into(),
+            sha256: sha256.into(),
+            size,
+            java_relative_path: test_java_rel().into(),
+            license: "GPL-2.0-only WITH Classpath-exception-2.0".into(),
+            source_api_url: "https://api.adoptium.net/v3/assets/latest/25/hotspot?image_type=jre".into(),
+            version_major: Some(25),
+            version_minor: Some(0),
+            version_security: Some(1),
+        }
+    }
+
+    fn make_java25_catalog(entry: RuntimeCatalogEntry) -> RuntimeCatalog {
+        let mut cat = RuntimeCatalog {
+            schema_version: 1,
+            generated_at: "2026-07-01T00:00:00Z".into(),
+            source: "test".into(),
+            entries: vec![entry],
+            warnings: vec![],
+        };
+        // Fix up sha256/size from the archive data
+        let archive_data = if test_archive_extension() == "zip" {
+            create_test_zip(&cat.entries[0].java_relative_path)
+        } else {
+            create_test_tar_gz(&cat.entries[0].java_relative_path)
+        };
+        let hash = hex::encode(sha2::Sha256::digest(&archive_data));
+        cat.entries[0].sha256 = hash;
+        cat.entries[0].size = archive_data.len() as u64;
+        cat
+    }
+
+    fn java25_mock_inspect(path: &std::path::Path) -> Option<JavaInstallation> {
+        Some(JavaInstallation {
+            path: path.to_path_buf(),
+            version: 25,
+            version_string: "25.0.1".into(),
+            source: JavaSource::Managed,
+            arch: Some(normalize_arch(std::env::consts::ARCH)?.into()),
+        })
+    }
+
+    #[test]
+    fn test_java_25_provisioning_first_materialization() {
+        let _guard = crate::java::set_mock_inspect(Some(java25_mock_inspect));
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = make_java25_entry("", 0);
+        setup_archive_cache(dir.path(), &mut entry);
+        let catalog = make_java25_catalog(entry.clone());
+
+        let policy =
+            NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
+
+        let result = ensure_runtime(dir.path(), 25, &catalog, &policy, None, None);
+        assert!(
+            result.is_ok(),
+            "Java 25 provisioning failed: {:?}",
+            result.err()
+        );
+
+        let inst = result.unwrap();
+        assert!(inst.path.exists());
+        assert_eq!(inst.version, 25);
+        assert_eq!(inst.source, JavaSource::Managed);
+
+        let receipt_path = managed_entry_path(dir.path(), &entry).join("receipt.json");
+        assert!(receipt_path.is_file());
+        let receipt = RuntimeReceipt::read_from(&receipt_path).unwrap();
+        assert_eq!(receipt.major, 25);
+        assert_eq!(receipt.archive_sha256, entry.sha256);
+    }
+
+    #[test]
+    fn test_java_25_second_launch_all_network_categories_disabled() {
+        let _guard = crate::java::set_mock_inspect(Some(java25_mock_inspect));
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = make_java25_entry("", 0);
+        setup_archive_cache(dir.path(), &mut entry);
+        let catalog = make_java25_catalog(entry.clone());
+
+        let policy =
+            NetworkPolicy::all_disabled().with_category(NetworkCategory::JavaRuntime, true);
+
+        // First materialization
+        let result1 = ensure_runtime(dir.path(), 25, &catalog, &policy, None, None);
+        assert!(result1.is_ok(), "First Java 25 provisioning failed");
+        let inst1 = result1.unwrap();
+
+        // Second launch: ALL categories disabled (including JavaRuntime)
+        let all_off_policy = NetworkPolicy::all_disabled();
+
+        let result2 = ensure_runtime(dir.path(), 25, &catalog, &all_off_policy, None, None);
+        assert!(
+            result2.is_ok(),
+            "Second launch with all network disabled should be cache hit: {:?}",
+            result2.err()
+        );
+        let inst2 = result2.unwrap();
+
+        assert_eq!(inst1.path, inst2.path, "Should reuse cached runtime");
+        assert_eq!(inst2.version, 25);
+        assert_eq!(inst2.source, JavaSource::Managed);
     }
 }

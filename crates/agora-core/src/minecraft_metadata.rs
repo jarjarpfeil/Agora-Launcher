@@ -80,7 +80,7 @@ pub async fn ensure_base_version_metadata(
         .versions
         .iter()
         .find(|v: &&MojangVersionRef| v.id == version_id)
-        .ok_or_else(|| LauncherError::GameVersionNotFound)?;
+        .ok_or(LauncherError::GameVersionNotFound)?;
 
     // 6. Ensure the versions directory exists.
     let version_dir = minecraft_root.join("versions").join(version_id);

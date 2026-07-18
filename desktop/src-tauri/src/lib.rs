@@ -3,12 +3,10 @@ pub mod auth;
 pub mod commands;
 pub mod crash_diagnostics;
 pub mod crash_investigator;
-pub mod db;
 pub mod dependency_ops;
 pub use agora_core::{download, error, loader_manifests, models};
 
 pub mod governance;
-pub mod install_pipeline;
 pub mod instances;
 pub mod launcher_profiles;
 pub mod mod_install;
@@ -24,6 +22,30 @@ pub mod version_cache;
 
 use state::LauncherState;
 use tauri::Manager;
+
+/// Shared type alias for the managed core context.
+type ManagedCoreContext = std::sync::Arc<std::sync::Mutex<agora_core::ctx::CoreContext>>;
+
+/// Return a clone of the initialized core context for adapter commands.
+pub fn core_context<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> agora_core::error::LauncherResult<agora_core::ctx::Ctx> {
+    if let Some(state) = app.try_state::<ManagedCoreContext>() {
+        return state.lock().map(|ctx| ctx.clone()).map_err(|_| {
+            agora_core::error::LauncherError::Generic {
+                code: "ERR_CORE_CONTEXT_LOCK".into(),
+                message: "Core context is unavailable.".into(),
+            }
+        });
+    }
+    let paths = crate::paths::app_paths(app).map_err(|error| {
+        agora_core::error::LauncherError::Generic {
+            code: "ERR_APP_PATHS".into(),
+            message: error.to_string(),
+        }
+    })?;
+    agora_core::ctx::CoreContext::initialize(paths).map(|(ctx, _)| ctx)
+}
 
 /// Run the Tauri application.
 pub fn run() {
@@ -64,6 +86,7 @@ pub fn run() {
             commands::revert_instance,
             commands::launch_instance,
             commands::launch_instance_direct,
+            commands::launch_instance_with_recovery,
             commands::query_launch_state,
             commands::resolve_install_plan,
             commands::apply_install_plan,
@@ -84,6 +107,7 @@ pub fn run() {
             commands::apply_loadout_profile,
             commands::delete_loadout_profile,
             commands::import_instance,
+            commands::cancel_operation,
             commands::detect_launchers,
             commands::clone_instance_cmd,
             commands::check_instance_health,
@@ -172,11 +196,29 @@ pub fn run() {
             commands::cancel_java_runtime,
         ])
         .setup(|app| {
+            if let Err(error) = crate::paths::migrate_legacy_data_dir(app.handle()) {
+                eprintln!("Failed to migrate legacy Agora data directory: {error}");
+            }
+            // Initialize CoreContext from the shared core-owned data directory.
+            match crate::paths::app_paths(app.handle()) {
+                Ok(paths) => match agora_core::ctx::CoreContext::initialize(paths) {
+                    Ok((ctx, warnings)) => {
+                        for w in &warnings {
+                            eprintln!("[core] {w}");
+                        }
+                        app.manage(ManagedCoreContext::new(std::sync::Mutex::new(ctx)));
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to initialize core context: {e}");
+                    }
+                },
+                Err(e) => {
+                    eprintln!("Failed to resolve app data dir: {e}");
+                }
+            }
+
             let handle = app.handle().clone();
             tauri::async_runtime::block_on(async move {
-                if let Err(e) = db::init_local_state_db(&handle) {
-                    eprintln!("Failed to initialize local state: {}", e);
-                }
                 // Dev-only: seed registry.db from a local compiler build when
                 // running `tauri:dev`. The re-seed path copies an unverified
                 // local db+sig pair (acceptable in debug builds, which relax
@@ -190,33 +232,51 @@ pub fn run() {
                 let purge_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let _ = tokio::task::spawn_blocking(move || {
-                        if let Ok(conn) = db::local_state_connection(&purge_handle) {
-                            if let Err(e) = db::purge_stale_crash_telemetry(&conn) {
-                                eprintln!("Failed to purge stale crash telemetry: {}", e);
+                        if let Some(core_state) = purge_handle.try_state::<ManagedCoreContext>() {
+                            match core_state.lock() {
+                                Ok(ctx) => {
+                                    let svc =
+                                        agora_core::crash_service::CrashService::new(ctx.clone());
+                                    if let Err(e) = svc.purge_stale_telemetry() {
+                                        eprintln!("Failed to purge stale crash telemetry: {e}",);
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("Core context lock failed: {e}");
+                                }
                             }
                         }
                     })
                     .await;
                 });
                 // Start MCP server if enabled.
-                match db::local_state_connection(&handle) {
-                    Ok(conn) => {
-                        if matches!(
-                            db::get_setting(&conn, "ai_mcp_enabled"),
-                            Ok(Some(serde_json::Value::Bool(true)))
-                        ) {
-                            let mcp_app = handle.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let manager = mcp_app.state::<crate::mcp::McpServerManager>();
-                                if let Err(e) = manager.start(mcp_app.clone()).await {
-                                    eprintln!("Failed to start MCP server: {}", e);
+                if let Some(core_state) = handle.try_state::<ManagedCoreContext>() {
+                    match core_state.lock() {
+                        Ok(ctx) => {
+                            let svc = agora_core::settings::SettingsService::new(ctx.clone());
+                            match svc.get_bool("ai_mcp_enabled") {
+                                Ok(true) => {
+                                    let mcp_app = handle.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let manager =
+                                            mcp_app.state::<crate::mcp::McpServerManager>();
+                                        if let Err(e) = manager.start(mcp_app.clone()).await {
+                                            eprintln!("Failed to start MCP server: {e}",);
+                                        }
+                                    });
                                 }
-                            });
+                                Ok(false) => {}
+                                Err(e) => {
+                                    eprintln!("Failed to read MCP setting: {e}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Core context lock failed for MCP startup: {e}");
                         }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to open local state for MCP startup: {}", e);
-                    }
+                } else {
+                    eprintln!("Core context not available, skipping MCP auto-start");
                 }
             });
             Ok(())

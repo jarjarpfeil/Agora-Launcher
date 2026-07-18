@@ -428,6 +428,64 @@ pub fn retention_plan_with_sizes(
 }
 
 // ---------------------------------------------------------------------------
+// Retention (moved from desktop commands.rs — core-owned)
+// ---------------------------------------------------------------------------
+
+/// Run snapshot retention for an instance directory using default policy.
+/// Lists snapshots, cross-references LKG state, evicts those exceeding the
+/// configured category counts and size cap.
+pub fn run_retention(instance_dir: &Path) -> Result<(), String> {
+    let snapshots = crate::snapshot::list_snapshots(instance_dir)
+        .map_err(|e| format!("list_snapshots: {e}"))?;
+    if snapshots.is_empty() {
+        return Ok(());
+    }
+
+    let lkg = read_lkg_state(instance_dir)?;
+    let entries: Vec<RetentionEntry> = snapshots
+        .iter()
+        .map(|snapshot| {
+            let archive_size = std::fs::metadata(
+                instance_dir
+                    .join(".agora_snapshots")
+                    .join(format!("{}.zip", snapshot.id)),
+            )
+            .map(|metadata| metadata.len())
+            .unwrap_or(snapshot.size_estimate);
+            RetentionEntry {
+                id: snapshot.id.clone(),
+                size_bytes: archive_size,
+                is_lkg: lkg.promoted_snapshot_ids.contains(&snapshot.id)
+                    || lkg.current_lkg_snapshot_id.as_ref() == Some(&snapshot.id),
+                is_current_lkg: lkg.current_lkg_snapshot_id.as_ref() == Some(&snapshot.id),
+                is_pre_restore: snapshot
+                    .label
+                    .as_deref()
+                    .is_some_and(|label| label.starts_with("pre-restore-")),
+            }
+        })
+        .collect();
+    let policy = RetentionPolicy::default();
+    let to_evict = retention_plan_with_sizes(&entries, &policy);
+
+    let mut errors = Vec::new();
+    for id in &to_evict {
+        if let Err(error) = crate::snapshot::delete_snapshot(instance_dir, id) {
+            errors.push(format!("{id}: {error}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "snapshot retention could not remove: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
