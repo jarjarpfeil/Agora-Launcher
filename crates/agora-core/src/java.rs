@@ -471,7 +471,6 @@ pub fn detect_mojang_jres(minecraft_dir: &Path) -> Vec<JavaInstallation> {
                 };
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::MetadataExt;
                     if meta.file_type().is_symlink() {
                         continue;
                     }

@@ -154,7 +154,7 @@ pub fn apply_profile(instance_dir: &Path, profile_name: &str) -> Result<(), Stri
         let subdir = content_subdir(&entry.content_type);
         let dir = instance_dir.join(subdir);
         let original = dir.join(&entry.filename);
-        let disabled = dir.join(format!("{}.disabled", &entry.filename));
+        let disabled = dir.join(format!("{}.disabled", entry.filename));
 
         if should_enable {
             // Currently disabled → enable

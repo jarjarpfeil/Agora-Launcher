@@ -352,10 +352,7 @@ pub fn parse_crash_log(text: &str) -> Option<CrashFingerprint> {
                             .split(' ')
                             .any(|w| w.ends_with("Exception") || w.ends_with("Error")))
             });
-            match first_exc {
-                Some(idx) => lines[idx],
-                None => return None,
-            }
+            lines[first_exc?]
         }
     };
 

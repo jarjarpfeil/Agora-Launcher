@@ -63,9 +63,7 @@ jobs:
           components: clippy
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            crates/agora-core -> target
-            crates/agora -> target
+          workspaces: . -> target
       - name: Clippy core and CLI (no Tauri system libs required)
         run: cargo clippy -p agora-core -p agora-cli --all-targets --all-features -- -D warnings
 
@@ -78,7 +76,7 @@ jobs:
           components: clippy
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: desktop/src-tauri -> target
+          workspaces: . -> target
       - name: Clippy desktop
         run: cargo clippy -p agora-desktop --all-targets -- -D warnings
 
@@ -93,14 +91,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: |
-            crates/agora-core -> target
-            crates/agora -> target
-            desktop/src-tauri -> target
-      - name: Core unit tests
-        run: cargo test -p agora-core --lib
-      - name: Core integration tests
-        run: cargo test -p agora-core --tests
+          workspaces: . -> target
+      - name: Core unit and integration tests
+        run: cargo test -p agora-core --lib --tests
       - name: CLI tests
         run: cargo test -p agora-cli
       - name: Build CLI

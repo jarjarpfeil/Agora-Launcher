@@ -1497,7 +1497,7 @@ pub fn exit_code_for_classification(status: &std::process::ExitStatus) -> Option
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        return status.signal().map(|signal| 128 + signal);
+        status.signal().map(|signal| 128 + signal)
     }
 
     #[cfg(not(unix))]

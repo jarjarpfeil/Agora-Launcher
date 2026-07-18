@@ -1458,7 +1458,6 @@ pub fn list_managed_runtimes(runtimes_root: &Path) -> LauncherResult<Vec<Managed
                 if let Ok(meta) = pe.metadata() {
                     #[cfg(unix)]
                     {
-                        use std::os::unix::fs::MetadataExt;
                         if meta.file_type().is_symlink() {
                             continue;
                         }
@@ -1520,7 +1519,6 @@ pub fn remove_runtime(runtimes_root: &Path, root_dir: &Path) -> LauncherResult<(
     if let Ok(meta) = std::fs::symlink_metadata(root_dir) {
         #[cfg(unix)]
         {
-            use std::os::unix::fs::MetadataExt;
             if meta.file_type().is_symlink() {
                 return Err(LauncherError::Generic {
                     code: "ERR_RUNTIME_REMOVE_SYMLINK".into(),

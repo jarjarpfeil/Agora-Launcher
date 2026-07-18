@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   cancelJavaRuntime,
+  checkInstanceHealth,
   formatError,
   inspectJavaExecutable,
   killProcess,
@@ -125,9 +126,6 @@ const INITIAL_STATE: ProcessState = {
   runtimeProgress: null,
   availableActions: [],
 };
-
-// healthReport is kept in the type for the health dialog component but
-// no longer set by the controller — LaunchService owns health internally.
 
 // Bounded log buffer per instance ID.
 const MAX_LOG_LINES = 5000;
@@ -419,8 +417,18 @@ export function useProcessController(): ProcessController {
       });
 
       try {
-        // LaunchService owns health checks internally.  Health dialog
-        // components may call checkInstanceHealth independently for UI.
+        // Core owns health analysis; React only decides whether to present
+        // the returned findings and ask the user for approval.
+        const healthReport = await checkInstanceHealth(instanceId);
+        if (healthReport.warnings.length > 0 || healthReport.blockers.length > 0) {
+          setState((previous) => ({
+            ...previous,
+            phase: 'failed',
+            healthReport,
+          }));
+          return false;
+        }
+
         const newState = await executeLaunch(instanceId, directLaunch);
         setState(newState);
         return true;

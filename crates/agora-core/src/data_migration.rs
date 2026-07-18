@@ -666,6 +666,8 @@ pub fn inventory_legacy_root(source_root: &Path) -> LauncherResult<MigrationInve
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn unique_dir() -> PathBuf {
