@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import fetch_loader_manifests
 import fetch_registry_db
 import refresh_loader_manifests
+import validate_loader_catalog_delta
 
 
 class TestFetchBytes(unittest.TestCase):
@@ -100,6 +101,95 @@ class TestIsStandardRelease(unittest.TestCase):
 
 
 
+
+
+class TestLoaderCatalogRefreshSafety(unittest.TestCase):
+    """Tests for append-only loader refresh safeguards."""
+
+    def _entry(self, version: str = "0.1.0") -> dict[str, str]:
+        return {
+            "mc_version": "1.21",
+            "loader_version": version,
+            "source_url": f"https://example.test/{version}.jar",
+            "sha256": version.ljust(64, "0"),
+            "file_name": f"loader-{version}.jar",
+            "file_type": "installer_jar",
+        }
+
+    def test_merge_retains_existing_tuple_and_adds_new_tuple(self):
+        existing = self._entry()
+        added = self._entry("0.2.0")
+
+        merged = fetch_loader_manifests._merge_entries([existing], [added])
+
+        self.assertEqual(merged, [existing, added])
+
+    def test_merge_rejects_existing_tuple_mutation(self):
+        existing = self._entry()
+        changed = dict(existing)
+        changed["sha256"] = "f" * 64
+
+        with self.assertRaises(fetch_loader_manifests.ExistingEntryMutationError) as raised:
+            fetch_loader_manifests._merge_entries([existing], [changed])
+
+        self.assertEqual(raised.exception.mutations[0]["key"], "1.21/0.1.0")
+        self.assertIn("sha256", raised.exception.mutations[0]["fields"])
+
+    @mock.patch("fetch_loader_manifests._fetch_json", return_value={})
+    def test_malformed_metadata_raises_instead_of_returning_empty(self, _fetch_json):
+        with self.assertRaises(fetch_loader_manifests.UpstreamMetadataError):
+            fetch_loader_manifests._fetch_fabric("1.21")
+
+    def test_delta_accepts_append_only_new_entry(self):
+        old = self._entry()
+        new = self._entry("0.2.0")
+        before = {"domain_allowlist": ["example.test"], "loaders": {"fabric": [old]}}
+        after = {
+            "domain_allowlist": ["example.test"],
+            "loaders": {"fabric": [old, new]},
+        }
+
+        report = validate_loader_catalog_delta.validate_catalog_delta(
+            before,
+            after,
+            append_only=True,
+            reject_existing_mutations=True,
+            max_new_entries=50,
+        )
+
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["new_entries"], 1)
+
+    def test_delta_rejects_existing_mutation(self):
+        old = self._entry()
+        changed = dict(old)
+        changed["source_url"] = "https://example.test/replaced.jar"
+        before = {"domain_allowlist": ["example.test"], "loaders": {"fabric": [old]}}
+        after = {"domain_allowlist": ["example.test"], "loaders": {"fabric": [changed]}}
+
+        report = validate_loader_catalog_delta.validate_catalog_delta(
+            before,
+            after,
+            append_only=True,
+            reject_existing_mutations=True,
+        )
+
+        self.assertEqual(len(report["existing_entries_mutated"]), 1)
+        self.assertIn("existing loader entries were mutated", report["errors"])
+
+    def test_delta_rejects_deletion(self):
+        old = self._entry()
+        before = {"domain_allowlist": ["example.test"], "loaders": {"fabric": [old]}}
+        after = {"domain_allowlist": ["example.test"], "loaders": {"fabric": []}}
+
+        report = validate_loader_catalog_delta.validate_catalog_delta(
+            before,
+            after,
+            append_only=True,
+        )
+
+        self.assertEqual(report["unexpected_deletions"], ["fabric/1.21/0.1.0"])
+        self.assertIn("append-only validation found deleted entries", report["errors"])
 
 
 class TestSha256Hex(unittest.TestCase):

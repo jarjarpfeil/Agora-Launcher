@@ -2670,7 +2670,11 @@ PLACEHOLDER_SIGNATURE = (
 # ---------------------------------------------------------------------------
 
 
-def compile_registry(output_path: Path, skip_sign: bool) -> None:
+def compile_registry(
+    output_path: Path,
+    skip_sign: bool,
+    no_governance_write: bool = False,
+) -> None:
     """Build the SQLite registry database at *output_path*."""
     logger.info("Starting nightly compile")
 
@@ -2734,7 +2738,7 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
     # Pass 3 (ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â§3.2 Raid Shield + ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â§3.1 steps 5 organic-trigger, 6 DELETE +
     # admin-alert, 8 create triage poll + resolve expired polls). Runs only
     # when GITHUB_TOKEN is present.
-    if _gh_token:
+    if _gh_token and not no_governance_write:
         gov_full = _get_registry_repo()
         _owner, _, _repo = gov_full.partition("/")
         if _owner and _repo:
@@ -2749,6 +2753,8 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
             )
         else:
             logger.warning("AGORA_REGISTRY_REPO='%s' invalid; skipping Pass 3 responses.", gov_full)
+    elif _gh_token:
+        logger.info("--no-governance-write set; skipping governance response actions.")
 
     # Insert items, handling pack-specific fields.
     mod_count = 0
@@ -2820,17 +2826,8 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
 
     #     # --- Audit log (§4.6) ---
     audit_log_path = REGISTRY_DIR / "governance" / "audit_log.json"
-    audit_log_path.parent.mkdir(parents=True, exist_ok=True)
     total_items = mod_count + pack_count + other_count
     total_crash_sigs = sig_count
-    new_entry = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "action": "compile",
-        "actor": "compiler-bot",
-        "target_type": "registry",
-        "reason": "nightly_compile",
-        "details": f"Compiled registry with {total_items} items, {total_crash_sigs} crash signatures",
-    }
     if audit_log_path.exists():
         with audit_log_path.open("r", encoding="utf-8") as fh:
             audit_data = json.load(fh)
@@ -2838,24 +2835,36 @@ def compile_registry(output_path: Path, skip_sign: bool) -> None:
         audit_data = {"log_format_version": 1, "entries": []}
     if "log_format_version" not in audit_data:
         audit_data["log_format_version"] = 1
-    audit_data["entries"].append(new_entry)
-    # Rotation (§4.6): when > 10 000 entries, archive oldest 2 000.
-    if len(audit_data["entries"]) > 10000:
-        archive_date = datetime.now(timezone.utc).strftime("%Y%m%d")
-        archive_path = REGISTRY_DIR / "governance" / f"audit_log_archive.{archive_date}.json"
-        oldest_2000 = audit_data["entries"][:2000]
-        audit_data["entries"] = audit_data["entries"][-8000:]
-        if archive_path.exists():
-            with archive_path.open("r", encoding="utf-8") as fh:
-                archive_data = json.load(fh)
-            archive_data.extend(oldest_2000)
-        else:
-            archive_data = oldest_2000
-        with archive_path.open("w", encoding="utf-8") as fh:
-            json.dump(archive_data, fh, indent=2)
-    with audit_log_path.open("w", encoding="utf-8") as fh:
-        json.dump(audit_data, fh, indent=2)
-    logger.info("Wrote audit log to %s", audit_log_path)
+    if no_governance_write:
+        logger.info("--no-governance-write set; leaving audit log unchanged.")
+    else:
+        audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        new_entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "action": "compile",
+            "actor": "compiler-bot",
+            "target_type": "registry",
+            "reason": "nightly_compile",
+            "details": f"Compiled registry with {total_items} items, {total_crash_sigs} crash signatures",
+        }
+        audit_data["entries"].append(new_entry)
+        # Rotation (§4.6): when > 10 000 entries, archive oldest 2 000.
+        if len(audit_data["entries"]) > 10000:
+            archive_date = datetime.now(timezone.utc).strftime("%Y%m%d")
+            archive_path = REGISTRY_DIR / "governance" / f"audit_log_archive.{archive_date}.json"
+            oldest_2000 = audit_data["entries"][:2000]
+            audit_data["entries"] = audit_data["entries"][-8000:]
+            if archive_path.exists():
+                with archive_path.open("r", encoding="utf-8") as fh:
+                    archive_data = json.load(fh)
+                archive_data.extend(oldest_2000)
+            else:
+                archive_data = oldest_2000
+            with archive_path.open("w", encoding="utf-8") as fh:
+                json.dump(archive_data, fh, indent=2)
+        with audit_log_path.open("w", encoding="utf-8") as fh:
+            json.dump(audit_data, fh, indent=2)
+        logger.info("Wrote audit log to %s", audit_log_path)
 
     # Register audit log path in system_config.
     audit_conn = sqlite3.connect(str(output_path))
@@ -2962,8 +2971,17 @@ def main() -> None:
         action="store_true",
         help="Write a placeholder signature and exit 0 (intended for local dev/test only)",
     )
+    parser.add_argument(
+        "--no-governance-write",
+        action="store_true",
+        help="Do not append or rotate governance audit data or perform response actions",
+    )
     args = parser.parse_args()
-    compile_registry(args.out, skip_sign=args.skip_sign)
+    compile_registry(
+        args.out,
+        skip_sign=args.skip_sign,
+        no_governance_write=args.no_governance_write,
+    )
 
 
 if __name__ == "__main__":

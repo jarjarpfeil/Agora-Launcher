@@ -7,7 +7,11 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
+  actions: write
+
+concurrency:
+  group: refresh-loader-catalog
+  cancel-in-progress: false
 
 jobs:
   refresh:
@@ -15,6 +19,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -24,6 +30,11 @@ jobs:
         run: |
           pip install -r compiler/requirements.txt
 
+      - name: Save baseline catalog
+        run: |
+          cp loader-manifests/loader_manifests.json \
+            "${RUNNER_TEMP}/loader_manifests.before.json"
+
       - name: Refresh loader catalog
         run: |
           python scripts/refresh_loader_manifests.py \
@@ -31,8 +42,25 @@ jobs:
             --latest-per-mc 5 \
             --keep-others \
             --skip-sign \
-            --no-verify \
-            --out /tmp/registry-validation.db
+            --verify-changed-only \
+            --no-governance-write \
+            --report "${RUNNER_TEMP}/loader-refresh-report.json" \
+            --out "${RUNNER_TEMP}/registry-validation.db"
+
+      - name: Validate catalog delta
+        run: |
+          python scripts/validate_loader_catalog_delta.py \
+            --before "${RUNNER_TEMP}/loader_manifests.before.json" \
+            --after loader-manifests/loader_manifests.json \
+            --refresh-report "${RUNNER_TEMP}/loader-refresh-report.json" \
+            --append-only \
+            --reject-existing-mutations \
+            --max-new-entries 50 \
+            --max-changed-lines 500 \
+            --report "${RUNNER_TEMP}/loader-delta-report.json"
+
+      - name: Validate compiled registry
+        run: python scripts/verify_db.py "${RUNNER_TEMP}/registry-validation.db"
 
       - name: Validate scripts
         run: python scripts/test_scripts.py
@@ -40,18 +68,60 @@ jobs:
       - name: Run loader catalog tests
         run: cargo test -p agora-core --lib loader_manifests
 
-      - name: Create catalog update pull request
-        uses: peter-evans/create-pull-request@v7
-        with:
-          branch: automation/loader-catalog
-          delete-branch: true
-          commit-message: "Refresh loader catalog"
-          title: "Refresh loader catalog"
-          body: |
-            Automated loader catalog refresh.
+      - name: Check for unexpected files
+        shell: bash
+        run: |
+          allowed='^(loader-manifests/loader_manifests\.json|loader-manifests/known_good_hashes\.json|loader-manifests/minecraft_versions\.json)$'
 
-            Sources were redownloaded and hashes were verified.
-          add-paths: |
-            loader-manifests/loader_manifests.json
-            loader-manifests/known_good_hashes.json
+          unexpected="$(
+            {
+              git diff --name-only
+              git ls-files --others --exclude-standard
+            } |
+            sort -u |
+            grep -Ev "$allowed" || true
+          )"
+
+          if [[ -n "$unexpected" ]]; then
+            echo "Unexpected generated files:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+      - name: Commit catalog update
+        id: commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add \
+            loader-manifests/loader_manifests.json \
+            loader-manifests/known_good_hashes.json \
             loader-manifests/minecraft_versions.json
+
+          if git diff --cached --quiet; then
+            echo "No catalog changes."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "chore: refresh loader catalog"
+          git fetch origin master
+
+          # The commit must be based on the current remote tip; a concurrent
+          # change must fail instead of rebasing an unvalidated catalog over it.
+          if [[ "$(git rev-parse HEAD^)" != "$(git rev-parse origin/master)" ]]; then
+            echo "master changed during refresh; refusing to publish."
+            exit 1
+          fi
+
+          git push origin HEAD:master
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch broader catalog CI
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run launch-planner.yml --ref master

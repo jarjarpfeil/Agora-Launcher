@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Quick sanity check for the compiled registry.db."""
+import argparse
 import sqlite3
 import sys
 from pathlib import Path
@@ -13,7 +14,14 @@ TABLE_NAMES_QUERY = """
 
 
 def main() -> int:
-    db_path = Path(__file__).resolve().parent.parent / "registry.db"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "db_path",
+        nargs="?",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "registry.db",
+    )
+    db_path = parser.parse_args().db_path
     if not db_path.exists():
         print(f"Database not found: {db_path}", file=sys.stderr)
         return 1

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Generate loader manifests and pinned hashes from official upstream APIs.
 
+Each refresh queries at most the requested number of new versions per
+Minecraft version and merges them append-only into the existing catalog.
+
 Usage:
     python scripts/fetch_loader_manifests.py [--mc-versions 1.21 1.20.1]
 """
@@ -24,10 +27,6 @@ DEFAULT_MC_VERSIONS = ["1.21"]
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LOADER_MANIFESTS_DIR = REPO_ROOT / "loader-manifests"
 CACHE_DIR = REPO_ROOT / ".cache" / "loader-manifests"
-FAILED_DOWNLOADS_PATH = LOADER_MANIFESTS_DIR / "failed_downloads.json"
-
-# Module-level cache for failed-download tracking.
-_FAILED_DOWNLOADS: dict[str, int] | None = None
 
 DOMAIN_ALLOWLIST = [
     "meta.fabricmc.net",
@@ -47,6 +46,33 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger("fetch_loader_manifests")
+
+
+class UpstreamMetadataError(RuntimeError):
+    """Raised when a loader metadata source is unavailable or malformed."""
+
+
+class ExistingEntryMutationError(ValueError):
+    """Raised when upstream changes an already-published loader tuple."""
+
+    def __init__(self, mutations: list[dict[str, Any]]) -> None:
+        self.mutations = mutations
+        super().__init__(
+            "Existing loader entries changed; manual review is required: "
+            + json.dumps(mutations, sort_keys=True)
+        )
+
+
+IMMUTABLE_ENTRY_FIELDS = (
+    "mc_version",
+    "loader_version",
+    "source_url",
+    "sha256",
+    "file_name",
+    "file_type",
+    "version_json_sha256",
+    "installer_spec",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -111,35 +137,19 @@ def _stable_json_sha256(data: bytes, drop: set[str] | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Failed-download tracking
+# Per-run download diagnostics
 #
-# Persisted to ``failed_downloads.json`` so that loader versions that have
-# already been confirmed absent are not retried on every refresh run.
-# A version is skipped once it has accumulated 2 consecutive failures.
+# Failed candidates are intentionally not persisted. A transient upstream
+# outage must not permanently blacklist a published loader version, and an
+# ephemeral GitHub Actions runner cannot provide meaningful persistence.
 # ---------------------------------------------------------------------------
 
-_FAILED_DOWNLOADS: dict[str, int] | None = None
+_DOWNLOAD_FAILURES: list[dict[str, str]] = []
 
 
-def _load_failed_downloads() -> dict[str, int]:
-    global _FAILED_DOWNLOADS
-    if _FAILED_DOWNLOADS is not None:
-        return _FAILED_DOWNLOADS
-    try:
-        with FAILED_DOWNLOADS_PATH.open("r", encoding="utf-8") as fh:
-            _FAILED_DOWNLOADS = json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError):
-        _FAILED_DOWNLOADS = {}
-    return _FAILED_DOWNLOADS
-
-
-def _save_failed_downloads(data: dict[str, int]) -> None:
-    global _FAILED_DOWNLOADS
-    _FAILED_DOWNLOADS = data
-    FAILED_DOWNLOADS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with FAILED_DOWNLOADS_PATH.open("w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-        fh.write("\n")
+def get_download_failures() -> list[dict[str, str]]:
+    """Return candidate download failures observed during this process."""
+    return list(_DOWNLOAD_FAILURES)
 
 
 def _failed_key(loader: str, mc_version: str, loader_version: str) -> str:
@@ -147,22 +157,18 @@ def _failed_key(loader: str, mc_version: str, loader_version: str) -> str:
 
 
 def _failed_should_skip(key: str) -> bool:
-    counts = _load_failed_downloads()
-    return counts.get(key, 0) >= 2
+    # Never skip a candidate based on failures from a previous run.
+    return False
 
 
 def _failed_record_success(key: str) -> None:
-    counts = _load_failed_downloads()
-    if counts.get(key, 0) > 0:
-        counts[key] = 0
-        _save_failed_downloads(counts)
+    del key
 
 
 def _failed_record_failure(key: str) -> None:
-    counts = _load_failed_downloads()
-    counts[key] = counts.get(key, 0) + 1
-    logger.info("Failed download %s (attempt %d)", key, counts[key])
-    _save_failed_downloads(counts)
+    if not any(failure["key"] == key for failure in _DOWNLOAD_FAILURES):
+        _DOWNLOAD_FAILURES.append({"key": key})
+    logger.warning("Could not download candidate %s; it will be retried next run", key)
 
 
 def _fetch_bytes(url: str, timeout: float = 60) -> bytes:
@@ -261,9 +267,23 @@ def _fetch_fabric(
     url = f"https://meta.fabricmc.net/v2/versions/loader/{mc_version}"
     try:
         versions = _fetch_json(url)
-    except (urllib.error.URLError, json.JSONDecodeError) as exc:
-        logger.error("Failed to fetch Fabric loader list for %s: %s", mc_version, exc)
-        return entries
+    except (urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpstreamMetadataError(
+            f"Fabric loader list for {mc_version}: {exc}"
+        ) from exc
+    if not isinstance(versions, list):
+        raise UpstreamMetadataError(
+            f"Fabric loader list for {mc_version} was not a JSON array"
+        )
+    if any(
+        not isinstance(info, dict)
+        or not isinstance(info.get("loader"), dict)
+        or not isinstance(info["loader"].get("version"), str)
+        for info in versions
+    ):
+        raise UpstreamMetadataError(
+            f"Fabric loader list for {mc_version} contained a malformed entry"
+        )
 
     versions = sorted(
         versions,
@@ -303,7 +323,12 @@ def _fetch_fabric(
 
         _failed_record_success(key)
         file_name = f"fabric-loader-{loader_version}-{mc_version}.json"
-        sha = _stable_json_sha256(data)
+        try:
+            sha = _stable_json_sha256(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpstreamMetadataError(
+                f"Fabric profile {mc_version}/{loader_version}: {exc}"
+            ) from exc
 
         entries.append({
             "mc_version": mc_version,
@@ -332,9 +357,23 @@ def _fetch_quilt(
     url = f"https://meta.quiltmc.org/v3/versions/loader/{mc_version}"
     try:
         versions = _fetch_json(url)
-    except (urllib.error.URLError, json.JSONDecodeError) as exc:
-        logger.error("Failed to fetch Quilt loader list for %s: %s", mc_version, exc)
-        return entries
+    except (urllib.error.URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UpstreamMetadataError(
+            f"Quilt loader list for {mc_version}: {exc}"
+        ) from exc
+    if not isinstance(versions, list):
+        raise UpstreamMetadataError(
+            f"Quilt loader list for {mc_version} was not a JSON array"
+        )
+    if any(
+        not isinstance(info, dict)
+        or not isinstance(info.get("loader"), dict)
+        or not isinstance(info["loader"].get("version"), str)
+        for info in versions
+    ):
+        raise UpstreamMetadataError(
+            f"Quilt loader list for {mc_version} contained a malformed entry"
+        )
 
     versions = sorted(
         versions,
@@ -417,7 +456,12 @@ def _fetch_quilt(
 
         _failed_record_success(key)
         file_name = f"quilt-loader-{loader_version}-{mc_version}.json"
-        sha = _stable_json_sha256(data)
+        try:
+            sha = _stable_json_sha256(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise UpstreamMetadataError(
+                f"Quilt profile {mc_version}/{loader_version}: {exc}"
+            ) from exc
 
         entries.append({
             "mc_version": mc_version,
@@ -449,9 +493,10 @@ def _fetch_neoforge(
         xml = _fetch_bytes(metadata_url)
         root = ET.fromstring(xml)
     except (urllib.error.URLError, ET.ParseError) as exc:
-        logger.error("Failed to fetch NeoForge maven metadata: %s", exc)
-        return entries
+        raise UpstreamMetadataError(f"NeoForge Maven metadata: {exc}") from exc
 
+    if root.find(".//versions") is None:
+        raise UpstreamMetadataError("NeoForge Maven metadata was malformed")
     versions = [v.text for v in root.findall(".//versions/version") if v.text]
     candidates_by_mc: dict[str, list[str]] = {}
     for version in versions:
@@ -536,9 +581,10 @@ def _fetch_forge(
         xml = _fetch_bytes(metadata_url)
         root = ET.fromstring(xml)
     except (urllib.error.URLError, ET.ParseError) as exc:
-        logger.error("Failed to fetch Forge maven metadata: %s", exc)
-        return entries
+        raise UpstreamMetadataError(f"Forge Maven metadata: {exc}") from exc
 
+    if root.find(".//versions") is None:
+        raise UpstreamMetadataError("Forge Maven metadata was malformed")
     versions = [v.text for v in root.findall(".//versions/version") if v.text]
     candidates_by_mc: dict[str, list[tuple[str, str]]] = {}
     for version in versions:
@@ -634,8 +680,28 @@ def _merge_entries(existing: list[dict[str, Any]], new_entries: list[dict[str, A
     seen: dict[tuple[str, str], dict[str, Any]] = {
         (e["mc_version"], e["loader_version"]): e for e in existing
     }
+    mutations: list[dict[str, Any]] = []
     for entry in new_entries:
-        seen[(entry["mc_version"], entry["loader_version"])] = entry
+        key = (entry["mc_version"], entry["loader_version"])
+        previous = seen.get(key)
+        if previous is None:
+            seen[key] = entry
+            continue
+
+        changed_fields = {
+            field: {"before": previous.get(field), "after": entry.get(field)}
+            for field in IMMUTABLE_ENTRY_FIELDS
+            if previous.get(field) != entry.get(field)
+        }
+        if changed_fields:
+            mutations.append({
+                "key": f"{key[0]}/{key[1]}",
+                "fields": changed_fields,
+            })
+
+    if mutations:
+        raise ExistingEntryMutationError(mutations)
+
     return list(seen.values())
 
 
@@ -644,25 +710,6 @@ def _sort_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
         entries,
         key=lambda e: (_version_key(e["mc_version"]), _version_key(e["loader_version"])),
     )
-
-
-def _limit_entries(entries: list[dict[str, Any]], per_mc: int | None) -> list[dict[str, Any]]:
-    """Keep only the latest *per_mc* loader versions for each Minecraft version."""
-    if per_mc is None or per_mc <= 0:
-        return entries
-
-    groups: dict[str, list[dict[str, Any]]] = {}
-    for entry in entries:
-        groups.setdefault(entry["mc_version"], []).append(entry)
-
-    limited: list[dict[str, Any]] = []
-    for group in groups.values():
-        sorted_desc = sorted(
-            group, key=lambda e: _version_key(e["loader_version"]), reverse=True
-        )
-        limited.extend(sorted_desc[:per_mc])
-
-    return limited
 
 
 def _write_loader_manifests(manifest: dict[str, Any]) -> None:
@@ -722,7 +769,7 @@ def main() -> int:
         "--latest-per-mc",
         type=int,
         default=5,
-        help="Keep only the N latest loader versions per Minecraft version (default: 5, 0 = unlimited)",
+        help="Query at most N new loader versions per Minecraft version (default: 5, 0 = unlimited); existing entries are retained",
     )
     parser.add_argument(
         "--all-versions",
@@ -769,10 +816,6 @@ def main() -> int:
         loaders["forge"],
         _fetch_forge(mc_versions, per_mc_limit),
     )
-
-    # Final safety filter in case any function ignored the limit.
-    for loader in loaders:
-        loaders[loader] = _limit_entries(loaders[loader], per_mc_limit)
 
     _write_loader_manifests(manifest)
     _write_known_good_hashes(manifest)
