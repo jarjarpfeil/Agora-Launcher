@@ -78,6 +78,12 @@ pub fn refresh_installed_jar_metadata<R: tauri::Runtime>(
     let mods_dir = crate::paths::instance_dir(app, instance_id)
         .map_err(|_| crate::error::LauncherError::InstanceCreateFailed)?
         .join("mods");
+    let manifest_path = mods_dir.join("..").join("instance_manifest.json");
+    let loader = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<crate::models::InstanceManifest>(&text).ok())
+        .map(|manifest| manifest.loader)
+        .unwrap_or_default();
 
     for installed_mod in installed {
         if installed_mod.content_type != "mod" {
@@ -94,7 +100,7 @@ pub fn refresh_installed_jar_metadata<R: tauri::Runtime>(
             continue;
         };
 
-        let parsed = agora_core::jar_metadata::parse_jar_metadata(&jar_path);
+        let parsed = agora_core::jar_metadata::parse_jar_metadata_for_loader(&jar_path, &loader);
         // A valid mod metadata file has a primary ID. If parsing failed or the
         // file is not a recognized mod JAR, retain the manifest's cached data.
         if parsed.mod_jar_id.is_none() {

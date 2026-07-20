@@ -285,9 +285,10 @@ impl InstallService {
         let item_path = target_dir.join(filename);
         std::fs::write(&item_path, &bytes).map_err(|_| LauncherError::InstanceCreateFailed)?;
 
-        let metadata = crate::jar_metadata::parse_jar_metadata(&item_path);
         let manifest_path = self.ctx.paths.instance_manifest(instance_id)?;
         let mut manifest = crate::helpers::read_manifest(&manifest_path)?;
+        let metadata =
+            crate::jar_metadata::parse_jar_metadata_for_loader(&item_path, &manifest.loader);
 
         let installed_mod = InstalledMod {
             filename: filename.to_string(),
@@ -444,7 +445,7 @@ impl InstallService {
         let mut manifest: InstanceManifest =
             serde_json::from_str(&text).map_err(|_| LauncherError::InstanceCreateFailed)?;
 
-        let metadata = crate::jar_metadata::parse_jar_metadata(&dest);
+        let metadata = crate::jar_metadata::parse_jar_metadata_for_loader(&dest, &manifest.loader);
         let installed_mod = InstalledMod {
             filename: file_name.to_string(),
             registry_id: None,

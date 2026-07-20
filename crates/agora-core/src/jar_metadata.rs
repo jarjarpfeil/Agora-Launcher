@@ -31,6 +31,56 @@ const MAX_TOTAL_NESTED_BYTES: u64 = 128 * 1024 * 1024;
 /// Maximum bytes read from a single metadata text entry.
 const MAX_METADATA_TEXT_BYTES: u64 = 1024 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataScope {
+    Any,
+    Fabric,
+    Quilt,
+    Forge,
+    NeoForge,
+}
+
+impl MetadataScope {
+    fn from_loader(loader: &str) -> Self {
+        match loader.trim().to_ascii_lowercase().as_str() {
+            "fabric" => Self::Fabric,
+            "quilt" => Self::Quilt,
+            "forge" => Self::Forge,
+            "neoforge" => Self::NeoForge,
+            _ => Self::Any,
+        }
+    }
+
+    fn includes_fabric(self, has_quilt_metadata: bool) -> bool {
+        matches!(self, Self::Any | Self::Fabric)
+            || matches!(self, Self::Quilt) && !has_quilt_metadata
+    }
+
+    fn includes_quilt(self) -> bool {
+        matches!(self, Self::Any | Self::Quilt)
+    }
+
+    fn includes_forge(self) -> bool {
+        matches!(self, Self::Any | Self::Forge)
+    }
+
+    fn includes_neoforge(self) -> bool {
+        matches!(self, Self::Any | Self::NeoForge)
+    }
+}
+
+/// Metadata parsed for a specific active loader.
+///
+/// `has_native_metadata` distinguishes a native loader implementation from a
+/// compatibility artifact that only carries metadata for another loader. This
+/// lets Modrinth dependency resolution retain compatibility-route dependencies
+/// only when the selected JAR has no native metadata for the active loader.
+#[derive(Debug, Clone, Default)]
+pub struct LoaderJarMetadata {
+    pub metadata: JarDeps,
+    pub has_native_metadata: bool,
+}
+
 /// Shared budget tracker for nested JAR parsing limits.
 #[derive(Default)]
 struct NestedJarBudget {
@@ -57,7 +107,55 @@ pub fn parse_jar_metadata(jar_path: &Path) -> JarDeps {
         Err(_) => return JarDeps::default(),
     };
     let mut budget = NestedJarBudget::default();
-    parse_from_archive(&mut archive, 0, &mut budget)
+    parse_from_archive(&mut archive, 0, &mut budget, MetadataScope::Any).metadata
+}
+
+/// Parse a JAR using only metadata for the active loader.
+///
+/// Fabric reads `fabric.mod.json`; Quilt prefers `quilt.mod.json` and falls
+/// back to Fabric metadata; Forge and NeoForge read only their respective TOML
+/// manifests. Unknown loader names retain the legacy all-manifest behavior.
+pub fn parse_jar_metadata_for_loader(jar_path: &Path, loader: &str) -> JarDeps {
+    parse_jar_metadata_for_loader_with_status(jar_path, loader).metadata
+}
+
+/// Parse loader-specific metadata and report whether the JAR contains native
+/// metadata for the requested loader.
+pub fn parse_jar_metadata_for_loader_with_status(
+    jar_path: &Path,
+    loader: &str,
+) -> LoaderJarMetadata {
+    let file = match std::fs::File::open(jar_path) {
+        Ok(f) => f,
+        Err(_) => return LoaderJarMetadata::default(),
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return LoaderJarMetadata::default(),
+    };
+    let mut budget = NestedJarBudget::default();
+    parse_from_archive(
+        &mut archive,
+        0,
+        &mut budget,
+        MetadataScope::from_loader(loader),
+    )
+}
+
+/// Parse loader-specific metadata directly from verified JAR bytes.
+pub fn parse_jar_metadata_bytes_for_loader(bytes: &[u8], loader: &str) -> LoaderJarMetadata {
+    let cursor = Cursor::new(bytes);
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(_) => return LoaderJarMetadata::default(),
+    };
+    let mut budget = NestedJarBudget::default();
+    parse_from_archive(
+        &mut archive,
+        0,
+        &mut budget,
+        MetadataScope::from_loader(loader),
+    )
 }
 
 /// Generic recursive JAR metadata parser.
@@ -69,12 +167,29 @@ fn parse_from_archive<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     depth: u32,
     budget: &mut NestedJarBudget,
-) -> JarDeps {
+    scope: MetadataScope,
+) -> LoaderJarMetadata {
     if depth > MAX_NESTING_DEPTH {
-        return JarDeps::default();
+        return LoaderJarMetadata::default();
     }
 
     let total_len = archive.len();
+    let has_quilt_metadata = (0..total_len).any(|i| {
+        archive
+            .by_index(i)
+            .ok()
+            .is_some_and(|entry| entry.name() == "quilt.mod.json")
+    });
+    let has_neoforge_metadata = (0..total_len).any(|i| {
+        archive
+            .by_index(i)
+            .ok()
+            .is_some_and(|entry| entry.name() == "META-INF/neoforge.mods.toml")
+    });
+    let include_fabric = scope.includes_fabric(has_quilt_metadata);
+    let include_quilt = scope.includes_quilt();
+    let include_forge = scope.includes_forge();
+    let include_neoforge = scope.includes_neoforge();
     let mut packages: BTreeSet<String> = BTreeSet::new();
     let mut mod_jar_id: Option<String> = None;
     let mut mod_version: Option<String> = None;
@@ -87,6 +202,7 @@ fn parse_from_archive<R: Read + Seek>(
     let mut forge_version: Option<String> = None;
     let mut manifest_impl_version: Option<String> = None;
     let mut saw_neoforge_toml = false;
+    let mut has_native_metadata = false;
 
     // Fabric/Quilt specific accumulators.
     let mut fabric_version: Option<String> = None;
@@ -116,10 +232,11 @@ fn parse_from_archive<R: Read + Seek>(
             packages.insert(dir_segments.join("."));
             continue;
         }
-        if name == "fabric.mod.json" {
+        if name == "fabric.mod.json" && include_fabric {
             if let Some(content_str) = read_entry_utf8_bounded(archive, i, MAX_METADATA_TEXT_BYTES)
             {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content_str) {
+                    has_native_metadata = true;
                     if let Some(id_str) = value.get("id").and_then(|v| v.as_str()) {
                         if !id_str.is_empty() {
                             mod_jar_id = Some(id_str.to_string());
@@ -186,10 +303,11 @@ fn parse_from_archive<R: Read + Seek>(
             }
             continue;
         }
-        if name == "quilt.mod.json" {
+        if name == "quilt.mod.json" && include_quilt {
             if let Some(content_str) = read_entry_utf8_bounded(archive, i, MAX_METADATA_TEXT_BYTES)
             {
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(&content_str) {
+                    has_native_metadata = true;
                     if let Some(ql) = value.get("quilt_loader").or(value.get("quiltLoader")) {
                         if let Some(id_str) = ql.get("id").and_then(|v| v.as_str()) {
                             if !id_str.is_empty() && mod_jar_id.is_none() {
@@ -265,9 +383,10 @@ fn parse_from_archive<R: Read + Seek>(
         // schema, so both go through the same parser. Prefer neoforge when both
         // are present (a NeoForge mod's mods.toml, if also shipped, is usually
         // a stub).
-        if name == "META-INF/neoforge.mods.toml" {
+        if name == "META-INF/neoforge.mods.toml" && include_neoforge {
             saw_neoforge_toml = true;
             if let Some(content) = read_entry_utf8_bounded(archive, i, MAX_METADATA_TEXT_BYTES) {
+                has_native_metadata = true;
                 forge_provides_strs.extend(extract_forge_mod_ids(&content));
                 extract_forge_deps(
                     &content,
@@ -281,8 +400,13 @@ fn parse_from_archive<R: Read + Seek>(
             }
             continue;
         }
-        if name == "META-INF/mods.toml" && !saw_neoforge_toml {
+        if name == "META-INF/mods.toml"
+            && include_forge
+            && !(matches!(scope, MetadataScope::Any) && has_neoforge_metadata)
+            && !saw_neoforge_toml
+        {
             if let Some(content) = read_entry_utf8_bounded(archive, i, MAX_METADATA_TEXT_BYTES) {
+                has_native_metadata = true;
                 forge_provides_strs.extend(extract_forge_mod_ids(&content));
                 extract_forge_deps(
                     &content,
@@ -394,11 +518,12 @@ fn parse_from_archive<R: Read + Seek>(
             Ok(a) => a,
             Err(_) => continue,
         };
-        let nested = parse_from_archive(&mut nested_archive, depth + 1, budget);
+        let nested = parse_from_archive(&mut nested_archive, depth + 1, budget, scope);
+        let nested_metadata = nested.metadata;
 
         // Add nested primary ID as ProvidedMod.
-        if let Some(ref nested_id) = nested.mod_jar_id {
-            let nv = nested.mod_version.clone();
+        if let Some(ref nested_id) = nested_metadata.mod_jar_id {
+            let nv = nested_metadata.mod_version.clone();
             provided_mods_map
                 .entry(nested_id.clone())
                 .and_modify(|e| {
@@ -410,7 +535,7 @@ fn parse_from_archive<R: Read + Seek>(
         }
 
         // Aggregate nested provided_mods.
-        for pm in &nested.provided_mods {
+        for pm in &nested_metadata.provided_mods {
             let pv = pm.version.clone();
             provided_mods_map
                 .entry(pm.mod_id.clone())
@@ -423,11 +548,11 @@ fn parse_from_archive<R: Read + Seek>(
         }
 
         // Aggregate dependencies (except intra-JAR deps filtered later).
-        depends_on.extend(nested.depends_on);
-        optional_deps.extend(nested.optional_deps);
-        incompatible_ids.extend(nested.incompatible_deps);
-        incompatibility_decls.extend(nested.incompatibility_decls);
-        packages.extend(nested.java_packages);
+        depends_on.extend(nested_metadata.depends_on);
+        optional_deps.extend(nested_metadata.optional_deps);
+        incompatible_ids.extend(nested_metadata.incompatible_deps);
+        incompatibility_decls.extend(nested_metadata.incompatibility_decls);
+        packages.extend(nested_metadata.java_packages);
     }
 
     // ---- After all nesting, filter intra-JAR dependencies ----
@@ -459,15 +584,18 @@ fn parse_from_archive<R: Read + Seek>(
         .map(|(mod_id, version)| ProvidedMod { mod_id, version })
         .collect();
 
-    JarDeps {
-        java_packages: packages.into_iter().collect(),
-        mod_jar_id,
-        mod_version,
-        depends_on: depends_on.into_iter().collect(),
-        optional_deps: optional_deps.into_iter().collect(),
-        incompatible_deps: incompatible_ids.into_iter().collect(),
-        incompatibility_decls,
-        provided_mods,
+    LoaderJarMetadata {
+        metadata: JarDeps {
+            java_packages: packages.into_iter().collect(),
+            mod_jar_id,
+            mod_version,
+            depends_on: depends_on.into_iter().collect(),
+            optional_deps: optional_deps.into_iter().collect(),
+            incompatible_deps: incompatible_ids.into_iter().collect(),
+            incompatibility_decls,
+            provided_mods,
+        },
+        has_native_metadata,
     }
 }
 
@@ -1745,5 +1873,56 @@ version="1.0"
         let meta = parse_jar_metadata(&jar);
         let _ = std::fs::remove_file(&jar);
         assert!(meta.depends_on.contains(&"needed_dep".to_string()));
+    }
+
+    #[test]
+    fn active_loader_metadata_does_not_merge_other_loader_dependencies() {
+        let jar = build_test_jar(&[
+            (
+                "fabric.mod.json",
+                r#"{"id":"swingthrough","version":"1.0"}"#,
+            ),
+            (
+                "META-INF/neoforge.mods.toml",
+                "modId=\"swingthrough\"\n[[dependencies.swingthrough]]\nmodId=\"connector\"\ntype=\"required\"\n",
+            ),
+        ]);
+
+        let fabric = parse_jar_metadata_for_loader_with_status(&jar, "fabric");
+        let neoforge = parse_jar_metadata_for_loader_with_status(&jar, "neoforge");
+        let _ = std::fs::remove_file(&jar);
+
+        assert!(fabric.has_native_metadata);
+        assert_eq!(fabric.metadata.mod_jar_id.as_deref(), Some("swingthrough"));
+        assert!(!fabric
+            .metadata
+            .depends_on
+            .contains(&"connector".to_string()));
+        assert!(neoforge.has_native_metadata);
+        assert!(neoforge
+            .metadata
+            .depends_on
+            .contains(&"connector".to_string()));
+    }
+
+    #[test]
+    fn quilt_prefers_quilt_metadata_over_fabric_metadata() {
+        let jar = build_test_jar(&[
+            (
+                "fabric.mod.json",
+                r#"{"id":"fabric-id","version":"1.0","depends":{"fabric-only":"*"}}"#,
+            ),
+            (
+                "quilt.mod.json",
+                r#"{"quilt_loader":{"id":"quilt-id","version":"2.0","depends":{"quilt-only":"*"}}}"#,
+            ),
+        ]);
+
+        let metadata = parse_jar_metadata_for_loader(&jar, "quilt");
+        let _ = std::fs::remove_file(&jar);
+
+        assert_eq!(metadata.mod_jar_id.as_deref(), Some("quilt-id"));
+        assert!(metadata.depends_on.contains(&"quilt-only".to_string()));
+        assert!(!metadata.depends_on.contains(&"fabric-only".to_string()));
     }
 }

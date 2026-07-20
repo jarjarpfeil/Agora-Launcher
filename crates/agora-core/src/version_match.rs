@@ -26,15 +26,16 @@ pub enum VersionMatch {
 // Version comparison
 // ---------------------------------------------------------------------------
 
-/// Compare two version strings leniently. Splits on `.`, `-`, `+`, `_` and
+/// Compare two version strings leniently. Splits on `.`, `-`, and `_` and
 /// compares segment-by-segment. Numeric segments compare numerically; when
 /// one segment is numeric and the other is not, the numeric segment is
 /// considered "greater" (newer). Non-numeric segments compare lexicographically.
 /// When one version is a prefix of the other, the longer one is "greater"
 /// (unless all remaining segments are zero/empty, in which case they're equal).
+/// SemVer build metadata after `+` is ignored for precedence.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
-    let seg_a = split_version_segments(a);
-    let seg_b = split_version_segments(b);
+    let seg_a = split_version_segments(strip_build_metadata(a));
+    let seg_b = split_version_segments(strip_build_metadata(b));
     let max = seg_a.len().max(seg_b.len());
     for i in 0..max {
         let sa = *seg_a.get(i).unwrap_or(&"");
@@ -47,9 +48,16 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
-/// Split a version string into segments on `.`, `-`, `+`, `_`.
+/// Remove SemVer build metadata, which must not affect version precedence.
+fn strip_build_metadata(v: &str) -> &str {
+    v.split_once('+')
+        .map(|(precedence, _)| precedence)
+        .unwrap_or(v)
+}
+
+/// Split a version string into segments on `.`, `-`, `_`.
 fn split_version_segments(v: &str) -> Vec<&str> {
-    v.split(['.', '-', '+', '_']).collect()
+    v.split(['.', '-', '_']).collect()
 }
 
 /// Compare two version segments. If both parse as integers, compare numerically.
@@ -344,8 +352,9 @@ mod tests {
         );
         assert_eq!(
             compare_versions("0.5.3+build.2", "0.5.3+build.1"),
-            Ordering::Greater
+            Ordering::Equal
         );
+        assert_eq!(compare_versions("0.6.0+mc1.21.1", "0.6.0"), Ordering::Equal);
         assert_eq!(compare_versions("1.0.0", "1.0.0"), Ordering::Equal);
     }
 
@@ -376,6 +385,14 @@ mod tests {
         assert!(fabric_predicate_matches(">=1.0", "1.0"));
         assert!(fabric_predicate_matches(">=1.0", "2.0"));
         assert!(!fabric_predicate_matches(">=1.0", "0.9"));
+    }
+
+    #[test]
+    fn fabric_predicates_ignore_build_metadata() {
+        assert!(!fabric_predicate_matches("<0.6.0", "0.6.0+mc1.21.1"));
+        assert!(fabric_predicate_matches(">=0.6.0", "0.6.0+mc1.21.1"));
+        assert!(fabric_predicate_matches("<0.6.0", "0.5.7+mc1.21.1"));
+        assert!(fabric_predicate_matches("<0.6.0", "0.6.0-beta.3+mc1.21.1"));
     }
 
     #[test]

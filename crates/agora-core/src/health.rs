@@ -1,6 +1,6 @@
 use crate::db;
 use crate::dependency_ops::{AliasMap, JarDeps};
-use crate::jar_metadata::parse_jar_metadata;
+use crate::jar_metadata::parse_jar_metadata_for_loader;
 use crate::models::InstanceManifest;
 use crate::registry;
 use crate::version_match;
@@ -143,7 +143,7 @@ pub fn health(
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("jar") {
-                    let jar = parse_jar_metadata(&path);
+                    let jar = parse_jar_metadata_for_loader(&path, &manifest.loader);
                     let filename = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -470,13 +470,17 @@ pub fn health(
                 | version_match::VersionMatch::Unconditional
                     if decl.source.is_hard() =>
                 {
+                    let version_detail = incompatibility_version_detail(
+                        &decl.version_ranges,
+                        target_version.map(String::as_str),
+                    );
                     blockers.push(Blocker {
                         kind: BlockerKind::IncompatibleMod,
                         mod_id: Some(decl.mod_id.clone()),
                         filename: Some(source.clone()), // disable the source mod
                         message: format!(
-                            "'{}' declares an incompatibility with '{}' and both are installed.",
-                            source, decl.mod_id
+                            "'{}' declares an incompatibility with '{}'{} and both are installed.",
+                            source, decl.mod_id, version_detail
                         ),
                         suggested_action: Some(format!(
                             "Remove '{}' or '{}' to resolve the conflict.",
@@ -489,13 +493,17 @@ pub fn health(
                     // Soft incompatibility (Fabric `conflicts`, NeoForge
                     // `discouraged`, or legacy backfilled entries) whose range
                     // matches or is unconditional: warning, never a blocker.
+                    let version_detail = incompatibility_version_detail(
+                        &decl.version_ranges,
+                        target_version.map(String::as_str),
+                    );
                     warnings.push(Warning {
                         kind: WarningKind::IncompatibleModSoft,
                         mod_id: Some(decl.mod_id.clone()),
                         filename: Some(source.clone()),
                         message: format!(
-                            "'{}' may conflict with '{}' (soft incompatibility). The mod may still function; review before launch.",
-                            source, decl.mod_id
+                            "'{}' may conflict with '{}'{} (soft incompatibility). The mod may still function; review before launch.",
+                            source, decl.mod_id, version_detail
                         ),
                         suggested_action: Some(format!(
                             "If you experience issues, remove '{}' or '{}'.",
@@ -647,6 +655,19 @@ fn is_unconditional(ranges: &[String]) -> bool {
             let t = r.trim();
             t == "*" || t.is_empty() || t == "[,)" || t == "[,]"
         })
+}
+
+fn incompatibility_version_detail(ranges: &[String], target_version: Option<&str>) -> String {
+    if ranges.is_empty() {
+        return String::new();
+    }
+    let declared = ranges.join(" OR ");
+    match target_version {
+        Some(version) => format!(
+            " Declared incompatible versions: {declared}. Detected target version: {version}."
+        ),
+        None => format!(" Declared incompatible versions: {declared}."),
+    }
 }
 
 /// True when a curated `known_conflicts.severity` string denotes a
@@ -811,6 +832,10 @@ mod tests {
     }
 
     fn tracked_manifest(mods: &[(&str, &str)]) -> InstanceManifest {
+        tracked_manifest_for_loader("fabric", mods)
+    }
+
+    fn tracked_manifest_for_loader(loader: &str, mods: &[(&str, &str)]) -> InstanceManifest {
         // mods: (filename, mod_jar_id)
         let mods: Vec<InstalledMod> = mods
             .iter()
@@ -838,7 +863,7 @@ mod tests {
             name: "Test".into(),
             created_from_pack: None,
             minecraft_version: "1.21".into(),
-            loader: "fabric".into(),
+            loader: loader.into(),
             loader_version: "0.15.11".into(),
             is_locked: false,
             mods,
@@ -1300,6 +1325,39 @@ mod tests {
     }
 
     #[test]
+    fn health_breaks_ignores_sodium_extra_build_metadata() {
+        let dir = fresh_instance("sodium_extra_build_metadata");
+        let mods_dir = dir.join("mods");
+        write_jar(
+            &mods_dir,
+            "sodium-fabric-0.6.13+mc1.21.1.jar",
+            &[(
+                "fabric.mod.json",
+                r#"{"id":"sodium","version":"0.6.13","breaks":{"sodium-extra":"<0.6.0"}}"#,
+            )],
+        );
+        write_jar(
+            &mods_dir,
+            "sodium-extra-0.6.0+mc1.21.1.jar",
+            &[(
+                "fabric.mod.json",
+                r#"{"id":"sodium-extra","version":"0.6.0+mc1.21.1"}"#,
+            )],
+        );
+        let manifest = tracked_manifest(&[
+            ("sodium-fabric-0.6.13+mc1.21.1.jar", "sodium"),
+            ("sodium-extra-0.6.0+mc1.21.1.jar", "sodium-extra"),
+        ]);
+        let report = health(&dir, &manifest, None);
+
+        assert!(
+            report.blockers.is_empty(),
+            "false sodium conflict: {report:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn health_forge_maven_range_matched_blocks() {
         // Forge A declares B `versionRange="[1.0,2.0)"` with `type="incompatible"`;
         // B installed at version 1.5 — falls inside the Maven range, so blocker.
@@ -1325,7 +1383,7 @@ mod tests {
                 ),
             ],
         );
-        let manifest = tracked_manifest(&[("a.jar", "a"), ("b.jar", "b")]);
+        let manifest = tracked_manifest_for_loader("forge", &[("a.jar", "a"), ("b.jar", "b")]);
         let report = health(&dir, &manifest, None);
         assert_eq!(report.score, HealthScore::Red);
         assert_eq!(report.blockers.len(), 1);
@@ -1360,7 +1418,7 @@ mod tests {
                 ),
             ],
         );
-        let manifest = tracked_manifest(&[("a.jar", "a"), ("b.jar", "b")]);
+        let manifest = tracked_manifest_for_loader("forge", &[("a.jar", "a"), ("b.jar", "b")]);
         let report = health(&dir, &manifest, None);
         assert!(
             report.blockers.is_empty(),
@@ -1423,7 +1481,7 @@ mod tests {
                 r#"{"quilt_loader":{"id":"b","version":"1.0"}}"#,
             )],
         );
-        let manifest = tracked_manifest(&[("a.jar", "a"), ("b.jar", "b")]);
+        let manifest = tracked_manifest_for_loader("quilt", &[("a.jar", "a"), ("b.jar", "b")]);
         let report = health(&dir, &manifest, None);
         assert_eq!(report.score, HealthScore::Red);
         assert_eq!(report.blockers.len(), 1);
@@ -1453,7 +1511,7 @@ mod tests {
                 r#"{"quilt_loader":{"id":"b","version":"1.0"}}"#,
             )],
         );
-        let manifest = tracked_manifest(&[("a.jar", "a"), ("b.jar", "b")]);
+        let manifest = tracked_manifest_for_loader("quilt", &[("a.jar", "a"), ("b.jar", "b")]);
         let report = health(&dir, &manifest, None);
         assert!(
             report.blockers.is_empty(),
@@ -1487,7 +1545,7 @@ mod tests {
                 r#"{"quilt_loader":{"id":"b","version":"1.5"}}"#,
             )],
         );
-        let manifest = tracked_manifest(&[("a.jar", "a"), ("b.jar", "b")]);
+        let manifest = tracked_manifest_for_loader("quilt", &[("a.jar", "a"), ("b.jar", "b")]);
         let report = health(&dir, &manifest, None);
         assert_eq!(report.blockers.len(), 1);
         assert_eq!(report.blockers[0].kind, BlockerKind::IncompatibleMod);

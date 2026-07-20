@@ -1899,12 +1899,13 @@ pub async fn get_install_plan(
         // Fetch the target mod's manifest-declared dependencies from the registry.
         let manifest_deps = svc.get_manifest_dependencies(&item_id)?;
 
-        // Parse the jar for declared dependencies (defensive: bad path → empty deps).
-        let jar_metadata =
-            agora_core::jar_metadata::parse_jar_metadata(std::path::Path::new(&jar_path));
-
         // Load the target instance's installed mods to determine which deps are missing.
         let mut manifest = load_manifest(&app, &instance_id)?;
+        // Parse only the metadata for the instance's active loader.
+        let jar_metadata = agora_core::jar_metadata::parse_jar_metadata_for_loader(
+            std::path::Path::new(&jar_path),
+            &manifest.loader,
+        );
         dependency_ops::refresh_installed_jar_metadata(&app, &instance_id, &mut manifest.mods)?;
 
         let aliases = svc.get_all_mod_aliases()?;

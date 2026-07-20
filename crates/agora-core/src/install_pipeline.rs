@@ -1952,7 +1952,7 @@ fn prepare_manifest(
         verify_bytes(&contents, &add.hashes)?;
         let metadata = artifact_metadata(&add.artifact);
         let jar = if metadata.content_type == "mod" {
-            crate::jar_metadata::parse_jar_metadata(&staged)
+            crate::jar_metadata::parse_jar_metadata_for_loader(&staged, &manifest.loader)
         } else {
             crate::dependency_ops::JarDeps::default()
         };

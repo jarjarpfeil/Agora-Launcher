@@ -781,7 +781,14 @@ impl Resolver {
             .await?;
         let candidate = select_raw_modrinth_candidate(&candidates, requested_version)?;
         let artifact = raw_modrinth_artifact(project_id, candidate)?;
-        let dependencies = self.resolve_raw_modrinth_deps(manifest, candidate).await;
+        // A multi-loader Modrinth version may advertise compatibility-route
+        // dependencies (for example Connector for NeoForge) at the version
+        // level. Once the verified JAR is available, its active-loader-native
+        // metadata is the authoritative dependency source.
+        let native_metadata = self.native_loader_metadata(manifest, candidate).await;
+        let dependencies = self
+            .resolve_raw_modrinth_deps(manifest, candidate, native_metadata.as_ref())
+            .await;
 
         let operation = if update {
             let installed = find_installed_by_identity(manifest, project_id).ok_or_else(|| {
@@ -881,10 +888,37 @@ impl Resolver {
             .collect())
     }
 
+    /// Download and verify a selected Modrinth artifact solely to inspect its
+    /// active-loader metadata during dependency resolution. A failed download
+    /// or missing/mismatched API hash deliberately falls back to the Modrinth
+    /// version dependency list rather than inventing a dependency result.
+    async fn native_loader_metadata(
+        &self,
+        manifest: &InstanceManifest,
+        candidate: &RawModrinthVersionCandidate,
+    ) -> Option<crate::dependency_ops::JarDeps> {
+        let expected_sha1 = candidate.sha1.as_deref()?.trim();
+        if expected_sha1.is_empty() {
+            return None;
+        }
+        let bytes =
+            crate::download::download_mod_bytes(&self.ctx.http_clients, &candidate.download_url)
+                .await
+                .ok()?;
+        if !crate::download::sha1_hex(&bytes).eq_ignore_ascii_case(expected_sha1) {
+            return None;
+        }
+
+        let parsed =
+            crate::jar_metadata::parse_jar_metadata_bytes_for_loader(&bytes, &manifest.loader);
+        parsed.has_native_metadata.then_some(parsed.metadata)
+    }
+
     async fn resolve_raw_modrinth_deps(
         &self,
         manifest: &InstanceManifest,
         root: &RawModrinthVersionCandidate,
+        root_native_metadata: Option<&crate::dependency_ops::JarDeps>,
     ) -> Vec<ResolvedDep> {
         let installed_ids: HashSet<String> = all_installed(manifest)
             .filter_map(|item| item.modrinth_id.as_ref())
@@ -892,7 +926,7 @@ impl Resolver {
             .collect();
 
         let mut queue = VecDeque::new();
-        for dep in &root.dependencies {
+        for dep in effective_raw_modrinth_dependencies(root, root_native_metadata) {
             let requirement = match dep.dependency_type.as_str() {
                 "required" => Requirement::Required,
                 "optional" => Requirement::Optional,
@@ -966,7 +1000,12 @@ impl Resolver {
                 Some(candidates) => {
                     match select_raw_modrinth_candidate(&candidates, version_id.as_deref()) {
                         Ok(candidate) => {
-                            let children = candidate.dependencies.clone();
+                            let native_metadata =
+                                self.native_loader_metadata(manifest, candidate).await;
+                            let children = effective_raw_modrinth_dependencies(
+                                candidate,
+                                native_metadata.as_ref(),
+                            );
                             match raw_modrinth_artifact(&pid, candidate) {
                                 Ok(artifact) => {
                                     (DepDisposition::InstallCandidate { artifact }, children)
@@ -1126,6 +1165,38 @@ impl Resolver {
             registry_revision,
         })
     }
+}
+
+/// Prefer active-loader-native dependencies over Modrinth's version-level
+/// dependency list. The latter has no loader condition, so it can include a
+/// compatibility bridge that is irrelevant to a native Fabric/Quilt build.
+fn effective_raw_modrinth_dependencies(
+    candidate: &RawModrinthVersionCandidate,
+    native_metadata: Option<&crate::dependency_ops::JarDeps>,
+) -> Vec<RawModrinthDep> {
+    let Some(metadata) = native_metadata else {
+        return candidate.dependencies.clone();
+    };
+
+    metadata
+        .depends_on
+        .iter()
+        .map(|project_id| RawModrinthDep {
+            project_id: Some(project_id.clone()),
+            version_id: None,
+            dependency_type: "required".into(),
+        })
+        .chain(
+            metadata
+                .optional_deps
+                .iter()
+                .map(|project_id| RawModrinthDep {
+                    project_id: Some(project_id.clone()),
+                    version_id: None,
+                    dependency_type: "optional".into(),
+                }),
+        )
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1956,6 +2027,42 @@ mod tests {
         assert!(is_platform_dependency("quilt_loader", "quilt"));
         assert!(is_platform_dependency("neoforge", "neoforge"));
         assert!(!is_platform_dependency("some-mod", "fabric"));
+    }
+
+    #[test]
+    fn native_loader_dependencies_replace_unscoped_modrinth_route_dependencies() {
+        let candidate = RawModrinthVersionCandidate {
+            version: "1.0".into(),
+            version_id: "version".into(),
+            name: "SwingThrough".into(),
+            filename: "swingthrough.jar".into(),
+            download_url: "https://cdn.modrinth.com/swingthrough.jar".into(),
+            sha1: Some("a".repeat(40)),
+            sha512: None,
+            size: None,
+            mc_versions: vec!["1.21.1".into()],
+            loaders: vec!["fabric".into(), "neoforge".into()],
+            release_date: None,
+            primary: true,
+            changelog: None,
+            dependencies: vec![RawModrinthDep {
+                project_id: Some("connector".into()),
+                version_id: None,
+                dependency_type: "required".into(),
+            }],
+        };
+        let native_fabric = crate::dependency_ops::JarDeps {
+            mod_jar_id: Some("swingthrough".into()),
+            ..Default::default()
+        };
+
+        assert!(effective_raw_modrinth_dependencies(&candidate, Some(&native_fabric)).is_empty());
+        assert_eq!(
+            effective_raw_modrinth_dependencies(&candidate, None)[0]
+                .project_id
+                .as_deref(),
+            Some("connector")
+        );
     }
 
     #[test]
