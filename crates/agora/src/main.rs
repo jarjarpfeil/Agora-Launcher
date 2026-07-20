@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use agora_core::clone::ClonePrefs;
 use agora_core::crash_service::CrashService;
@@ -36,6 +38,41 @@ impl agora_core::runtime_manager::RuntimeProgress for ConsoleRuntimeProgress {
 
 struct ConsoleLaunchProgress {
     json: bool,
+}
+
+struct CliProgressSink {
+    file: Mutex<std::fs::File>,
+    console: bool,
+}
+
+impl CliProgressSink {
+    fn new(path: &Path, console: bool) -> anyhow::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: Mutex::new(file),
+            console,
+        })
+    }
+
+    fn log(&self, level: &str, message: &str) {
+        let line = format!("{} [{level}] {message}", chrono::Utc::now().to_rfc3339());
+        if let Ok(mut file) = self.file.lock() {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
+impl agora_core::event_sink::ProgressSink for CliProgressSink {
+    fn report(&self, event: agora_core::event_sink::ProgressEvent) {
+        let message = format!("{:?}: {}", event.phase, event.message);
+        self.log("progress", &message);
+        if self.console {
+            eprintln!("[..] {message}");
+        }
+    }
 }
 
 impl agora_core::launch_service::LaunchProgress for ConsoleLaunchProgress {
@@ -88,6 +125,9 @@ struct Cli {
         help = "Registry repository (owner/repo). Overrides AGORA_REGISTRY_REPO env."
     )]
     registry_repo: Option<String>,
+
+    #[arg(long, global = true, help = "Append diagnostics to this log file")]
+    log_file: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -118,7 +158,14 @@ enum Commands {
         action: SnapshotsCmd,
     },
     Import {
-        path: PathBuf,
+        #[arg(required_unless_present = "url")]
+        path: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with = "path",
+            help = "Download and import a .mrpack URL"
+        )]
+        url: Option<String>,
         #[arg(long, help = "Symlink saves instead of copying")]
         symlink_saves: bool,
     },
@@ -252,6 +299,14 @@ enum LoaderCmd {
             help = "List loader versions compatible with this Minecraft version"
         )]
         mc_version: Option<String>,
+    },
+    /// Install a pinned loader profile without creating an instance.
+    Install {
+        loader: String,
+        mc_version: String,
+        loader_version: String,
+        #[arg(long, help = "Reinstall even when a verified profile exists")]
+        force: bool,
     },
 }
 
@@ -661,6 +716,18 @@ async fn main() {
     let json = output_fmt.is_json_output();
     let paths =
         agora_core::app_paths::AppPaths::platform_default_with_override(cli.data_dir.clone());
+    let log_path = cli
+        .log_file
+        .clone()
+        .unwrap_or_else(|| paths.root().join("logs").join("agora-cli.log"));
+    let progress = match CliProgressSink::new(&log_path, !json) {
+        Ok(progress) => Arc::new(progress),
+        Err(error) => {
+            eprintln!("Error opening CLI log '{}': {error}", log_path.display());
+            std::process::exit(1);
+        }
+    };
+    progress.log("info", "Agora CLI started");
 
     // Migration must run before normal initialization. Initializing the
     // destination would create local_state.db and turn a fresh destination
@@ -685,11 +752,14 @@ async fn main() {
     let (ctx, warnings) = match agora_core::ctx::CoreContext::initialize(paths.clone()) {
         Ok(result) => result,
         Err(error) => {
+            progress.log("error", &format!("Core initialization failed: {error}"));
             eprintln!("Error initializing Agora core: {error}");
             std::process::exit(1);
         }
     };
+    let ctx = ctx.with_progress_sink(progress.clone());
     for warning in warnings {
+        progress.log("warning", &warning);
         eprintln!("Warning: {warning}");
     }
     let data_dir = paths.root().to_path_buf();
@@ -700,6 +770,7 @@ async fn main() {
 
     let result = run_command(cli, &paths, &data_dir, &client, &ctx, output_fmt).await;
     if let Err(e) = result {
+        progress.log("error", &e.to_string());
         let code = exit_code_from_error(&e);
         if json {
             let err_val = serde_json::json!({
@@ -1056,6 +1127,26 @@ async fn run_command(
                     for loader in &loaders {
                         println!("{loader}");
                     }
+                }
+            }
+            LoaderCmd::Install {
+                loader,
+                mc_version,
+                loader_version,
+                force,
+            } => {
+                let summary = LoaderService::new(ctx.clone())
+                    .ensure_installed(&loader, &mc_version, &loader_version, force)
+                    .await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&summary)?);
+                } else {
+                    println!(
+                        "Installed {} {} for Minecraft {}",
+                        summary.tuple.loader,
+                        summary.tuple.loader_version,
+                        summary.tuple.minecraft_version
+                    );
                 }
             }
         },
@@ -1771,10 +1862,7 @@ async fn run_command(
                     println!("  [BLOCK] {}", b.message);
                 }
             }
-            if matches!(
-                report.score,
-                agora_core::health::HealthScore::Red | agora_core::health::HealthScore::Yellow
-            ) {
+            if report.score == agora_core::health::HealthScore::Red {
                 anyhow::bail!("Health score is {:?} (see report above)", report.score);
             }
         }
@@ -1919,12 +2007,26 @@ async fn run_command(
         },
         Commands::Import {
             path,
+            url,
             symlink_saves,
         } => {
+            let svc = agora_core::import_service::ImportService::new(ctx.clone());
+            if let Some(url) = url {
+                if symlink_saves {
+                    anyhow::bail!("--symlink-saves is not supported for URL imports");
+                }
+                let result = svc.run_mrpack_url(&url).await?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("Imported: {} ({} mods)", result.name, result.imported_mods);
+                }
+                return Ok(());
+            }
+            let path = path.expect("clap requires either path or --url");
             if !path.exists() {
                 anyhow::bail!("Path '{}' does not exist", path.display());
             }
-            let svc = agora_core::import_service::ImportService::new(ctx.clone());
             let import_source = if path.is_dir() {
                 agora_core::import_service::ImportSource::Directory(path)
             } else {

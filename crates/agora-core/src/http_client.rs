@@ -60,6 +60,13 @@ pub(crate) fn category_allowlist(category: ClientCategory) -> &'static [&'static
             "raw.githubusercontent.com",
         ],
         ClientCategory::Modrinth => &["api.modrinth.com", "cdn.modrinth.com"],
+        ClientCategory::Modpack => &[
+            "cdn.modrinth.com",
+            "github.com",
+            "objects.githubusercontent.com",
+            "releases.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+        ],
         ClientCategory::GitHub | ClientCategory::Registry => &[
             "github.com",
             "api.github.com",
@@ -104,6 +111,8 @@ pub enum ClientCategory {
     Loader,
     /// Modrinth API and CDN.
     Modrinth,
+    /// Modpack archives, which are substantially larger than individual mods.
+    Modpack,
     /// GitHub API and release assets.
     GitHub,
     /// Microsoft/ Xbox Live authentication (MSA).
@@ -123,6 +132,7 @@ impl ClientCategory {
             ClientCategory::MojangContent => Duration::from_secs(120),
             ClientCategory::Loader => Duration::from_secs(60),
             ClientCategory::Modrinth => Duration::from_secs(30),
+            ClientCategory::Modpack => Duration::from_secs(5 * 60),
             ClientCategory::GitHub => Duration::from_secs(30),
             ClientCategory::Microsoft => Duration::from_secs(30),
             ClientCategory::Registry => Duration::from_secs(60),
@@ -139,6 +149,7 @@ impl ClientCategory {
         match self {
             ClientCategory::MojangContent => Some(200 * 1024 * 1024),
             ClientCategory::Modrinth => Some(200 * 1024 * 1024),
+            ClientCategory::Modpack => Some(500 * 1024 * 1024),
             ClientCategory::Loader => Some(100 * 1024 * 1024),
             ClientCategory::Registry => Some(100 * 1024 * 1024),
             ClientCategory::JavaRuntime => Some(512 * 1024 * 1024),
@@ -215,6 +226,7 @@ impl HttpClients {
             ClientCategory::MojangContent => &self.mojang_content,
             ClientCategory::Loader => &self.loader,
             ClientCategory::Modrinth => &self.modrinth,
+            ClientCategory::Modpack => &self.modrinth,
             ClientCategory::GitHub => &self.github,
             ClientCategory::Microsoft => &self.microsoft,
             ClientCategory::Registry => &self.registry,
@@ -625,6 +637,22 @@ pub async fn checked_get_bytes(
     category: ClientCategory,
     url: &str,
 ) -> LauncherResult<Vec<u8>> {
+    checked_get_bytes_with_progress(clients, category, url, |_downloaded, _total| {}).await
+}
+
+/// Download bytes while reporting cumulative body progress after each chunk.
+///
+/// The callback is synchronous and runs on the async task that owns the
+/// response. It must remain lightweight and must not perform blocking I/O.
+pub async fn checked_get_bytes_with_progress<F>(
+    clients: &HttpClients,
+    category: ClientCategory,
+    url: &str,
+    mut on_progress: F,
+) -> LauncherResult<Vec<u8>>
+where
+    F: FnMut(u64, Option<u64>),
+{
     let mut response = checked_request(clients, category, url).await?;
 
     if !response.status().is_success() {
@@ -654,6 +682,8 @@ pub async fn checked_get_bytes(
     let cap = response.content_length().unwrap_or(0).min(max as u64) as usize;
     let mut data = Vec::with_capacity(cap);
     let mut total = 0usize;
+    let content_length = response.content_length();
+    on_progress(0, content_length);
     loop {
         let chunk = response.chunk().await.map_err(|e| LauncherError::Generic {
             code: "ERR_NETWORK".into(),
@@ -668,6 +698,7 @@ pub async fn checked_get_bytes(
             });
         }
         data.extend_from_slice(&chunk);
+        on_progress(total as u64, content_length);
     }
     Ok(data)
 }
@@ -958,6 +989,7 @@ mod tests {
             ClientCategory::MojangContent,
             ClientCategory::Loader,
             ClientCategory::Modrinth,
+            ClientCategory::Modpack,
             ClientCategory::GitHub,
             ClientCategory::Microsoft,
             ClientCategory::Registry,
@@ -1108,6 +1140,7 @@ mod tests {
         assert!(!category_allowlist(ClientCategory::GitHub).is_empty());
         assert!(!category_allowlist(ClientCategory::Microsoft).is_empty());
         assert!(!category_allowlist(ClientCategory::Modrinth).is_empty());
+        assert!(!category_allowlist(ClientCategory::Modpack).is_empty());
         assert!(!category_allowlist(ClientCategory::Loader).is_empty());
         assert!(!category_allowlist(ClientCategory::MojangContent).is_empty());
         assert!(!category_allowlist(ClientCategory::Registry).is_empty());

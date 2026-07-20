@@ -161,7 +161,9 @@ impl CoreContext {
                         }
                     }
                     match crate::loader_manifests::LoaderCatalog::init_from_registry(&conn) {
-                        Ok(true) => warnings.push("Using signed registry loader catalog".into()),
+                        Ok(true) => {
+                            warnings.push("Using merged signed and embedded loader catalogs".into())
+                        }
                         Ok(false) => warnings.push("Using embedded loader catalog".into()),
                         Err(error) => warnings.push(format!(
                             "Cannot load signed loader catalog; using embedded fallback: {error}"
@@ -337,11 +339,25 @@ impl CoreContext {
 
         // Parse both catalogs before replacing either active snapshot. This
         // keeps loader and runtime data consistent when one catalog is corrupt.
-        let loader_catalog = match crate::loader_manifests::LoaderCatalog::from_registry(&conn) {
+        let registry_loader_catalog = match crate::loader_manifests::LoaderCatalog::from_registry(
+            &conn,
+        ) {
             Ok(catalog) => catalog,
             Err(error) => {
                 warnings.push(format!(
                     "Cannot load signed loader catalog; preserving existing active catalogs: {error}"
+                ));
+                return Ok(warnings);
+            }
+        };
+        let has_registry_loader_catalog = registry_loader_catalog.is_some();
+        let loader_catalog = match crate::loader_manifests::LoaderCatalog::merge_with_embedded(
+            registry_loader_catalog,
+        ) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                warnings.push(format!(
+                    "Cannot merge signed loader catalog; preserving existing active catalogs: {error}"
                 ));
                 return Ok(warnings);
             }
@@ -363,10 +379,10 @@ impl CoreContext {
             }
         };
 
-        crate::loader_manifests::LoaderCatalog::replace_active(loader_catalog.clone())?;
+        crate::loader_manifests::LoaderCatalog::replace_active(Some(loader_catalog))?;
         self.runtime_catalog.replace(runtime_catalog);
-        warnings.push(if loader_catalog.is_some() {
-            "Using signed registry loader catalog".into()
+        warnings.push(if has_registry_loader_catalog {
+            "Using merged signed and embedded loader catalogs".into()
         } else {
             "Using embedded loader catalog".into()
         });

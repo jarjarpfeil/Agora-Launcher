@@ -243,22 +243,28 @@ impl LoaderService {
             std::fs::create_dir_all(&staged).map_err(|_| LauncherError::InstanceCreateFailed)?;
             let installer = staged.join(&entry.file_name);
             atomic_write(&installer, data)?;
-            let status =
+            ensure_launcher_profile_stub(minecraft_root)?;
+            let installer_result =
                 run_installer_process(&java_path.path, &installer, &tuple.loader, minecraft_root)
                     .await?;
-            if status != 0 {
+            if installer_result.exit_code != 0 {
+                let detail = installer_result.failure_detail();
                 return Err(LauncherError::Generic {
                     code: "ERR_INSTALLER_FAILED".into(),
-                    message: format!("{} installer exited with status {status}", tuple.loader),
+                    message: format!(
+                        "{} installer exited with status {}: {detail}",
+                        tuple.loader, installer_result.exit_code
+                    ),
                 });
             }
+            normalize_forge_profile(minecraft_root, tuple)?;
             let receipt = installed_profile::create_receipt_for_installed_profile(
                 minecraft_root,
                 receipts_root,
                 tuple,
                 loader_manifests::strip_sha_prefix(&entry.sha256),
                 &entry.source_url,
-                status,
+                installer_result.exit_code,
             )
             .map_err(|issue| LauncherError::Generic {
                 code: "ERR_PROFILE_CORRUPT".into(),
@@ -435,7 +441,7 @@ async fn run_installer_process(
     installer_path: &Path,
     loader: &str,
     minecraft_root: &Path,
-) -> LauncherResult<i32> {
+) -> LauncherResult<InstallerProcessResult> {
     let mut child = tokio::process::Command::new(java_path)
         .args([
             std::ffi::OsString::from("-jar"),
@@ -458,10 +464,14 @@ async fn run_installer_process(
     let stdout_task = tokio::spawn(read_pipe_bounded(stdout));
     let stderr_task = tokio::spawn(read_pipe_bounded(stderr));
     let status = tokio::time::timeout(INSTALLER_TIMEOUT, child.wait()).await;
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    let stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
     match status {
-        Ok(Ok(status)) => Ok(status.code().unwrap_or(1)),
+        Ok(Ok(status)) => Ok(InstallerProcessResult {
+            exit_code: status.code().unwrap_or(1),
+            stdout,
+            stderr,
+        }),
         Ok(Err(error)) => Err(LauncherError::Generic {
             code: "ERR_INSTALLER_FAILED".into(),
             message: error.to_string(),
@@ -470,6 +480,79 @@ async fn run_installer_process(
             code: "ERR_INSTALLER_TIMEOUT".into(),
             message: format!("{loader} installer timed out"),
         }),
+    }
+}
+
+fn ensure_launcher_profile_stub(minecraft_root: &Path) -> LauncherResult<()> {
+    let profile = minecraft_root.join("launcher_profiles.json");
+    if profile.exists() {
+        return Ok(());
+    }
+    atomic_write(&profile, br#"{"profiles":{},"settings":{},"version":3}"#)
+}
+
+fn normalize_forge_profile(minecraft_root: &Path, tuple: &LoaderTuple) -> LauncherResult<()> {
+    if tuple.loader != "forge" {
+        return Ok(());
+    }
+    let expected_id = installed_profile::derive_profile_id(tuple);
+    let expected_path = minecraft_root
+        .join("versions")
+        .join(&expected_id)
+        .join(format!("{expected_id}.json"));
+    if expected_path.exists() {
+        return Ok(());
+    }
+    let generated_id = format!("{}-forge-{}", tuple.minecraft_version, tuple.loader_version);
+    let generated_dir = minecraft_root.join("versions").join(&generated_id);
+    let generated_path = generated_dir.join(format!("{generated_id}.json"));
+    let raw = std::fs::read(&generated_path).map_err(|error| LauncherError::Generic {
+        code: "ERR_PROFILE_MISSING".into(),
+        message: format!("Forge generated profile was not found: {error}"),
+    })?;
+    let mut profile: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|error| LauncherError::Generic {
+            code: "ERR_PROFILE_CORRUPT".into(),
+            message: format!("Forge generated invalid profile JSON: {error}"),
+        })?;
+    profile["id"] = serde_json::Value::String(expected_id.clone());
+    let normalized =
+        serde_json::to_vec_pretty(&profile).map_err(|error| LauncherError::Generic {
+            code: "ERR_PROFILE_CORRUPT".into(),
+            message: error.to_string(),
+        })?;
+    atomic_write(&expected_path, &normalized)?;
+    std::fs::remove_dir_all(generated_dir).map_err(|error| LauncherError::Generic {
+        code: "ERR_PROFILE_PROMOTION".into(),
+        message: format!("Could not remove the Forge installer profile after promotion: {error}"),
+    })
+}
+
+struct InstallerProcessResult {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl InstallerProcessResult {
+    fn failure_detail(&self) -> String {
+        let output = if self.stderr.is_empty() {
+            &self.stdout
+        } else {
+            &self.stderr
+        };
+        let text = String::from_utf8_lossy(output);
+        let text = text.trim();
+        if text.is_empty() {
+            return "installer produced no diagnostic output".into();
+        }
+        let start = text
+            .char_indices()
+            .rev()
+            .nth(8191)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        text[start..].to_string()
     }
 }
 

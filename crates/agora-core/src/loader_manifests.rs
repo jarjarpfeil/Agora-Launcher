@@ -17,7 +17,7 @@ const MC_VERSIONS: &str = include_str!("../../../loader-manifests/minecraft_vers
 // Manifest types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
 pub struct LoaderEntry {
     pub mc_version: String,
     pub loader_version: String,
@@ -129,22 +129,62 @@ impl LoaderCatalog {
         Ok(Some(catalog))
     }
 
-    /// Load the catalog with priority: signed registry.db > embedded.
+    /// Merge a signed registry catalog with the catalog bundled into the app.
+    /// Both sources contain pinned, reviewed artifacts. Their union prevents an
+    /// older cached registry from removing loader versions shipped by a newer
+    /// app, while conflicting definitions for the same tuple fail closed.
+    pub fn merge_with_embedded(registry: Option<Self>) -> LauncherResult<Self> {
+        let mut merged = Self::embedded();
+        let Some(registry) = registry else {
+            return Ok(merged);
+        };
+
+        for domain in registry.domain_allowlist {
+            if !merged.domain_allowlist.contains(&domain) {
+                merged.domain_allowlist.push(domain);
+            }
+        }
+        merged.domain_allowlist.sort();
+
+        for (loader, entries) in registry.loaders {
+            let target = merged.loaders.entry(loader.clone()).or_default();
+            for entry in entries {
+                if let Some(existing) = target.iter().find(|existing| {
+                    existing.mc_version == entry.mc_version
+                        && existing.loader_version == entry.loader_version
+                }) {
+                    if existing != &entry {
+                        return Err(LauncherError::Generic {
+                            code: "ERR_LOADER_CATALOG_CONFLICT".into(),
+                            message: format!(
+                                "Conflicting pinned metadata for {loader} {} {}",
+                                entry.mc_version, entry.loader_version
+                            ),
+                        });
+                    }
+                } else {
+                    target.push(entry);
+                }
+            }
+        }
+        Ok(merged)
+    }
+
+    /// Load the verified union of the signed registry and embedded catalogs.
     ///
     /// Pass `Some(&conn)` when a registry database is available; pass `None`
     /// to always use the embedded copy.
     pub fn effective(registry: Option<&rusqlite::Connection>) -> LauncherResult<Self> {
         if let Some(conn) = registry {
             match Self::from_registry(conn) {
-                Ok(Some(catalog)) => return Ok(catalog),
-                Ok(None) => {}
+                Ok(catalog) => return Self::merge_with_embedded(catalog),
                 Err(e) => {
                     #[cfg(debug_assertions)]
                     eprintln!("[agora-core] Registry loader_catalog invalid: {e}");
                 }
             }
         }
-        Ok(Self::embedded())
+        Self::merge_with_embedded(None)
     }
 
     /// Replace the process-wide runtime snapshot with a registry-sourced
@@ -157,8 +197,9 @@ impl LoaderCatalog {
     ///
     pub fn init_from_registry(conn: &rusqlite::Connection) -> LauncherResult<bool> {
         let catalog = Self::from_registry(conn)?;
-        Self::replace_active(catalog.clone())?;
-        Ok(catalog.is_some())
+        let has_registry_catalog = catalog.is_some();
+        Self::replace_active(Some(Self::merge_with_embedded(catalog)?))?;
+        Ok(has_registry_catalog)
     }
 
     /// Atomically replace the active registry override after all coordinated
@@ -365,6 +406,39 @@ mod tests {
         assert!(LoaderCatalog::init_from_registry(&conn).unwrap());
         assert!(LoaderCatalog::init_from_registry(&conn).unwrap());
         assert!(!catalog().domain_allowlist.is_empty());
+    }
+
+    #[test]
+    fn stale_registry_catalog_cannot_remove_embedded_loader_pins() {
+        let embedded = LoaderCatalog::embedded();
+        let registry_entry = embedded
+            .find_entry("fabric", "1.21.1", "0.18.6")
+            .unwrap()
+            .clone();
+        let registry = LoaderCatalog {
+            domain_allowlist: embedded.domain_allowlist.clone(),
+            loaders: std::collections::BTreeMap::from([("fabric".into(), vec![registry_entry])]),
+        };
+
+        let merged = LoaderCatalog::merge_with_embedded(Some(registry)).unwrap();
+        assert!(merged.find_entry("fabric", "1.21.1", "0.18.4").is_some());
+    }
+
+    #[test]
+    fn conflicting_registry_loader_pin_fails_closed() {
+        let embedded = LoaderCatalog::embedded();
+        let mut conflicting = embedded
+            .find_entry("fabric", "1.21.1", "0.18.6")
+            .unwrap()
+            .clone();
+        conflicting.sha256 = "0".repeat(64);
+        let registry = LoaderCatalog {
+            domain_allowlist: embedded.domain_allowlist.clone(),
+            loaders: std::collections::BTreeMap::from([("fabric".into(), vec![conflicting])]),
+        };
+
+        let error = LoaderCatalog::merge_with_embedded(Some(registry)).unwrap_err();
+        assert!(error.to_string().contains("Conflicting pinned metadata"));
     }
 
     #[test]

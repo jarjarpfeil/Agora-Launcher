@@ -469,24 +469,43 @@ function ConflictRow({ conflict, selected, onSelect }: { conflict: DepConflict; 
 }
 
 function ProgressView({ progress, onCancel }: { progress: ProgressEvent; onCancel: () => void }) {
-  const label = progress.message || progress.phase;
+  const phaseLabel = installPhaseLabel(progress.phase);
+  const label = progress.message || phaseLabel;
   const hasBytes = progress.bytesTotal > 0;
-  const pct = hasBytes ? Math.round((progress.bytesDownloaded / progress.bytesTotal) * 100) : 0;
+  const hasSteps = progress.totalSteps > 0;
+  const pct = hasBytes
+    ? Math.round((progress.bytesDownloaded / progress.bytesTotal) * 100)
+    : hasSteps
+      ? Math.round((progress.step / progress.totalSteps) * 100)
+      : null;
 
   return (
     <div className="space-y-4 py-4">
       <div className="flex items-center gap-3">
         <div className="h-5 w-5 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-        <span className="text-sm">{label}</span>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">{phaseLabel}</p>
+          <p className="truncate text-xs text-muted-foreground" title={label}>{label}</p>
+        </div>
       </div>
-      {hasBytes && (
+      {pct !== null && (
         <div className="space-y-1">
           <div className="h-2 rounded-full bg-muted overflow-hidden">
             <div className="h-full bg-primary transition-all duration-300" style={{ width: `${pct}%` }} />
           </div>
-          <p className="text-xs text-muted-foreground">
-            {formatBytes(progress.bytesDownloaded)} / {formatBytes(progress.bytesTotal)} ({pct}%)
-          </p>
+          <div className="flex justify-between text-xs text-muted-foreground">
+            <span>{pct}%</span>
+            {hasBytes ? (
+              <span>{formatBytes(progress.bytesDownloaded)} / {formatBytes(progress.bytesTotal)}</span>
+            ) : (
+              <span>File {Math.min(progress.step, progress.totalSteps)} of {progress.totalSteps}</span>
+            )}
+          </div>
+        </div>
+      )}
+      {pct === null && (
+        <div className="h-2 overflow-hidden rounded-full bg-muted">
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-primary" />
         </div>
       )}
       <div className="flex justify-end">
@@ -494,6 +513,20 @@ function ProgressView({ progress, onCancel }: { progress: ProgressEvent; onCance
       </div>
     </div>
   );
+}
+
+function installPhaseLabel(phase: ProgressEvent['phase']): string {
+  switch (phase) {
+    case 'resolving': return 'Preparing installation';
+    case 'staging': return 'Loading files';
+    case 'snapshotting': return 'Creating recovery snapshot';
+    case 'applying': return 'Applying instance changes';
+    case 'health-scan': return 'Checking pack health';
+    case 'done': return 'Finishing installation';
+    case 'failed': return 'Installation failed';
+    case 'cancelled': return 'Installation cancelled';
+    default: return 'Installing';
+  }
 }
 
 function ResultView({ outcome, instanceId, onOpenInstance, onClose }: {

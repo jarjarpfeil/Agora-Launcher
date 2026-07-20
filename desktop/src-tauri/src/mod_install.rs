@@ -4,7 +4,6 @@ use crate::instances;
 use crate::models::{InstalledMod, InstanceManifest, InstanceRow, ModVersionCandidate};
 use crate::paths;
 use crate::registry;
-use agora_core::http_client::HttpClients;
 use std::path::Path;
 
 /// Resolve instance info via core InstanceService.
@@ -41,14 +40,6 @@ pub(crate) fn check_not_locked(app: &tauri::AppHandle, instance_id: &str) -> Lau
     let ctx = crate::core_context(app)?;
     let svc = agora_core::install_service::InstallService::new(ctx);
     svc.check_not_locked(instance_id)
-}
-
-/// Download mod bytes via core download helper.
-pub(crate) async fn download_mod_bytes(
-    clients: &HttpClients,
-    url: &str,
-) -> LauncherResult<Vec<u8>> {
-    agora_core::download::download_mod_bytes(clients, url).await
 }
 
 /// List versions for a curated registry item via core Resolver.

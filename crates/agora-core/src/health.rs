@@ -104,6 +104,22 @@ fn resolve_id_file_index(
     resolved
 }
 
+fn dependency_id_key(id: &str) -> String {
+    let key = id
+        .chars()
+        .filter(|character| *character != '-' && *character != '_')
+        .collect::<String>()
+        .to_lowercase();
+    match key.as_str() {
+        "clothconfig2" => "clothconfig".into(),
+        _ => key,
+    }
+}
+
+fn is_fabric_api_module(id: &str) -> bool {
+    id.starts_with("fabric-") || id.starts_with("fabric_")
+}
+
 /// Run the pre-launch health scan on an instance.
 ///
 /// Scans every JAR in `mods/`, parses declared dependencies, cross-references
@@ -215,6 +231,16 @@ pub fn health(
     // duplicate-JAR warnings.
     let presence_id_to_files = resolve_id_file_index(presence_id_to_files, &aliases);
     let primary_id_to_files = resolve_id_file_index(primary_id_to_files, &aliases);
+    let dependency_presence_keys: HashSet<String> = presence_id_to_files
+        .keys()
+        .map(|id| dependency_id_key(id))
+        .collect();
+    let connector_bridge_present = dependency_presence_keys
+        .iter()
+        .any(|id| id == "connector" || id == "connectormod")
+        && dependency_presence_keys
+            .iter()
+            .any(|id| id == "forgifiedfabricapi");
 
     // Build alias-resolved mod_id -> mod_version map for the version-matching
     // step below. The parser populates `JarDeps.mod_version` from
@@ -273,9 +299,13 @@ pub fn health(
         for dep in &ij.jar.depends_on {
             let dep_resolved = aliases.resolve_or_self(dep).to_lowercase();
             let dep_present = presence_id_to_files.contains_key(&dep_resolved)
-                || manifest_mod_ids
-                    .iter()
-                    .any(|id| aliases.resolve_or_self(id).to_lowercase() == dep_resolved);
+                || dependency_presence_keys.contains(&dependency_id_key(&dep_resolved))
+                || (connector_bridge_present && is_fabric_api_module(&dep_resolved))
+                || manifest_mod_ids.iter().any(|id| {
+                    let resolved = aliases.resolve_or_self(id).to_lowercase();
+                    resolved == dep_resolved
+                        || dependency_id_key(&resolved) == dependency_id_key(&dep_resolved)
+                });
             if !dep_present {
                 let display_name = if dep_resolved != dep.to_lowercase() {
                     dep_resolved.clone()
@@ -539,9 +569,13 @@ pub fn health(
         for dep in &ij.jar.optional_deps {
             let dep_resolved = aliases.resolve_or_self(dep).to_lowercase();
             let dep_present = presence_id_to_files.contains_key(&dep_resolved)
-                || manifest_mod_ids
-                    .iter()
-                    .any(|id| aliases.resolve_or_self(id).to_lowercase() == dep_resolved);
+                || dependency_presence_keys.contains(&dependency_id_key(&dep_resolved))
+                || (connector_bridge_present && is_fabric_api_module(&dep_resolved))
+                || manifest_mod_ids.iter().any(|id| {
+                    let resolved = aliases.resolve_or_self(id).to_lowercase();
+                    resolved == dep_resolved
+                        || dependency_id_key(&resolved) == dependency_id_key(&dep_resolved)
+                });
             if !dep_present {
                 let display_name = if dep_resolved != dep.to_lowercase() {
                     dep_resolved.clone()
@@ -630,6 +664,13 @@ fn is_hard_severity(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_ids_normalize_known_loader_aliases_without_collapsing_versions() {
+        assert_eq!(dependency_id_key("cloth-config2"), "clothconfig");
+        assert_eq!(dependency_id_key("cloth_config"), "clothconfig");
+        assert_ne!(dependency_id_key("example1"), dependency_id_key("example2"));
+    }
     use crate::dependency_ops::{IncompatibilityDecl, IncompatibilitySource, JarDeps};
     use crate::models::InstalledMod;
 

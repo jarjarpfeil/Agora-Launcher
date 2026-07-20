@@ -1,5 +1,6 @@
 use crate::error::{LauncherError, LauncherResult};
-use crate::models::InstanceManifest;
+use crate::event_sink::{OperationId, ProgressEvent, ProgressPhase, ProgressSink};
+use crate::models::{InstalledMod, InstanceManifest};
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -101,6 +102,62 @@ fn verify_mrpack_file_hash(file: &MrpackFile, bytes: &[u8]) -> LauncherResult<()
         ));
     }
     Ok(())
+}
+
+fn inventory_pack_content(
+    instance_dir: &Path,
+    directory: &str,
+    content_type: &str,
+) -> LauncherResult<Vec<InstalledMod>> {
+    let root = instance_dir.join(directory);
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut installed = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|e| {
+        import_error(
+            "ERR_IMPORT_READ",
+            format!("Cannot inventory imported {directory}: {e}"),
+        )
+    })? {
+        let entry = entry.map_err(|e| import_error("ERR_IMPORT_READ", e.to_string()))?;
+        if !entry
+            .file_type()
+            .map_err(|e| import_error("ERR_IMPORT_READ", e.to_string()))?
+            .is_file()
+        {
+            continue;
+        }
+        let bytes = fs::read(entry.path()).map_err(|e| {
+            import_error(
+                "ERR_IMPORT_READ",
+                format!(
+                    "Cannot hash imported file '{}': {e}",
+                    entry.path().display()
+                ),
+            )
+        })?;
+        installed.push(InstalledMod {
+            filename: entry.file_name().to_string_lossy().into_owned(),
+            registry_id: None,
+            modrinth_id: None,
+            source: "modrinth-pack".into(),
+            source_url: None,
+            version: None,
+            sha256: crate::download::sha256_hex(&bytes),
+            installed_at: chrono::Utc::now().to_rfc3339(),
+            java_packages: Vec::new(),
+            mod_jar_id: None,
+            provided_mod_ids: Vec::new(),
+            enabled: true,
+            content_type: content_type.into(),
+            depends_on: Vec::new(),
+            optional_deps: Vec::new(),
+            incompatible_deps: Vec::new(),
+        });
+    }
+    installed.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Ok(installed)
 }
 
 /// A freshly allocated destination for an import.  Every importer writes into
@@ -336,6 +393,16 @@ pub fn import_mrpack(
     instances_root: &Path,
     _symlink_saves: bool,
 ) -> LauncherResult<ImportResult> {
+    import_mrpack_with_progress(mrpack_path, instances_root, _symlink_saves, None, None)
+}
+
+pub fn import_mrpack_with_progress(
+    mrpack_path: &Path,
+    instances_root: &Path,
+    _symlink_saves: bool,
+    progress_sink: Option<std::sync::Arc<dyn ProgressSink>>,
+    operation_id: Option<OperationId>,
+) -> LauncherResult<ImportResult> {
     let file = fs::File::open(mrpack_path).map_err(|e| LauncherError::Generic {
         code: "ERR_IMPORT_OPEN".into(),
         message: format!("Cannot open mrpack: {e}"),
@@ -373,8 +440,24 @@ pub fn import_mrpack(
 
     let import_result = (|| -> LauncherResult<usize> {
         let target_dir = &target.staging_dir;
-        let mut imported_mods = 0;
+        let total_files = index.files.len() as u32;
+        let mut completed_files = 0u32;
         for file_entry in &index.files {
+            if let (Some(sink), Some(operation_id)) = (&progress_sink, &operation_id) {
+                sink.report(
+                    ProgressEvent::new(
+                        operation_id.clone(),
+                        ProgressPhase::Downloading,
+                        format!("Loading {}", file_entry.path),
+                    )
+                    .with_plan(operation_id.0.clone(), completed_files, total_files)
+                    .with_progress(if total_files == 0 {
+                        0.0
+                    } else {
+                        completed_files as f64 / total_files as f64
+                    }),
+                );
+            }
             let relative_path = relative_archive_path(&file_entry.path);
             assert_safe_path(target_dir, &relative_path)?;
             let dest = target_dir.join(&relative_path);
@@ -425,7 +508,22 @@ pub fn import_mrpack(
                 code: "ERR_IMPORT_WRITE".into(),
                 message: format!("Cannot write {:?}: {e}", dest),
             })?;
-            imported_mods += 1;
+            completed_files += 1;
+            if let (Some(sink), Some(operation_id)) = (&progress_sink, &operation_id) {
+                sink.report(
+                    ProgressEvent::new(
+                        operation_id.clone(),
+                        ProgressPhase::Downloading,
+                        format!("Verified {}", file_entry.path),
+                    )
+                    .with_plan(operation_id.0.clone(), completed_files, total_files)
+                    .with_progress(if total_files == 0 {
+                        1.0
+                    } else {
+                        completed_files as f64 / total_files as f64
+                    }),
+                );
+            }
         }
 
         if !index.overrides.is_empty() {
@@ -476,6 +574,12 @@ pub fn import_mrpack(
             }
         }
 
+        let mods = inventory_pack_content(target_dir, "mods", "mod")?;
+        let resourcepacks = inventory_pack_content(target_dir, "resourcepacks", "resourcepack")?;
+        let shaders = inventory_pack_content(target_dir, "shaderpacks", "shader")?;
+        let datapacks = inventory_pack_content(target_dir, "datapacks", "datapack")?;
+        let worlds = inventory_pack_content(target_dir, "saves", "world")?;
+        let imported_mods = mods.len();
         let manifest = InstanceManifest {
             instance_id: target.instance_id.clone(),
             name: name.clone(),
@@ -483,12 +587,12 @@ pub fn import_mrpack(
             loader: loader.clone(),
             loader_version: loader_version.clone(),
             is_locked: false,
-            created_from_pack: None,
-            mods: vec![],
-            resourcepacks: vec![],
-            shaders: vec![],
-            datapacks: vec![],
-            worlds: vec![],
+            created_from_pack: Some(name.clone()),
+            mods,
+            resourcepacks,
+            shaders,
+            datapacks,
+            worlds,
             user_preferences: serde_json::json!({}),
         };
         let manifest_path = target_dir.join("instance_manifest.json");

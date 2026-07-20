@@ -2799,7 +2799,10 @@ pub async fn import_instance(
         symlink_saves,
     };
     let svc = agora_core::import_service::ImportService::new(ctx);
-    let sink = std::sync::Arc::new(TauriCoreProgressSink { app });
+    let sink = std::sync::Arc::new(TauriCoreProgressSink {
+        app,
+        event_name: "operation-progress",
+    });
     svc.run_import_with_sink(
         request,
         sink,
@@ -2810,12 +2813,13 @@ pub async fn import_instance(
 
 struct TauriCoreProgressSink {
     app: tauri::AppHandle,
+    event_name: &'static str,
 }
 
 impl agora_core::event_sink::ProgressSink for TauriCoreProgressSink {
     fn report(&self, event: agora_core::event_sink::ProgressEvent) {
         use tauri::Emitter;
-        let _ = self.app.emit("operation-progress", event);
+        let _ = self.app.emit(self.event_name, event);
     }
 }
 
@@ -2917,23 +2921,18 @@ pub async fn import_modrinth_pack_by_url(
     download_url: String,
 ) -> LauncherResult<String> {
     let ctx = crate::core_context(&app)?;
-    let bytes = mod_install::download_mod_bytes(&ctx.http_clients, &download_url).await?;
-    let ext = if download_url.ends_with(".mrpack") {
-        "mrpack"
-    } else {
-        "zip"
-    };
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let temp_path = std::env::temp_dir().join(format!("agora-pack-{}.{}", ts, ext));
-    std::fs::write(&temp_path, &bytes).map_err(|e| LauncherError::Generic {
-        code: "ERR_FILE_WRITE".to_string(),
-        message: format!("Failed to write temp pack file: {e}"),
-    })?;
-    let instance_id = mod_install::import_instance_pack(&app, &temp_path.to_string_lossy()).await?;
-    let _ = std::fs::remove_file(&temp_path);
+    let sink = std::sync::Arc::new(TauriCoreProgressSink {
+        app: app.clone(),
+        event_name: "pack-install-progress",
+    });
+    let instance_id = agora_core::import_service::ImportService::new(ctx)
+        .run_mrpack_url_with_sink(
+            &download_url,
+            sink,
+            agora_core::event_sink::CancellationToken::new(),
+        )
+        .await?
+        .instance_id;
     // Lock the instance so the pack stays intact
     instances::lock_instance(&app, &instance_id).await?;
     // Lock the manifest too so check_not_locked and other guards see it as locked

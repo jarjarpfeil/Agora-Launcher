@@ -1,6 +1,8 @@
 use crate::ctx::Ctx;
 use crate::error::{LauncherError, LauncherResult};
-use crate::event_sink::{CancellationToken, NoopProgressSink, ProgressEvent, ProgressPhase};
+use crate::event_sink::{
+    CancellationToken, CoreEvent, OperationId, ProgressEvent, ProgressPhase, ProgressSink,
+};
 use crate::health::{self, HealthScore};
 use crate::import::{DetectedLauncher, ImportResult};
 use crate::loader_service::LoaderService;
@@ -49,6 +51,78 @@ pub struct ImportService {
 impl ImportService {
     pub fn new(ctx: Ctx) -> Self {
         Self { ctx }
+    }
+
+    /// Download and import a Modrinth pack URL using the same transactional
+    /// import path as a local `.mrpack` file.
+    pub async fn run_mrpack_url(&self, download_url: &str) -> LauncherResult<ImportResult> {
+        self.run_mrpack_url_with_sink(
+            download_url,
+            self.ctx.progress_sink.clone(),
+            CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// Download and import a Modrinth pack URL while forwarding progress to a
+    /// host-provided sink. The URL download and the archive import use distinct
+    /// operation IDs because the archive import registers its own cancellable
+    /// operation after the outer archive has been written.
+    pub async fn run_mrpack_url_with_sink(
+        &self,
+        download_url: &str,
+        sink: Arc<dyn ProgressSink>,
+        cancel: CancellationToken,
+    ) -> LauncherResult<ImportResult> {
+        let download_operation =
+            OperationId::new(format!("pack-download-{}", uuid::Uuid::new_v4()));
+        sink.report(ProgressEvent::new(
+            download_operation.clone(),
+            ProgressPhase::Downloading,
+            "Downloading modpack archive…",
+        ));
+        let progress_sink = sink.clone();
+        let progress_operation = download_operation.clone();
+        let bytes = crate::download::download_modpack_bytes_with_progress(
+            &self.ctx.http_clients,
+            download_url,
+            move |downloaded, total| {
+                let mut event = ProgressEvent::new(
+                    progress_operation.clone(),
+                    ProgressPhase::Downloading,
+                    "Downloading modpack archive…",
+                )
+                .with_bytes(downloaded, total.unwrap_or(0));
+                if let Some(total) = total.filter(|total| *total > 0) {
+                    event = event.with_progress((downloaded as f64 / total as f64).min(1.0));
+                }
+                progress_sink.report(event);
+            },
+        )
+        .await?;
+        let temp_path = self
+            .ctx
+            .paths
+            .staging_root()
+            .join(format!("pack-download-{}.mrpack", uuid::Uuid::new_v4()));
+        tokio::fs::write(&temp_path, bytes)
+            .await
+            .map_err(|e| LauncherError::Generic {
+                code: "ERR_FILE_WRITE".into(),
+                message: format!("Failed to write temporary pack archive: {e}"),
+            })?;
+        let result = self
+            .run_import_with_sink(
+                ImportRequest {
+                    source: ImportSource::Mrpack(temp_path.clone()),
+                    symlink_saves: false,
+                },
+                sink,
+                cancel,
+            )
+            .await;
+        let _ = tokio::fs::remove_file(temp_path).await;
+        result
     }
 
     /// Run an import with progress reporting and cancellation support.
@@ -120,11 +194,17 @@ impl ImportService {
             request.source.clone(),
             request.symlink_saves,
         );
+        let blocking_sink = sink.clone();
+        let blocking_operation_id = op_id.clone();
 
         let result = match tokio::task::spawn_blocking(move || match blocking_source {
-            ImportSource::Mrpack(path) => {
-                crate::import::import_mrpack(&path, &blocking_instances_root, blocking_symlink)
-            }
+            ImportSource::Mrpack(path) => crate::import::import_mrpack_with_progress(
+                &path,
+                &blocking_instances_root,
+                blocking_symlink,
+                Some(blocking_sink),
+                Some(blocking_operation_id),
+            ),
             ImportSource::PrismZip(path) => {
                 crate::import::import_prism_zip(&path, &blocking_instances_root, blocking_symlink)
             }
@@ -284,21 +364,24 @@ impl ImportService {
                             Some(&self.ctx.paths.registry_db()),
                         );
                         if report.score == HealthScore::Red {
-                            let _ = rollback();
-                            let _ = crate::db::delete_instance(&conn, &result.instance_id);
-                            op.fail("Health validation failed");
-                            return Err(LauncherError::Generic {
-                                code: "ERR_HEALTH_RED".into(),
+                            let details = report
+                                .blockers
+                                .iter()
+                                .map(|blocker| blocker.message.as_str())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            self.ctx.event_sink.emit(CoreEvent::Warning {
                                 message: format!(
-                                    "Instance '{}' has critical health issues: {}",
-                                    result.instance_id,
-                                    report
-                                        .warnings
-                                        .first()
-                                        .map(|w| w.message.clone())
-                                        .unwrap_or_default()
+                                    "Imported '{}' with health blockers; review before launch.",
+                                    result.instance_id
                                 ),
+                                details: Some(details.clone()),
                             });
+                            sink.report(ProgressEvent::new(
+                                op_id.clone(),
+                                ProgressPhase::HealthScan,
+                                format!("Import completed with health blockers: {details}"),
+                            ));
                         }
                     }
                 }
@@ -334,9 +417,9 @@ impl ImportService {
 
     /// Run an import asynchronously.
     ///
-    /// This is a convenience wrapper that supplies a [`NoopProgressSink`] and
-    /// a default (never-cancelled) [`CancellationToken`].  Callers that need
-    /// progress reporting or cancellation should use
+    /// This convenience wrapper uses the context's configured progress sink and
+    /// a default (never-cancelled) [`CancellationToken`]. Callers that need
+    /// an operation-specific sink or cancellation should use
     /// [`ImportService::run_import_with_sink`] instead.
     ///
     /// Synchronous archive/filesystem extraction is offloaded via
@@ -348,7 +431,7 @@ impl ImportService {
     pub async fn run_import(&self, request: ImportRequest) -> LauncherResult<ImportResult> {
         self.run_import_with_sink(
             request,
-            Arc::new(NoopProgressSink),
+            self.ctx.progress_sink.clone(),
             CancellationToken::new(),
         )
         .await

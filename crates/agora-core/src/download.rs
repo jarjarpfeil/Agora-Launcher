@@ -64,6 +64,25 @@ pub async fn download_mod_bytes(clients: &HttpClients, url: &str) -> LauncherRes
     http_client::checked_get_bytes(clients, category, url).await
 }
 
+/// Download a complete modpack archive through the stricter pack host
+/// allowlist and the 500 MiB archive limit used by the importer.
+pub async fn download_modpack_bytes(clients: &HttpClients, url: &str) -> LauncherResult<Vec<u8>> {
+    http_client::checked_get_bytes(clients, ClientCategory::Modpack, url).await
+}
+
+/// Download a modpack archive and report cumulative body progress.
+pub async fn download_modpack_bytes_with_progress<F>(
+    clients: &HttpClients,
+    url: &str,
+    on_progress: F,
+) -> LauncherResult<Vec<u8>>
+where
+    F: FnMut(u64, Option<u64>),
+{
+    http_client::checked_get_bytes_with_progress(clients, ClientCategory::Modpack, url, on_progress)
+        .await
+}
+
 /// Convenience: download mod bytes without an explicit HttpClients instance.
 /// Creates a properly-configured [`HttpClients`] internally.
 /// Prefer [`download_mod_bytes`] when a shared clients instance is available.

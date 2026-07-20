@@ -8,6 +8,7 @@ use std::path::Path;
 /// false `MissingRequiredDependency` blocker, so they are filtered out.
 const DEPENDENCY_IGNORE_LIST: &[&str] = &[
     "minecraft",
+    "fabric",
     "fabricloader",
     "quilt_loader",
     "java",
@@ -82,6 +83,7 @@ fn parse_from_archive<R: Read + Seek>(
     let mut incompatible_ids: BTreeSet<String> = BTreeSet::new();
     let mut incompatibility_decls: Vec<IncompatibilityDecl> = Vec::new();
     let mut forge_mod_id: Option<String> = None;
+    let mut forge_provides_strs: BTreeSet<String> = BTreeSet::new();
     let mut forge_version: Option<String> = None;
     let mut manifest_impl_version: Option<String> = None;
     let mut saw_neoforge_toml = false;
@@ -266,6 +268,7 @@ fn parse_from_archive<R: Read + Seek>(
         if name == "META-INF/neoforge.mods.toml" {
             saw_neoforge_toml = true;
             if let Some(content) = read_entry_utf8_bounded(archive, i, MAX_METADATA_TEXT_BYTES) {
+                forge_provides_strs.extend(extract_forge_mod_ids(&content));
                 extract_forge_deps(
                     &content,
                     &mut depends_on,
@@ -280,6 +283,7 @@ fn parse_from_archive<R: Read + Seek>(
         }
         if name == "META-INF/mods.toml" && !saw_neoforge_toml {
             if let Some(content) = read_entry_utf8_bounded(archive, i, MAX_METADATA_TEXT_BYTES) {
+                forge_provides_strs.extend(extract_forge_mod_ids(&content));
                 extract_forge_deps(
                     &content,
                     &mut depends_on,
@@ -316,6 +320,12 @@ fn parse_from_archive<R: Read + Seek>(
 
     // ---- Build initial provided_mods from Fabric/Quilt provides ----
     let mut provided_mods_map: BTreeMap<String, Option<String>> = BTreeMap::new();
+
+    for id in forge_provides_strs {
+        if mod_jar_id.as_deref() != Some(id.as_str()) {
+            provided_mods_map.insert(id, mod_version.clone());
+        }
+    }
 
     for alias in fabric_provides_strs {
         let ver = fabric_version.as_ref().cloned();
@@ -632,6 +642,30 @@ struct PendingForgeDep {
     version_range: Option<String>,
 }
 
+fn extract_forge_mod_ids(content: &str) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    let mut in_mod_block = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[[mods]]" {
+            in_mod_block = true;
+            continue;
+        }
+        if trimmed.starts_with("[[") {
+            in_mod_block = false;
+            continue;
+        }
+        if in_mod_block {
+            if let Some((key, value)) = parse_toml_kv(trimmed) {
+                if key == "modid" && !value.is_empty() {
+                    ids.insert(value);
+                }
+            }
+        }
+    }
+    ids
+}
+
 /// Parse a Forge/NeoForge `mods.toml`/`neoforge.mods.toml` manifest.
 ///
 /// Key fix: the section header `[[dependencies.<owner>]]` names the OWNER mod,
@@ -844,6 +878,14 @@ fn parse_manifest_version(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forge_multiple_mod_blocks_are_loader_visible() {
+        let ids = extract_forge_mod_ids(
+            "[[mods]]\nmodId=\"primary\"\n[[mods]]\nmodId=\"provided\"\n[[dependencies.primary]]\nmodId=\"dep\"\n",
+        );
+        assert_eq!(ids.into_iter().collect::<Vec<_>>(), ["primary", "provided"]);
+    }
 
     /// Build an in-memory `.jar` (zip) with the given `(entry_name, content)`
     /// pairs and write it to a unique temp file, returning the path.
