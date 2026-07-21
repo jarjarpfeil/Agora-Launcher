@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react';
+﻿import { useEffect, useRef, useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { CommandPalette } from './components/command-palette';
 import { Home } from './pages/Home';
@@ -110,12 +110,20 @@ export default function App() {
     destination,
     canGoBack,
     navigateToTab,
+    navigateToBrowse,
     navigateToModDetail,
     navigateToInstanceDetail,
     goBack,
   } = useDestination();
 
   const processController = useProcessController();
+  const mainRef = useRef<HTMLElement>(null);
+  const previousDestinationRef = useRef<Destination>(destination);
+  const browseScrollTopRef = useRef(0);
+  const instanceEditorScrollTopRef = useRef(0);
+  const modDetailOriginRef = useRef<Destination | null>(null);
+  const [browseVisited, setBrowseVisited] = useState(false);
+  const [instanceEditorVisited, setInstanceEditorVisited] = useState(false);
 
   const [onboardingComplete, setOnboardingComplete] = useState<boolean | null>(null);
   const [aiChatEnabled, setAiChatEnabled] = useState<boolean>(false);
@@ -126,6 +134,44 @@ export default function App() {
     manualLogText: string | null;
     directLaunch: boolean;
   } | null>(null);
+
+  useEffect(() => {
+    if (destination.type === 'tab' && destination.tab === 'browse') {
+      setBrowseVisited(true);
+    }
+    if (destination.type === 'instance-detail') {
+      setInstanceEditorVisited(true);
+    }
+
+    const previous = previousDestinationRef.current;
+    const cameFromBrowse = previous.type === 'tab' && previous.tab === 'browse';
+    const cameFromInstanceEditor = previous.type === 'instance-detail';
+    const returnedToBrowse =
+      destination.type === 'tab'
+      && destination.tab === 'browse'
+      && previous.type === 'mod-detail'
+      && modDetailOriginRef.current?.type === 'tab'
+      && modDetailOriginRef.current.tab === 'browse';
+    const returnedToInstanceEditor =
+      destination.type === 'instance-detail'
+      && previous.type === 'mod-detail'
+      && modDetailOriginRef.current?.type === 'instance-detail';
+
+    if (destination.type === 'mod-detail' && (cameFromBrowse || cameFromInstanceEditor)) {
+      modDetailOriginRef.current = previous;
+      mainRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+    } else if (returnedToBrowse) {
+      requestAnimationFrame(() => {
+        mainRef.current?.scrollTo({ top: browseScrollTopRef.current, behavior: 'auto' });
+      });
+    } else if (returnedToInstanceEditor) {
+      requestAnimationFrame(() => {
+        mainRef.current?.scrollTo({ top: instanceEditorScrollTopRef.current, behavior: 'auto' });
+      });
+    }
+
+    previousDestinationRef.current = destination;
+  }, [destination]);
 
   // Legacy bridge: the CommandPalette still uses (tab, instanceId?) signature.
   const handleNavigate = (tab: Tab, instanceId?: string) => {
@@ -231,8 +277,29 @@ export default function App() {
   // already prevents invalid Destination types at compile time.
   const isKnownDestType = KNOWN_DEST_TYPES.has(destination.type);
 
-  const showInstanceEditor = destination.type === 'instance-detail';
   const showModDetail = destination.type === 'mod-detail';
+  const previousDestination = previousDestinationRef.current;
+  const shouldRenderBrowse =
+    effectiveTab === 'browse'
+    || (browseVisited
+      && showModDetail
+      && previousDestination.type === 'tab'
+      && previousDestination.tab === 'browse');
+  const shouldRenderInstanceEditor =
+    destination.type === 'instance-detail'
+    || (showModDetail
+      && instanceEditorVisited
+      && previousDestination.type === 'instance-detail');
+  const browseInstanceId =
+    destination.type === 'tab' && destination.tab === 'browse'
+      ? destination.browseInstanceId
+      : undefined;
+  const instanceEditorId =
+    destination.type === 'instance-detail'
+      ? destination.instanceId
+      : showModDetail && previousDestination.type === 'instance-detail'
+        ? previousDestination.instanceId
+        : undefined;
 
   // Render the HealthDialog at the App level so it survives page navigation.
   const {
@@ -246,6 +313,24 @@ export default function App() {
     repairAndRetry,
     useDelegatedLaunch,
   } = processController;
+
+  const handleModDetailBack = () => {
+    if (canGoBack) {
+      goBack();
+    } else {
+      navigateToTab('browse');
+    }
+  };
+
+  const handleBrowseSelectMod = (id: string) => {
+    browseScrollTopRef.current = mainRef.current?.scrollTop ?? 0;
+    navigateToModDetail(id);
+  };
+
+  const handleInstanceEditorOpenMod = (id: string) => {
+    instanceEditorScrollTopRef.current = mainRef.current?.scrollTop ?? 0;
+    navigateToModDetail(id);
+  };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
@@ -267,60 +352,72 @@ export default function App() {
           />
         )}
 
-        <main className="flex-1 overflow-y-auto p-6 bg-background">
-          {!isKnownDestType ? (
-            <NotFoundView
-              canGoBack={canGoBack}
-              onGoHome={() => navigateToTab('home')}
-              onGoBack={goBack}
-            />
-          ) : showInstanceEditor ? (
-            <InstanceEditor
-              instanceId={destination.instanceId}
-              onBack={() => navigateToTab('instances')}
-              onOpenInstanceEditor={(id) => navigateToInstanceDetail(id)}
-            />
-          ) : showModDetail ? (
-            <ModDetail
-              itemId={destination.itemId}
-              onBack={() => navigateToTab('browse')}
-              onOpenInstanceEditor={(id) => {
-                navigateToInstanceDetail(id);
-              }}
-            />
-          ) : (
-            <>
-              {effectiveTab === 'home' && (
-                <Home
-                  onNavigateTab={navigateToTab}
-                  onOpenInstance={navigateToInstanceDetail}
-                  onOpenMod={navigateToModDetail}
-                  onLaunch={startLaunch}
-                />
-              )}
-              {effectiveTab === 'browse' && (
+        <main ref={mainRef} className="flex-1 overflow-y-auto p-6 bg-background">
+          <div className="contents">
+            {!isKnownDestType ? (
+              <NotFoundView
+                canGoBack={canGoBack}
+                onGoHome={() => navigateToTab('home')}
+                onGoBack={goBack}
+              />
+            ) : showModDetail ? (
+              <ModDetail
+                itemId={destination.itemId}
+                onBack={handleModDetailBack}
+                onOpenInstanceEditor={(id) => {
+                  navigateToInstanceDetail(id);
+                }}
+              />
+            ) : destination.type === 'instance-detail' ? null : (
+              <>
+                {effectiveTab === 'home' && (
+                  <Home
+                    onNavigateTab={navigateToTab}
+                    onOpenInstance={navigateToInstanceDetail}
+                    onOpenMod={navigateToModDetail}
+                    onLaunch={startLaunch}
+                  />
+                )}
+                {effectiveTab === 'instances' && (
+                  <Instances
+                    onEditInstance={(id) => navigateToInstanceDetail(id)}
+                    processState={processState}
+                    processLogs={processLogs}
+                    onStartLaunch={startLaunch}
+                    onKillProcess={killProcess}
+                    onStartCrashInvestigation={setCrashInvestigation}
+                    onRepairAndRetry={repairAndRetry}
+                    onUseDelegatedLaunch={useDelegatedLaunch}
+                    onClearError={clearError}
+                  />
+                )}
+                {effectiveTab === 'governance' && <Governance />}
+                {effectiveTab === 'ai' && aiChatEnabled && <AiChatPage />}
+                {effectiveTab === 'settings' && <Settings />}
+              </>
+            )}
+          </div>
+          <div className="contents">
+            {shouldRenderBrowse && (
+              <div className={showModDetail ? 'hidden' : undefined}>
                 <Browse
-                  onSelectMod={(id) => navigateToModDetail(id)}
+                  onSelectMod={handleBrowseSelectMod}
+                  initialInstanceId={browseInstanceId}
                 />
-              )}
-              {effectiveTab === 'instances' && (
-                <Instances
-                  onEditInstance={(id) => navigateToInstanceDetail(id)}
-                  processState={processState}
-                  processLogs={processLogs}
-                  onStartLaunch={startLaunch}
-                  onKillProcess={killProcess}
-                  onStartCrashInvestigation={setCrashInvestigation}
-                  onRepairAndRetry={repairAndRetry}
-                  onUseDelegatedLaunch={useDelegatedLaunch}
-                  onClearError={clearError}
+              </div>
+            )}
+            {shouldRenderInstanceEditor && instanceEditorId && (
+              <div className={showModDetail ? 'hidden' : undefined}>
+                <InstanceEditor
+                  instanceId={instanceEditorId}
+                  onBack={() => navigateToTab('instances')}
+                  onOpenInstanceEditor={(id) => navigateToInstanceDetail(id)}
+                  onOpenModDetail={handleInstanceEditorOpenMod}
+                  onOpenBrowseForInstance={navigateToBrowse}
                 />
-              )}
-              {effectiveTab === 'governance' && <Governance />}
-              {effectiveTab === 'ai' && aiChatEnabled && <AiChatPage />}
-              {effectiveTab === 'settings' && <Settings />}
-            </>
-          )}
+              </div>
+            )}
+          </div>
         </main>
 
         <CommandPalette

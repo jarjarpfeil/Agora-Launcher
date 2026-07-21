@@ -230,11 +230,13 @@ async function installFlowMock(page: Page, opts: MockOptions = {}) {
               { instance_id: 'test-instance', name: 'Test Instance', minecraft_version: '1.20.1', loader: 'fabric', loader_version: '0.15.11', is_modpack: false, is_locked: false, last_launched_at: null, jvm_memory_mb: 4096, jvm_gc: 'G1GC', jvm_custom_args: '', created_at: '2026-01-01T00:00:00Z' },
             ]);
           }
+          if (command === 'check_instance_updates') return Promise.resolve([]);
+          if (command === 'batch_check_compat') return Promise.resolve({});
           if (command === 'get_instance_detail') {
             const instanceId = args.instanceId as string;
             return Promise.resolve({
               row: { instance_id: instanceId, name: 'Test Instance', minecraft_version: '1.20.1', loader: 'fabric', loader_version: '0.15.11', is_modpack: false, is_locked: false, last_launched_at: null, jvm_memory_mb: 4096, jvm_gc: 'G1GC', jvm_custom_args: '', created_at: '2026-01-01T00:00:00Z' },
-              manifest: { instance_id: instanceId, name: 'Test Instance', created_from_pack: null, minecraft_version: '1.20.1', loader: 'fabric', loader_version: '0.15.11', mods: [], resourcepacks: [], shaders: [], datapacks: [] },
+              manifest: { instance_id: instanceId, name: 'Test Instance', created_from_pack: null, minecraft_version: '1.20.1', loader: 'fabric', loader_version: '0.15.11', mods: [{ filename: 'installed-test-mod.jar', registry_id: null, modrinth_id: null, mod_jar_id: 'test-mod', source: 'manual_drag_drop', version: '1.0.0', sha256: 'a'.repeat(64), installed_at: '2026-07-01T00:00:00Z', enabled: true, content_type: 'mod' }], resourcepacks: [], shaders: [], datapacks: [], worlds: [], user_preferences: {} },
             });
           }
           if (command === 'list_snapshots') return Promise.resolve([]);
@@ -538,7 +540,7 @@ test.describe('Release C3 — Install flow entry points', () => {
     await expectResultView(page);
   });
 
-  test('InstanceEditor Add Mod reaches resolve+apply and shows same UI', async ({ page }) => {
+  test('InstanceEditor Add Mod opens Browse with its instance selected', async ({ page }) => {
     await installFlowMock(page);
 
     // Navigate directly to the instance editor via history state
@@ -553,28 +555,58 @@ test.describe('Release C3 — Install flow entry points', () => {
     // Click "+ Add Mod"
     await page.getByRole('button', { name: '+ Add Mod' }).click();
 
-    // The add-mod section opens and browses items — click the first item
-    await page.getByText('Test Mod').first().click();
+    await expect(page.getByRole('heading', { name: 'Browse' })).toBeVisible();
+    await expect(page.locator('#browse-instance-context')).toHaveValue('test-instance');
+  });
 
-    // Version picker appears — select a version
-    await page.getByText('test-mod-1.0.0.jar').first().click();
-    // Click "Review install plan for ..."
-    await page.getByRole('button', { name: /Review install plan/ }).click();
+  test('clicking an installed mod opens its details page', async ({ page }) => {
+    await installFlowMock(page);
 
-    // Resolve
-    await expect.poll(() => totalInstallCalls(page)).toBeGreaterThanOrEqual(1);
-    const resolveIdx = await lastInstallCall(page, 'resolve_install_plan');
-    await resolveInstallCall(page, resolveIdx, makePlan());
+    await page.addInitScript(() => {
+      window.history.replaceState({ __agora: { type: 'instance-detail', instanceId: 'test-instance' } }, '');
+    });
+    await page.goto('/');
 
-    await expectReviewView(page);
+    await expect(page.getByText('Test Instance').first()).toBeVisible();
+    await expect(page.getByText('Test Mod', { exact: true })).toBeVisible();
+    await expect(page.getByText('manual', { exact: true })).toBeVisible();
+    await expect(page.getByText(/Installed /).first()).toBeVisible();
+    const main = page.locator('main');
+    const editorScrollTop = await main.evaluate((element) => {
+      element.style.paddingBottom = '1000px';
+      element.scrollTop = 240;
+      return element.scrollTop;
+    });
+    await page.getByRole('button', { name: /installed-test-mod\.jar/ }).click();
 
-    // Confirm → apply
-    await page.getByRole('button', { name: 'Install' }).click();
-    await expect.poll(() => totalInstallCalls(page)).toBeGreaterThanOrEqual(2);
-    const applyIdx = await lastInstallCall(page, 'apply_install_plan');
-    await resolveInstallCall(page, applyIdx, makeSuccessOutcome());
+    await expect(page.getByRole('heading', { name: 'Test Mod', exact: true })).toBeVisible();
+    await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBe(0);
+    await page.getByRole('button', { name: /Back/ }).first().click();
+    await expect(page.getByText('Installed Mods', { exact: false })).toBeVisible();
+    await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBe(editorScrollTop);
+  });
 
-    await expectResultView(page);
+  test('ModDetail Back restores Browse scroll position', async ({ page }) => {
+    await installFlowMock(page);
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Browse', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'View Details', exact: true })).toBeVisible();
+
+    const main = page.locator('main');
+    const browseScrollTop = await main.evaluate((element) => {
+      element.style.paddingBottom = '1000px';
+      element.scrollTop = 240;
+      return element.scrollTop;
+    });
+    expect(browseScrollTop).toBeGreaterThan(0);
+
+    await page.getByRole('button', { name: 'View Details', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Test Mod', exact: true })).toBeVisible();
+    await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBe(0);
+
+    await page.getByRole('button', { name: /Back/ }).first().click();
+    await expect(page.getByRole('heading', { name: 'Browse', level: 2 })).toBeVisible();
+    await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBe(browseScrollTop);
   });
 });
 

@@ -171,7 +171,7 @@ function RegistryRecoveryShell({
   );
 }
 
-export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) {
+export function Browse({ onSelectMod, initialInstanceId }: { onSelectMod?: (id: string) => void; initialInstanceId?: string }) {
   // Registry availability — show recovery panel when missing.
   // This is the ONLY hook call in this component, so the hook count is stable.
   const registry = useRegistryState();
@@ -202,17 +202,19 @@ export function Browse({ onSelectMod }: { onSelectMod?: (id: string) => void }) 
     );
   }
 
-  return <BrowseContent onSelectMod={onSelectMod} registryState={registry.state} registryStatus={registry.status} registryError={registry.error} registryActions={registry.actions} />;
+  return <BrowseContent onSelectMod={onSelectMod} initialInstanceId={initialInstanceId} registryState={registry.state} registryStatus={registry.status} registryError={registry.error} registryActions={registry.actions} />;
 }
 
 function BrowseContent({
   onSelectMod,
+  initialInstanceId,
   registryState: regState,
   registryStatus: regStatus,
   registryError: regError,
   registryActions: regActions,
 }: {
   onSelectMod?: (id: string) => void;
+  initialInstanceId?: string;
   registryState: import('../lib/useRegistryState').RegistryState;
   registryStatus: import('../lib/tauri').RegistryStatus | null;
   registryError: string | null;
@@ -301,6 +303,12 @@ function BrowseContent({
       setContextLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!initialInstanceId || activeInstanceId === initialInstanceId) return;
+    if (!instances.some((instance) => instance.instance_id === initialInstanceId)) return;
+    void selectInstanceContext(initialInstanceId);
+  }, [activeInstanceId, initialInstanceId, instances]);
 
   useEffect(() => {
     if (!activeInstance || items.length === 0) {

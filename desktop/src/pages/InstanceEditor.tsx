@@ -5,6 +5,8 @@ import { InstallFlow } from '../components/InstallFlow';
 import type { BatchInstallItem, InstallIntent } from '../lib/installFlow';
 import {
   getInstanceDetail,
+  getRegistryItem,
+  fetchModrinthProject,
   enableInstanceMod,
   disableInstanceMod,
   exportInstancePack,
@@ -19,7 +21,6 @@ import {
   importLockfile,
   updateInstanceJava,
   browseItems,
-  listCategories,
   listModVersions,
   listPackMods,
   unlockInstance,
@@ -38,9 +39,6 @@ import {
   type InstanceDetail,
   type JavaRuntimeSummary,
   type RegistryItem,
-  type CategoryInfo,
-  type ModVersionCandidate,
-  type SortOption,
   type PackModRow,
   type InstalledMod,
   type Snapshot,
@@ -49,18 +47,41 @@ import {
   type LockfileDriftReport,
 } from '../lib/tauri';
 
-const SORTS: { label: string; value: SortOption }[] = [
-  { label: 'Net Score', value: 'net_score' },
-  { label: 'Trending', value: 'velocity' },
-  { label: 'Newest', value: 'newest' },
-  { label: 'Most Upvoted', value: 'most_upvoted' },
-  { label: 'Most Downvoted', value: 'most_downvoted' },
-];
+function installedModKey(mod: InstalledMod): string {
+  return `${mod.filename}:${mod.sha256}`;
+}
 
-const CONTENT_TYPES = ['mod', 'pack', 'shader', 'resourcepack', 'server', 'datapack', 'world'];
+function installedModDetailId(mod: InstalledMod): string | null {
+  return mod.registry_id || mod.modrinth_id || mod.mod_jar_id || null;
+}
 
-export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { instanceId: string; onBack: () => void; onOpenInstanceEditor?: (instanceId: string) => void }) {
+function installedModSourceLabel(source: string): string {
+  const normalized = source.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (normalized === 'modrinth_raw' || normalized === 'modrinth') return 'Modrinth';
+  if (normalized === 'modrinth_pack') return 'Modrinth Pack';
+  if (normalized.includes('github')) return 'GitHub Release';
+  if (normalized === 'registry' || normalized === 'curated') return 'Agora Registry';
+  if (normalized.includes('manual') || normalized === 'local') return 'Manual';
+  return 'Other';
+}
+
+function formatInstalledAt(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const weekday = new Intl.DateTimeFormat(undefined, { weekday: 'long' }).format(date);
+  const month = date.getMonth() + 1;
+  const day = date.getDate();
+  const year = date.getFullYear();
+  const hour24 = date.getHours();
+  const hour = hour24 % 12 || 12;
+  const minute = String(date.getMinutes()).padStart(2, '0');
+  const meridiem = hour24 < 12 ? 'AM' : 'PM';
+  return `${weekday}, ${month}/${day}/${year} ${hour}:${minute} ${meridiem}`;
+}
+
+export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor, onOpenModDetail, onOpenBrowseForInstance }: { instanceId: string; onBack: () => void; onOpenInstanceEditor?: (instanceId: string) => void; onOpenModDetail?: (itemId: string) => void; onOpenBrowseForInstance?: (instanceId: string) => void }) {
   const [detail, setDetail] = useState<InstanceDetail | null>(null);
+  const [modDisplayNames, setModDisplayNames] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -101,19 +122,6 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
 
 
 
-  // Add-mod state
-  const [showAdd, setShowAdd] = useState(false);
-  const [browseItemsList, setBrowseItemsList] = useState<RegistryItem[]>([]);
-  const [categories, setCategories] = useState<CategoryInfo[]>([]);
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [browseFilter, setBrowseFilter] = useState('');
-  const [browseContentType, setBrowseContentType] = useState<string | null>(null);
-  const [browseSort, setBrowseSort] = useState<SortOption>('net_score');
-  const [browseCategory, setBrowseCategory] = useState<string | null>(null);
-  const [selectedAddItem, setSelectedAddItem] = useState<RegistryItem | null>(null);
-  const [candidates, setCandidates] = useState<ModVersionCandidate[]>([]);
-  const [selectedCandidate, setSelectedCandidate] = useState<ModVersionCandidate | null>(null);
-  const [addError, setAddError] = useState<string | null>(null);
   const [canonicalOperation, setCanonicalOperation] = useState<{
     intent: InstallIntent;
     instanceName: string;
@@ -170,17 +178,38 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     return () => { cancelled = true; };
   }, [instanceId]);
 
-  // Load categories once
   useEffect(() => {
+    const installedMods = detail?.manifest?.mods;
+    if (!installedMods) {
+      setModDisplayNames({});
+      return;
+    }
+
     let cancelled = false;
-    (async () => {
+    setModDisplayNames({});
+    void Promise.all(installedMods.map(async (mod) => {
       try {
-        const cats = await listCategories();
-        if (!cancelled) setCategories(cats);
-      } catch { /* categories are optional */ }
-    })();
+        const identity = installedModDetailId(mod);
+        if (!identity) return null;
+        let name: string | null = null;
+        if (mod.registry_id || !mod.modrinth_id) {
+          const item = await getRegistryItem(identity);
+          name = item?.name ?? null;
+        } else {
+          const project = await fetchModrinthProject(mod.modrinth_id);
+          name = project.title || null;
+        }
+        return name ? [installedModKey(mod), name] as const : null;
+      } catch {
+        return null;
+      }
+    })).then((results) => {
+      if (cancelled) return;
+      setModDisplayNames(Object.fromEntries(results.filter((result): result is readonly [string, string] => result !== null)));
+    });
+
     return () => { cancelled = true; };
-  }, []);
+  }, [detail?.manifest]);
 
   // Load snapshots when tab becomes active
   useEffect(() => {
@@ -248,43 +277,6 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
     } catch (e) {
       setError(formatError(e));
     }
-  };
-
-  const handleBrowse = async () => {
-    setBrowseLoading(true);
-    setAddError(null);
-    try {
-      const items = await browseItems(browseContentType ?? undefined, browseCategory ?? undefined, browseSort);
-      setBrowseItemsList(items);
-    } catch (e) {
-      setAddError(formatError(e));
-    } finally {
-      setBrowseLoading(false);
-    }
-  };
-
-  const handleSelectAddItem = async (item: RegistryItem) => {
-    setSelectedAddItem(item);
-    setCandidates([]);
-    setSelectedCandidate(null);
-    try {
-      const vers = await listModVersions(instanceId, item.id);
-      setCandidates(vers.items);
-    } catch (e) {
-      setAddError(formatError(e));
-    }
-  };
-
-  const handleConfirmAdd = () => {
-    if (!selectedAddItem || !selectedCandidate) return;
-    setAddError(null);
-    beginCanonicalOperation({
-      type: 'install',
-      sourceType: 'curated',
-      itemId: selectedAddItem.id,
-      candidateVersion: selectedCandidate.version,
-    });
-    setShowAdd(false);
   };
 
   const handleInstallPackMods = async () => {
@@ -641,12 +633,10 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
   const manifest = detail?.manifest;
   const mods = manifest?.mods ?? [];
 
-  const filteredBrowse = browseFilter
-    ? browseItemsList.filter((i) =>
-        i.name.toLowerCase().includes(browseFilter.toLowerCase()) ||
-        i.id.toLowerCase().includes(browseFilter.toLowerCase())
-      )
-    : browseItemsList;
+  const handleOpenInstalledMod = (mod: InstalledMod) => {
+    const itemId = mod.registry_id || mod.modrinth_id || mod.mod_jar_id;
+    if (itemId) onOpenModDetail?.(itemId);
+  };
 
   if (loading) {
     return (
@@ -992,16 +982,35 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         ) : (
           <div className="space-y-2">
             {mods.map((mod) => (
-              <div key={mod.filename} className={`flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm ${!mod.enabled ? 'opacity-50' : ''}`}>
-                <div className="min-w-0 flex-1">
-                  <span className={`font-medium truncate block ${!mod.enabled ? 'line-through' : ''}`}>{mod.filename}</span>
-                  <div className="text-xs text-muted-foreground flex gap-2 mt-0.5">
+              <div
+                key={mod.filename}
+                className={`group flex items-center justify-between rounded-lg border border-border px-3 py-2 text-sm transition-colors ${
+                  installedModDetailId(mod)
+                    ? 'cursor-pointer hover:border-primary/50 hover:bg-accent/60'
+                    : ''
+                } ${!mod.enabled ? 'opacity-50' : ''}`}
+              >
+                <button
+                  type="button"
+                  onClick={() => handleOpenInstalledMod(mod)}
+                  disabled={!installedModDetailId(mod)}
+                  className="min-w-0 flex-1 text-left disabled:cursor-default enabled:cursor-pointer"
+                  title={installedModDetailId(mod) ? 'View mod details' : 'Mod details unavailable'}
+                >
+                  <span className={`font-medium truncate block group-hover:text-primary ${!mod.enabled ? 'line-through' : ''}`}>
+                    {modDisplayNames[installedModKey(mod)] ?? mod.filename}
+                  </span>
+                  <span className="text-xs text-muted-foreground flex flex-wrap items-center gap-x-2 gap-y-0.5 mt-0.5">
+                    <span className="truncate">{mod.filename}</span>
                     {mod.version && <span>v{mod.version}</span>}
-                    <span className="rounded-full bg-brand-600/10 text-brand-600 dark:text-brand-400 px-1.5 py-0.5 text-[10px] uppercase">{mod.source}</span>
-                    <span>Installed {mod.installed_at}</span>
+                    <span className="rounded-full bg-brand-600/10 text-brand-600 dark:text-brand-400 px-1.5 py-0.5 text-[10px]">{installedModSourceLabel(mod.source)}</span>
+                    <span>Installed {formatInstalledAt(mod.installed_at)}</span>
                     {!mod.enabled && <span className="text-yellow-600 dark:text-yellow-400 font-medium">disabled</span>}
-                  </div>
-                </div>
+                    {installedModDetailId(mod) && (
+                      <span className="text-primary font-medium">View details</span>
+                    )}
+                  </span>
+                </button>
                 {!row?.is_locked && (
                   <button
                     onClick={() => handleToggleMod(mod)}
@@ -1025,187 +1034,14 @@ export function InstanceEditor({ instanceId, onBack, onOpenInstanceEditor }: { i
         )}
       </section>
 
-      {/* Add mod section */}
-      {!showAdd ? (
-        <button
-          onClick={() => {
-            if (row?.is_locked) return;
-            setShowAdd(true);
-            setBrowseFilter('');
-            setSelectedAddItem(null);
-            setCandidates([]);
-            setSelectedCandidate(null);
-            setAddError(null);
-            handleBrowse();
-          }}
-          disabled={!!row?.is_locked}
-          className="rounded-lg border border-dashed border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed w-full"
-          title={row?.is_locked ? 'Unlock the instance to add mods.' : undefined}
-        >
-          {row?.is_locked ? '🔒 Instance Locked' : '+ Add Mod'}
-        </button>
-      ) : (
-        <section className="rounded-xl border border-border bg-card p-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h3 className="font-semibold text-sm">Add Mod</h3>
-            <button onClick={() => setShowAdd(false)} className="text-xs text-muted-foreground hover:text-foreground">
-              Close
-            </button>
-          </div>
-
-          {addError && (
-            <p className="text-sm text-destructive">{addError}</p>
-          )}
-
-          {/* Filters row */}
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              value={browseFilter}
-              onChange={(e) => setBrowseFilter(e.target.value)}
-              placeholder="Search mods…"
-              className="flex-1 rounded-lg border border-input bg-background px-3 py-2 text-sm"
-            />
-            <select
-              value={browseContentType ?? ''}
-              onChange={(e) => setBrowseContentType(e.target.value || null)}
-              className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
-            >
-              <option value="">All types</option>
-              {CONTENT_TYPES.map((ct) => (
-                <option key={ct} value={ct}>{ct}</option>
-              ))}
-            </select>
-            <select
-              value={browseSort}
-              onChange={(e) => setBrowseSort(e.target.value as SortOption)}
-              className="rounded-lg border border-input bg-background px-3 py-2 text-sm"
-            >
-              {SORTS.map((s) => (
-                <option key={s.value} value={s.value}>{s.label}</option>
-              ))}
-            </select>
-          </div>
-
-          {categories.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              <button
-                onClick={() => setBrowseCategory(null)}
-                className={[
-                  'px-3 py-1 rounded-full text-sm border transition-colors',
-                  browseCategory === null
-                    ? 'bg-primary text-primary-foreground border-primary'
-                    : 'border-border hover:bg-accent',
-                ].join(' ')}
-              >
-                All
-              </button>
-              {categories.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => setBrowseCategory(c.id)}
-                  className={[
-                    'px-3 py-1 rounded-full text-sm border transition-colors',
-                    browseCategory === c.id
-                      ? 'bg-primary text-primary-foreground border-primary'
-                      : 'border-border hover:bg-accent',
-                  ].join(' ')}
-                >
-                  {c.display_name}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {browseLoading ? (
-            <p className="text-xs text-muted-foreground">Loading mods…</p>
-          ) : filteredBrowse.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No mods found.</p>
-          ) : (
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              {filteredBrowse.map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => handleSelectAddItem(item)}
-                  className={`text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
-                    selectedAddItem?.id === item.id
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border hover:bg-accent'
-                  }`}
-                >
-                  <div className="flex items-start gap-2">
-                    {item.icon_url && (
-                      <img
-                        src={item.icon_url}
-                        alt={item.name}
-                        className="h-10 w-10 rounded border object-contain border-border"
-                      />
-                    )}
-                    <div className="min-w-0">
-                      <span className="font-medium block truncate">{item.name}</span>
-                      <span className="text-xs text-muted-foreground">
-                        {item.content_type} · {item.download_strategy}
-                      </span>
-                    </div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Version picker */}
-          {selectedAddItem && (
-            <div className="border-t border-border pt-3">
-              <p className="text-xs font-medium mb-2">
-                Available versions for {selectedAddItem.name}
-              </p>
-              {candidates.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No versions available.</p>
-              ) : (
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {[...candidates].sort((a, b) => {
-                    const tier = (c: ModVersionCandidate) =>
-                      c.version_compat === 'compatible' ? 0
-                      : c.version_compat === 'major_match' ? 1
-                      : 2;
-                    return tier(a) - tier(b);
-                  }).map((cand, idx) => (
-                    <button
-                      key={idx}
-                      onClick={() => setSelectedCandidate(cand)}
-                      className={`w-full text-left rounded-lg border px-3 py-2 text-sm transition-colors ${
-                        selectedCandidate?.filename === cand.filename
-                          ? 'border-primary bg-primary/10'
-                          : 'border-border hover:bg-accent'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-medium">{cand.version}</span>
-                        {cand.version_compat === 'compatible' ? (
-                          <span className="text-xs text-green-600 dark:text-green-400">✓ compatible</span>
-                        ) : cand.version_compat === 'major_match' ? (
-                          <span className="text-xs text-yellow-600 dark:text-yellow-400">⚠ may not match your exact version</span>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">may not match</span>
-                        )}
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-0.5 truncate">{cand.filename}</p>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {selectedCandidate && (
-                <button
-                  onClick={handleConfirmAdd}
-                  className="mt-3 w-full rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-                >
-                  Review install plan for {selectedCandidate.filename}
-                </button>
-              )}
-            </div>
-          )}
-        </section>
-      )}
+      <button
+        onClick={() => onOpenBrowseForInstance?.(instanceId)}
+        disabled={!!row?.is_locked}
+        className="rounded-lg border border-dashed border-border px-4 py-2 text-sm font-medium text-muted-foreground hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed w-full"
+        title={row?.is_locked ? 'Unlock the instance to add mods.' : undefined}
+      >
+        {row?.is_locked ? '🔒 Instance Locked' : '+ Add Mod'}
+      </button>
 
         </>
       )}

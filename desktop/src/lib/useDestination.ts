@@ -12,7 +12,7 @@ export type Tab = 'home' | 'browse' | 'instances' | 'governance' | 'ai' | 'setti
  * - `instance-detail` — editing a specific instance.
  */
 export type Destination =
-  | { type: 'tab'; tab: Tab }
+  | { type: 'tab'; tab: Tab; browseInstanceId?: string }
   | { type: 'mod-detail'; itemId: string }
   | { type: 'instance-detail'; instanceId: string };
 
@@ -22,6 +22,7 @@ export interface UseDestinationReturn {
   navigate: (dest: Destination) => void;
   goBack: () => void;
   navigateToTab: (tab: Tab) => void;
+  navigateToBrowse: (instanceId?: string) => void;
   navigateToModDetail: (itemId: string) => void;
   navigateToInstanceDetail: (instanceId: string) => void;
 }
@@ -31,7 +32,10 @@ const MAX_HISTORY = 50;
 function isValidDestination(d: unknown): d is Destination {
   if (!d || typeof d !== 'object') return false;
   const dest = d as Record<string, unknown>;
-  if (dest.type === 'tab') return typeof dest.tab === 'string';
+  if (dest.type === 'tab') {
+    return typeof dest.tab === 'string'
+      && (dest.browseInstanceId === undefined || typeof dest.browseInstanceId === 'string');
+  }
   if (dest.type === 'mod-detail') return typeof dest.itemId === 'string';
   if (dest.type === 'instance-detail') return typeof dest.instanceId === 'string';
   return false;
@@ -76,8 +80,10 @@ export function useDestination(): UseDestinationReturn {
         if (historyRef.current.length > MAX_HISTORY) {
           historyRef.current = historyRef.current.slice(-MAX_HISTORY);
         }
+        setCanGoBack(historyRef.current.length > 1);
       } else {
         setDestination({ type: 'tab', tab: 'home' });
+        setCanGoBack(false);
       }
     };
     window.addEventListener('popstate', handlePopState);
@@ -87,6 +93,14 @@ export function useDestination(): UseDestinationReturn {
   const navigate = useCallback((dest: Destination) => push(dest), [push]);
   const goBack = useCallback(() => window.history.back(), []);
   const navigateToTab = useCallback((tab: Tab) => push({ type: 'tab', tab }), [push]);
+  const navigateToBrowse = useCallback(
+    (instanceId?: string) => push({
+      type: 'tab',
+      tab: 'browse',
+      ...(instanceId ? { browseInstanceId: instanceId } : {}),
+    }),
+    [push],
+  );
   const navigateToModDetail = useCallback((itemId: string) => push({ type: 'mod-detail', itemId }), [push]);
   const navigateToInstanceDetail = useCallback(
     (instanceId: string) => push({ type: 'instance-detail', instanceId }),
@@ -99,6 +113,7 @@ export function useDestination(): UseDestinationReturn {
     navigate,
     goBack,
     navigateToTab,
+    navigateToBrowse,
     navigateToModDetail,
     navigateToInstanceDetail,
   };

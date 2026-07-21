@@ -47,6 +47,12 @@ struct MrpackFile {
     hashes: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+struct ImportedModrinthFile {
+    project_id: String,
+    download_url: String,
+}
+
 #[derive(Deserialize)]
 struct PrismPackJson {
     #[serde(default)]
@@ -104,10 +110,50 @@ fn verify_mrpack_file_hash(file: &MrpackFile, bytes: &[u8]) -> LauncherResult<()
     Ok(())
 }
 
+/// Extract a Modrinth project ID only from the canonical Modrinth CDN path.
+/// Pack entries may also point at GitHub or contain no download URL, so those
+/// entries remain pack-managed without claiming a Modrinth project identity.
+fn modrinth_project_id_from_download_url(raw_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(raw_url).ok()?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("cdn.modrinth.com")
+        || url.port_or_known_default() != Some(443)
+    {
+        return None;
+    }
+    let segments: Vec<_> = url.path_segments()?.collect();
+    if segments.len() < 5 || segments[0] != "data" || segments[2] != "versions" {
+        return None;
+    }
+    let project_id = segments[1];
+    if project_id.is_empty()
+        || !project_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return None;
+    }
+    Some(project_id.to_string())
+}
+
+fn modrinth_file_identity(file: &MrpackFile) -> Option<ImportedModrinthFile> {
+    file.downloads.iter().find_map(|download_url| {
+        modrinth_project_id_from_download_url(download_url).map(|project_id| ImportedModrinthFile {
+            project_id,
+            download_url: download_url.clone(),
+        })
+    })
+}
+
+fn manifest_path_key(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn inventory_pack_content(
     instance_dir: &Path,
     directory: &str,
     content_type: &str,
+    modrinth_files: &BTreeMap<String, ImportedModrinthFile>,
 ) -> LauncherResult<Vec<InstalledMod>> {
     let root = instance_dir.join(directory);
     if !root.exists() {
@@ -137,12 +183,18 @@ fn inventory_pack_content(
                 ),
             )
         })?;
+        let identity_key = format!("{directory}/{}", entry.file_name().to_string_lossy());
+        let modrinth_file = if content_type == "mod" {
+            modrinth_files.get(&identity_key)
+        } else {
+            None
+        };
         installed.push(InstalledMod {
             filename: entry.file_name().to_string_lossy().into_owned(),
             registry_id: None,
-            modrinth_id: None,
+            modrinth_id: modrinth_file.map(|file| file.project_id.clone()),
             source: "modrinth-pack".into(),
-            source_url: None,
+            source_url: modrinth_file.map(|file| file.download_url.clone()),
             version: None,
             sha256: crate::download::sha256_hex(&bytes),
             installed_at: chrono::Utc::now().to_rfc3339(),
@@ -442,6 +494,18 @@ pub fn import_mrpack_with_progress(
         let target_dir = &target.staging_dir;
         let total_files = index.files.len() as u32;
         let mut completed_files = 0u32;
+        let modrinth_files: BTreeMap<_, _> = index
+            .files
+            .iter()
+            .filter_map(|file| {
+                modrinth_file_identity(file).map(|identity| {
+                    (
+                        manifest_path_key(&relative_archive_path(&file.path)),
+                        identity,
+                    )
+                })
+            })
+            .collect();
         for file_entry in &index.files {
             if let (Some(sink), Some(operation_id)) = (&progress_sink, &operation_id) {
                 sink.report(
@@ -574,11 +638,13 @@ pub fn import_mrpack_with_progress(
             }
         }
 
-        let mods = inventory_pack_content(target_dir, "mods", "mod")?;
-        let resourcepacks = inventory_pack_content(target_dir, "resourcepacks", "resourcepack")?;
-        let shaders = inventory_pack_content(target_dir, "shaderpacks", "shader")?;
-        let datapacks = inventory_pack_content(target_dir, "datapacks", "datapack")?;
-        let worlds = inventory_pack_content(target_dir, "saves", "world")?;
+        let mods = inventory_pack_content(target_dir, "mods", "mod", &modrinth_files)?;
+        let resourcepacks =
+            inventory_pack_content(target_dir, "resourcepacks", "resourcepack", &modrinth_files)?;
+        let shaders = inventory_pack_content(target_dir, "shaderpacks", "shader", &modrinth_files)?;
+        let datapacks =
+            inventory_pack_content(target_dir, "datapacks", "datapack", &modrinth_files)?;
+        let worlds = inventory_pack_content(target_dir, "saves", "world", &modrinth_files)?;
         let imported_mods = mods.len();
         let manifest = InstanceManifest {
             instance_id: target.instance_id.clone(),
@@ -1219,6 +1285,54 @@ mod tests {
         };
         assert!(verify_mrpack_file_hash(&file, bytes).is_ok());
         assert!(verify_mrpack_file_hash(&file, b"tampered").is_err());
+    }
+
+    #[test]
+    fn test_modrinth_project_id_is_extracted_only_from_canonical_cdn_paths() {
+        assert_eq!(
+            modrinth_project_id_from_download_url(
+                "https://cdn.modrinth.com/data/AANobbMI/versions/abc123/sodium.jar"
+            ),
+            Some("AANobbMI".to_string())
+        );
+        assert_eq!(
+            modrinth_project_id_from_download_url(
+                "https://github.com/example/mod/releases/download/v1/mod.jar"
+            ),
+            None
+        );
+        assert_eq!(
+            modrinth_project_id_from_download_url(
+                "http://cdn.modrinth.com/data/AANobbMI/versions/abc123/sodium.jar"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn test_inventory_pack_content_preserves_modrinth_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("mods")).unwrap();
+        fs::write(tmp.path().join("mods").join("sodium.jar"), b"mod bytes").unwrap();
+
+        let mut modrinth_files = BTreeMap::new();
+        modrinth_files.insert(
+            "mods/sodium.jar".to_string(),
+            ImportedModrinthFile {
+                project_id: "AANobbMI".to_string(),
+                download_url: "https://cdn.modrinth.com/data/AANobbMI/versions/abc123/sodium.jar"
+                    .to_string(),
+            },
+        );
+
+        let installed = inventory_pack_content(tmp.path(), "mods", "mod", &modrinth_files).unwrap();
+        assert_eq!(installed.len(), 1);
+        assert_eq!(installed[0].modrinth_id.as_deref(), Some("AANobbMI"));
+        assert_eq!(installed[0].source, "modrinth-pack");
+        assert_eq!(
+            installed[0].source_url.as_deref(),
+            Some("https://cdn.modrinth.com/data/AANobbMI/versions/abc123/sodium.jar")
+        );
     }
 
     #[test]
