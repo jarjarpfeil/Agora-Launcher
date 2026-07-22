@@ -7,19 +7,65 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 /// Path to the compiled `agora` binary, set by Cargo for integration tests.
 const AGORA_BIN: &str = env!("CARGO_BIN_EXE_agora");
+const TEST_MSA_CREDENTIALS_ENV: &str = "AGORA_TEST_MSA_CREDENTIALS_JSON";
+const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Helper: run `agora --data-dir <dir>` with the given args.
-fn run_agora(data_dir: &Path, args: &[&str]) -> std::process::Output {
+fn agora_command(data_dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(AGORA_BIN);
     cmd.arg("--data-dir").arg(data_dir);
     cmd.args(args);
-    cmd.output().expect("failed to execute agora binary")
+    cmd.env_remove(TEST_MSA_CREDENTIALS_ENV);
+    cmd
+}
+
+fn run_command(mut cmd: Command, args: &[&str]) -> std::process::Output {
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("failed to execute agora binary");
+    let deadline = Instant::now() + CLI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .expect("failed to collect agora output");
+            }
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let output = child
+                    .wait_with_output()
+                    .expect("failed to collect timed-out agora output");
+                panic!(
+                    "agora command timed out after {:?}: {:?}\nstdout:\n{}\nstderr:\n{}",
+                    CLI_TIMEOUT,
+                    args,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("failed while waiting for agora command {args:?}: {error}");
+            }
+        }
+    }
+}
+
+/// Helper: run `agora --data-dir <dir>` with the given args.
+fn run_agora(data_dir: &Path, args: &[&str]) -> std::process::Output {
+    run_command(agora_command(data_dir, args), args)
 }
 
 /// Helper: run with `--json` flag prepended.
@@ -27,6 +73,29 @@ fn run_agora_json(data_dir: &Path, args: &[&str]) -> std::process::Output {
     let mut full_args: Vec<&str> = vec!["--json"];
     full_args.extend_from_slice(args);
     run_agora(data_dir, &full_args)
+}
+
+fn test_msa_credentials_json() -> String {
+    serde_json::to_string(&MsaCredentials {
+        username: "test".into(),
+        uuid: "00000000-0000-0000-0000-000000000000".into(),
+        access_token: "test_access_token".into(),
+        refresh_token: "test_refresh_token".into(),
+        expires: chrono::Utc::now() + chrono::Duration::hours(1),
+    })
+    .expect("serialize fake MSA credentials")
+}
+
+fn run_agora_with_test_credentials(data_dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = agora_command(data_dir, args);
+    cmd.env(TEST_MSA_CREDENTIALS_ENV, test_msa_credentials_json());
+    run_command(cmd, args)
+}
+
+fn run_agora_json_with_test_credentials(data_dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut full_args: Vec<&str> = vec!["--json"];
+    full_args.extend_from_slice(args);
+    run_agora_with_test_credentials(data_dir, &full_args)
 }
 
 struct TempDir {
@@ -663,7 +732,7 @@ fn registry_status_does_not_panic() {
 // ---------------------------------------------------------------------------
 
 use agora_core::download::sha1_hex;
-use agora_core::msa::{clear_credentials, store_credentials, MsaCredentials};
+use agora_core::msa::MsaCredentials;
 
 /// Platform key used in natives directory name.
 fn platform() -> &'static str {
@@ -808,41 +877,6 @@ fn create_vanilla_instance(data_dir: &Path, instance_id: &str, version: &str) {
     .unwrap();
 }
 
-/// The MSA credential fixture uses one OS-wide keyring entry. Keep the
-/// credential-backed launch tests isolated even when Cargo runs tests in
-/// parallel; macOS keychain operations otherwise race with each other's
-/// setup and cleanup.
-static CREDENTIAL_FIXTURE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-/// RAII guard that sets up fake MSA credentials and clears them on drop.
-struct CredentialGuard {
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl CredentialGuard {
-    fn setup() -> Self {
-        let lock = CREDENTIAL_FIXTURE_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("credential fixture lock poisoned");
-        let creds = MsaCredentials {
-            username: "test".into(),
-            uuid: "00000000-0000-0000-0000-000000000000".into(),
-            access_token: "test_access_token".into(),
-            refresh_token: "test_refresh_token".into(),
-            expires: chrono::Utc::now() + chrono::Duration::hours(1),
-        };
-        store_credentials(&creds).expect("store fake MSA credentials");
-        CredentialGuard { _lock: lock }
-    }
-}
-
-impl Drop for CredentialGuard {
-    fn drop(&mut self) {
-        let _ = clear_credentials();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Launch helpers
 // ---------------------------------------------------------------------------
@@ -893,14 +927,9 @@ fn write_fake_java(dir: &Path, exit_code: i32, java_major: i64) -> PathBuf {
     }
 }
 
-/// Set up a full launch environment with fake Java, fake credentials, a
-/// pre-populated runtime cache, and a vanilla instance ready for `agora launch`.
-fn prepare_launch_state(
-    data_dir: &Path,
-    exit_code: i32,
-    java_major: i64,
-) -> (CredentialGuard, String) {
-    let creds = CredentialGuard::setup();
+/// Set up a full launch environment with fake Java, a pre-populated runtime
+/// cache, and a vanilla instance ready for `agora launch`.
+fn prepare_launch_state(data_dir: &Path, exit_code: i32, java_major: i64) -> String {
     let version = "1.21";
     let instance_id = "launch-test";
     let minecraft_runtime = data_dir.join("minecraft-runtime");
@@ -938,7 +967,7 @@ fn prepare_launch_state(
         );
     }
 
-    (creds, instance_id.to_owned())
+    instance_id.to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -968,8 +997,8 @@ fn launch_fake_java_success() {
     let (_tmp, data_dir) = temp_data_dir();
     run_agora(&data_dir, &["paths"]);
 
-    let (_creds, instance_id) = prepare_launch_state(&data_dir, 0, 21);
-    let output = run_agora(&data_dir, &["launch", &instance_id, "--yes"]);
+    let instance_id = prepare_launch_state(&data_dir, 0, 21);
+    let output = run_agora_with_test_credentials(&data_dir, &["launch", &instance_id, "--yes"]);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -990,8 +1019,8 @@ fn launch_fake_java_crash() {
     let (_tmp, data_dir) = temp_data_dir();
     run_agora(&data_dir, &["paths"]);
 
-    let (_creds, instance_id) = prepare_launch_state(&data_dir, 1, 21);
-    let output = run_agora(&data_dir, &["launch", &instance_id, "--yes"]);
+    let instance_id = prepare_launch_state(&data_dir, 1, 21);
+    let output = run_agora_with_test_credentials(&data_dir, &["launch", &instance_id, "--yes"]);
     assert!(
         !output.status.success(),
         "launch must exit with non-zero code for crash outcome"
@@ -1009,8 +1038,9 @@ fn launch_json_stdout() {
     let (_tmp, data_dir) = temp_data_dir();
     run_agora(&data_dir, &["paths"]);
 
-    let (_creds, instance_id) = prepare_launch_state(&data_dir, 0, 21);
-    let output = run_agora_json(&data_dir, &["launch", &instance_id, "--yes"]);
+    let instance_id = prepare_launch_state(&data_dir, 0, 21);
+    let output =
+        run_agora_json_with_test_credentials(&data_dir, &["launch", &instance_id, "--yes"]);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         panic!(

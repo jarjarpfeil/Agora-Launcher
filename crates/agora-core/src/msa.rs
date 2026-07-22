@@ -1073,6 +1073,19 @@ pub async fn refresh_credentials(
 
 /// Get stored credentials from the OS keyring, or None if not authenticated.
 pub fn load_credentials() -> LauncherResult<Option<MsaCredentials>> {
+    #[cfg(all(feature = "test-support", debug_assertions))]
+    if let Some(json) = std::env::var_os("AGORA_TEST_MSA_CREDENTIALS_JSON") {
+        let json = json.into_string().map_err(|_| LauncherError::Generic {
+            code: "ERR_MSA_TEST_CREDENTIALS_PARSE".into(),
+            message: "Test credentials environment variable is not valid UTF-8.".into(),
+        })?;
+        let credentials = serde_json::from_str(&json).map_err(|error| LauncherError::Generic {
+            code: "ERR_MSA_TEST_CREDENTIALS_PARSE".into(),
+            message: format!("Failed to parse test credentials: {error}"),
+        })?;
+        return Ok(Some(credentials));
+    }
+
     let Some(json) = crate::auth::load_secret(
         KEYRING_SERVICE,
         KEYRING_ACCOUNT,

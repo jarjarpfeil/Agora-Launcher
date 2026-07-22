@@ -180,8 +180,8 @@ impl InstanceService {
             game_dir: self.ctx.paths.instance_dir(&instance_id)?,
             java_args: jvm.to_args(),
         };
-        if let Some(profiles_path) = crate::paths::launcher_profiles_path() {
-            crate::launcher_profiles::upsert_profile(&profile, &profiles_path)?;
+        if let Some(profiles_path) = &self.ctx.launcher_profiles_path {
+            crate::launcher_profiles::upsert_profile(&profile, profiles_path)?;
         }
         crate::db::touch_last_launched(&conn, &instance_id, &chrono::Utc::now().to_rfc3339())
             .map_err(|error| LauncherError::Generic {
@@ -305,10 +305,10 @@ impl InstanceService {
                 })?;
             }
         }
-        if let Some(profiles_path) = crate::paths::launcher_profiles_path() {
+        if let Some(profiles_path) = &self.ctx.launcher_profiles_path {
             let _ = crate::launcher_profiles::remove_profile(
                 &format!("agora-{instance_id}"),
-                &profiles_path,
+                profiles_path,
             );
         }
         op.complete();
@@ -576,7 +576,7 @@ impl InstanceService {
         }
 
         // Launcher profile
-        if let Some(profiles_path) = crate::paths::launcher_profiles_path() {
+        if let Some(profiles_path) = &self.ctx.launcher_profiles_path {
             let user_override = crate::db::get_setting(&conn, "jvm_always_pre_touch")
                 .ok()
                 .flatten()
@@ -594,7 +594,7 @@ impl InstanceService {
                 game_dir: dest_dir,
                 java_args: jvm.to_args(),
             };
-            if let Err(error) = crate::launcher_profiles::upsert_profile(&profile, &profiles_path) {
+            if let Err(error) = crate::launcher_profiles::upsert_profile(&profile, profiles_path) {
                 let _ = crate::db::delete_instance(&conn, &new_row.instance_id);
                 let _ = std::fs::remove_dir_all(&self.ctx.paths.instance_dir(&new_id)?);
                 op.fail(error.to_string());
@@ -739,7 +739,7 @@ impl InstanceService {
                 message: error.to_string(),
             });
         }
-        if let Some(profiles_path) = crate::paths::launcher_profiles_path() {
+        if let Some(profiles_path) = &self.ctx.launcher_profiles_path {
             let user_override = crate::db::get_setting(&conn, "jvm_always_pre_touch")
                 .ok()
                 .flatten()
@@ -757,7 +757,7 @@ impl InstanceService {
                 game_dir: dir.clone(),
                 java_args: jvm.to_args(),
             };
-            if let Err(error) = crate::launcher_profiles::upsert_profile(&profile, &profiles_path) {
+            if let Err(error) = crate::launcher_profiles::upsert_profile(&profile, profiles_path) {
                 let _ = crate::db::delete_instance(&conn, &row.instance_id);
                 let _ = std::fs::remove_dir_all(&dir);
                 op.fail(error.to_string());
@@ -1090,6 +1090,8 @@ mod tests {
         #[test]
         fn clone_registers_and_completes_operation() {
             let (ctx, root) = context();
+            let profiles_path = ctx.launcher_profiles_path.clone().unwrap();
+            assert!(profiles_path.starts_with(&root));
             let op_mgr = ctx.operation_manager.clone();
             let request = CreateInstanceRequest {
                 name: "Src".into(),
@@ -1128,6 +1130,11 @@ mod tests {
             let clone_ops: Vec<_> = all.iter().filter(|o| o.label == "Clone instance").collect();
             assert_eq!(clone_ops.len(), 1);
             assert_eq!(clone_ops[0].status, OpStatus::Completed);
+            let profiles: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(&profiles_path).expect("isolated launcher profiles"),
+            )
+            .unwrap();
+            assert!(profiles["profiles"].get("agora-CloneOp").is_some());
 
             let _ = std::fs::remove_dir_all(root);
         }

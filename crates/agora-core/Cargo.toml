@@ -10,6 +10,9 @@ description = "Agora launcher core — shared business logic for the Tauri GUI, 
 name = "agora_core"
 path = "src/lib.rs"
 
+[features]
+test-support = []
+
 [dependencies]
 # Pure logic only. NO tauri, clap, or MCP-protocol crates may appear here —
 # the core must stay UI-agnostic so all three front-ends (Tauri GUI, agora

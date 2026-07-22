@@ -82,6 +82,9 @@ impl Clock for TestClock {
 pub struct CoreContext {
     /// Canonical path layout for this host.
     pub paths: AppPaths,
+    /// Official Mojang launcher profile file. Test contexts point this at an
+    /// isolated fixture instead of the user's platform-default Minecraft data.
+    pub launcher_profiles_path: Option<std::path::PathBuf>,
     /// Category-aware pre-built HTTP clients.
     pub http_clients: HttpClients,
     /// Clock for time-sensitive operations.
@@ -240,6 +243,7 @@ impl CoreContext {
 
         let ctx = Self {
             lock_manager: LockManager::new(paths.locks_root()),
+            launcher_profiles_path: crate::paths::launcher_profiles_path(),
             paths,
             http_clients: HttpClients::new().map_err(|e| {
                 // Convert HTTP client init failure to a fatal error.
@@ -264,11 +268,15 @@ impl CoreContext {
     /// The caller should create a temp directory and pass its path.
     /// Uses a fast single-client HTTP client (no policy enforcement).
     pub fn for_testing(root: std::path::PathBuf) -> Self {
+        let launcher_profiles_path = root
+            .join("official-minecraft")
+            .join("launcher_profiles.json");
         let paths = AppPaths::from_root(root);
         let lock_manager = LockManager::new(paths.locks_root());
         let _ = std::fs::create_dir_all(paths.locks_root());
         Self {
             paths,
+            launcher_profiles_path: Some(launcher_profiles_path),
             http_clients: HttpClients::for_testing(reqwest::Client::new()),
             runtime_catalog: RuntimeCatalogHandle::new(RuntimeCatalog::embedded()),
             clock: Arc::new(WallClock),
@@ -410,6 +418,7 @@ impl std::fmt::Debug for CoreContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CoreContext")
             .field("paths", &self.paths)
+            .field("launcher_profiles_path", &self.launcher_profiles_path)
             .field("http_clients", &self.http_clients)
             .field("lock_manager", &self.lock_manager)
             .field("runtime_catalog", &self.runtime_catalog)

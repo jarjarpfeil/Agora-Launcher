@@ -22,4 +22,5 @@ dirs = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
+agora-core = { path = "../agora-core", features = ["test-support"] }
 rusqlite = { workspace = true }
