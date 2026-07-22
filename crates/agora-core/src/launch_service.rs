@@ -352,7 +352,13 @@ impl LaunchService {
         }
 
         progress.phase("resolving", "Resolving Minecraft metadata and Java");
-        let java_candidates = if request.java_candidates.is_empty() {
+        // An explicit Java override is authoritative. Do not scan unrelated
+        // system/Mojang runtimes first: on macOS, Java shims can block while
+        // waiting for installation or GUI approval even though the override
+        // is ready to use.
+        let java_candidates = if request.java_override.is_some() {
+            Vec::new()
+        } else if request.java_candidates.is_empty() {
             let runtimes_root = request.runtimes_root.clone();
             tokio::task::spawn_blocking(move || {
                 crate::java::detect_java_candidates(

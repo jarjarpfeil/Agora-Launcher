@@ -150,7 +150,7 @@ export function AiAssistant({
       const err = e as Record<string, unknown>;
       if (err?.code === 'ERR_AI_RATE_LIMIT') {
         setRateLimited(true);
-        setError('You\'ve reached your free monthly limit (50 Copilot requests). Your limit resets next month.');
+        setError('You\'ve reached your free monthly limit. Your limit resets next month.');
       } else {
         setError(formatError(e));
       }
@@ -188,7 +188,7 @@ export function AiAssistant({
       const err = e as Record<string, unknown>;
       if (err?.code === 'ERR_AI_RATE_LIMIT') {
         setRateLimited(true);
-        setError('You\'ve reached your free monthly limit (50 Copilot requests). Your limit resets next month.');
+        setError('You\'ve reached your free monthly limit. Your limit resets next month.');
       } else {
         setError(formatError(e));
       }
@@ -238,7 +238,7 @@ export function AiAssistant({
                 Connect with GitHub
               </button>
               <p className="text-xs text-muted-foreground">
-                Free — 50 diagnostic chats/month
+                Free — very limited usage per month
               </p>
               <div className="flex w-full items-center gap-2 px-8 py-2">
                 <div className="h-px flex-1 bg-border" />
@@ -332,7 +332,7 @@ export function AiAssistant({
         <div className="border-b border-border px-4 py-2">
           <p className="text-[11px] text-muted-foreground">
             Your crash data is sent to GitHub Copilot for analysis.
-            Free tier: 50 diagnostic chats per month.
+            Free tier: limited usage per month.
           </p>
         </div>
       )}
@@ -405,7 +405,7 @@ export function AiAssistant({
         <div className="border-t border-border px-4 py-3">
           <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-4 py-3">
             <p className="text-sm text-amber-600 dark:text-amber-400">
-              You've reached your free monthly limit (50 Copilot requests).
+              You've reached your free monthly limit.
               Your limit resets next month.
             </p>
           </div>
