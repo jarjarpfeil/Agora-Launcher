@@ -194,10 +194,11 @@ test('category lists follow the selected content type', async ({ page }) => {
   const initial = await openBrowse(page);
   await resolveCall(page, initial, { items: [], total: 0, page: 0, hasMore: false });
 
+  // Default content type is 'mod' — only mod categories are shown initially.
   await expect(page.getByRole('button', { name: 'Technology', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Kitchen Sink', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Kitchen Sink', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Adventure', exact: true })).toHaveCount(1);
-  await expect(page.getByRole('button', { name: 'Minigame', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Minigame', exact: true })).toHaveCount(0);
 
   await page.getByLabel('Content type').selectOption('pack');
 

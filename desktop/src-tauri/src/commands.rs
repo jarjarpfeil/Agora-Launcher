@@ -4914,7 +4914,7 @@ pub async fn open_instance_folder(
 
 #[tauri::command]
 pub async fn reveal_path(path: String) -> Result<(), String> {
-    reveal_in_explorer(&std::path::Path::new(&path))
+    reveal_in_explorer(std::path::Path::new(&path))
 }
 
 fn open_path_in_explorer(path: &std::path::Path) -> Result<(), String> {

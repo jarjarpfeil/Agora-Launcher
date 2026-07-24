@@ -3,9 +3,9 @@
   "generator": "scripts/check_tauri_bindings.py",
   "limitation": "Name-presence only, not type signatures. A true generator would need a Rust proc-macro crate or TypeScript compiler plugin.",
   "summary": {
-    "registered_rust": 127,
-    "defined_rust": 127,
-    "ts_wrappers": 127,
+    "registered_rust": 130,
+    "defined_rust": 130,
+    "ts_wrappers": 130,
     "rust_only": 0,
     "ts_only": 0,
     "defined_not_registered": 0
@@ -117,6 +117,7 @@
       "msa_login",
       "msa_logout",
       "msa_refresh",
+      "open_instance_folder",
       "pick_open_file",
       "query_launch_state",
       "read_crash_log_cmd",
@@ -128,6 +129,7 @@
       "report_still_crashing",
       "resolve_install_plan",
       "restore_snapshot",
+      "reveal_path",
       "revert_instance",
       "search_modrinth",
       "set_mcp_approval",
@@ -138,6 +140,7 @@
       "triage_crash_report",
       "unlock_instance",
       "update_instance_java",
+      "update_instance_jvm",
       "verify_lockfile"
     ],
     "defined": [
@@ -246,6 +249,7 @@
       "msa_login",
       "msa_logout",
       "msa_refresh",
+      "open_instance_folder",
       "pick_open_file",
       "query_launch_state",
       "read_crash_log_cmd",
@@ -257,6 +261,7 @@
       "report_still_crashing",
       "resolve_install_plan",
       "restore_snapshot",
+      "reveal_path",
       "revert_instance",
       "search_modrinth",
       "set_mcp_approval",
@@ -267,6 +272,7 @@
       "triage_crash_report",
       "unlock_instance",
       "update_instance_java",
+      "update_instance_jvm",
       "verify_lockfile"
     ],
     "ts_wrappers": [
@@ -375,6 +381,7 @@
       "msa_login",
       "msa_logout",
       "msa_refresh",
+      "open_instance_folder",
       "pick_open_file",
       "query_launch_state",
       "read_crash_log_cmd",
@@ -386,6 +393,7 @@
       "report_still_crashing",
       "resolve_install_plan",
       "restore_snapshot",
+      "reveal_path",
       "revert_instance",
       "search_modrinth",
       "set_mcp_approval",
@@ -396,6 +404,7 @@
       "triage_crash_report",
       "unlock_instance",
       "update_instance_java",
+      "update_instance_jvm",
       "verify_lockfile"
     ],
     "missing_ts_wrapper": [],
