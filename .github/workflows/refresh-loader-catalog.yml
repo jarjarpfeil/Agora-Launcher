@@ -55,8 +55,6 @@ jobs:
             --refresh-report "${RUNNER_TEMP}/loader-refresh-report.json" \
             --append-only \
             --reject-existing-mutations \
-            --max-new-entries 50 \
-            --max-changed-lines 500 \
             --report "${RUNNER_TEMP}/loader-delta-report.json"
 
       - name: Validate compiled registry
